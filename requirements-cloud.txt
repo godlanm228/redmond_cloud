@@ -1,0 +1,22 @@
+# Lite-зависимости для облачного режима (VPS / Oracle Cloud Free Tier).
+# Без torch / whisper / sentence-transformers / faiss / edge-tts / pygame.
+# MemoryStore работает в SQLite-only режиме, ResponseGenerator — только Groq/Gemini.
+
+# Web / APIs / LLM provider
+requests>=2.31.0
+groq>=0.11.0
+google-genai>=0.3.0
+
+# Telegram
+python-telegram-bot>=20.0
+
+# Config
+pydantic>=2.5.0
+python-dotenv>=1.0.0
+jsonschema>=4.24.0
+
+# Scheduling (workflows)
+APScheduler>=3.10.0
+
+# DuckDuckGo fallback for web search
+ddgs>=4.0.0

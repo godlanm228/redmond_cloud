@@ -1,0 +1,59 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+
+# Secrets and local config
+.env
+.env.local
+config/config.local.json
+
+# Runtime data
+data/*.sqlite
+data/*.faiss
+data/sensitive/
+data/sensitive_restored/
+
+# Personal owner data — mutated by Iris (update_profile, diary, goals) at runtime.
+# Lives only on dev machine and VM. Never push to git, even private repo.
+config/owner_profile.json
+data/owner_dossier.md
+data/coach/
+data/daily_log.md
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+logs/
+
+# Models / large binaries
+*.bin
+*.gguf
+*.pt
+*.safetensors

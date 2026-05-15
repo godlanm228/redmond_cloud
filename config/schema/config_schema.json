@@ -1,0 +1,55 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Redmond Configuration Schema",
+  "type": "object",
+  "properties": {
+    "host": {"type": "string", "format": "ipv4", "default": "127.0.0.1"},
+    "port": {"type": "integer", "minimum": 1, "maximum": 65535, "default": 8000},
+    "debug": {"type": "boolean", "default": false},
+    "data_dir": {"type": "string", "minLength": 1},
+    "plugin_dir": {"type": "string", "minLength": 1},
+    "max_workers": {"type": "integer", "minimum": 1, "maximum": 32},
+
+    "llm_provider_order": {
+      "type": "array",
+      "items": {"type": "string", "enum": ["groq", "ollama", "gemini", "transformers"]}
+    },
+    "llm_endpoint": {"type": "string", "format": "uri"},
+    "llm_model_path": {"type": "string", "minLength": 1},
+    "groq_api_key": {"type": "string"},
+    "groq_model": {"type": "string"},
+    "groq_fallback_model": {"type": "string"},
+    "groq_api_base": {"type": "string", "format": "uri"},
+    "ollama_base_url": {"type": "string", "format": "uri"},
+    "ollama_model": {"type": "string"},
+    "gemini_api_key": {"type": "string"},
+    "gemini_model": {"type": "string"},
+
+    "asr_engine": {"type": "string", "enum": ["whisper", "vosk", "google"]},
+    "whisper_device": {"type": "string", "enum": ["cpu", "cuda", ""]},
+    "whisper_model_size": {"type": "string", "enum": ["tiny", "base", "small", "medium", "large"]},
+    "tts_engine": {"type": "string", "enum": ["edge-tts", "pyttsx3", "console", "gTTS", "azure"]},
+    "edge_tts_voice": {"type": "string"},
+    "edge_tts_rate": {"type": "string"},
+
+    "google_api_key": {"type": "string"},
+    "google_search_engine_id": {"type": "string"},
+    "google_search_daily_limit": {"type": "integer", "minimum": 1, "default": 100},
+
+    "basic_password": {"type": "string"},
+    "super_password": {"type": "string"},
+    "supergoals_file": {"type": "string"},
+    "personality_profile": {"type": "string"},
+    "owner_profile": {"type": "string"},
+    "baseline_db_path": {"type": "string"},
+    "max_memory_records": {"type": "integer", "minimum": 100, "default": 50000},
+
+    "log_level": {"type": "string", "enum": ["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"]},
+    "idle_timeout_sec": {"type": "integer", "minimum": 10, "default": 300},
+    "max_history": {"type": "integer", "minimum": 1, "default": 6},
+    "top_k": {"type": "integer", "minimum": 1, "default": 3},
+    "search_timeout_sec": {"type": "integer", "minimum": 1, "default": 10}
+  },
+  "required": ["host", "port", "data_dir", "plugin_dir", "max_workers"],
+  "additionalProperties": false
+}
