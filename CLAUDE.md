@@ -18,15 +18,28 @@ Multi-agent Telegram-хаб на Oracle Cloud Free VM (`203.0.113.10`). 4 бот
 
 Fallback при rate_limit / tool_use_failed: `qwen/qwen3-32b`.
 
-## Структура local vs VM
+## Структура
 
-| | Local (`redmond_cloud/`) | VM (`~/redmond-hub/`) |
-|---|---|---|
-| Layout | Всё в корне (`cloud_main_v2.py`, `config/`, `core/`, ...) | Слоистый: `.env` в корне, остальное в `app/` |
-| `.env` source of truth | `.env.example` (template) | **Корневой `~/redmond-hub/.env`** (НЕ `app/.env`) |
-| Entrypoint | `cloud_main_v2.py` (в корне) | `app/cloud_main_v2.py` |
+Local repo (`redmond_cloud/`) и VM (`~/redmond-hub/`) — **идентичная flat layout** (унифицировано 2026-05-16 в Фазе 3 миграции).
 
-Расхождение в layout — артефакт scp-deploy. Унификация — Фаза 3 (git pull deploy).
+```
+redmond-hub/
+├── .env              ← runtime (gitignored), source of truth
+├── .env.example
+├── cloud_main_v2.py  ← единственный entry point
+├── config/           ← config.py, config.json, owner_profile.json (gitignored), ...
+├── core/             ← dispatcher, coordinator, multi_bot_runner
+├── data/             ← memory.sqlite, search_usage.sqlite, coach/, owner_dossier.md
+├── handlers/
+├── logic/
+├── safety/
+├── utils/
+├── hooks/
+├── venv/             ← gitignored
+└── requirements-cloud.txt
+```
+
+Никаких `app/` подпапок. Никаких legacy entry points. Дерево на VM = `git clone github.com/godlanm228/redmond_cloud` + восстановление gitignored runtime (.env, venv, data/, config/owner_profile.json).
 
 ## Ключевые файлы
 
@@ -50,7 +63,7 @@ Fallback при rate_limit / tool_use_failed: `qwen/qwen3-32b`.
 - DM → one-time multilingual notice + silent.
 - **Паролей нет.** `basic_password` / `super_password` / `AuthManager` снесены в Фазе 1 чистки 2026-05-16. Не возвращать.
 
-## Env vars (живут в корневом `~/redmond-hub/.env` на VM)
+## Env vars (`~/redmond-hub/.env` на VM, не коммитится)
 
 ```
 TELEGRAM_BOT_TOKEN, IRIS_BOT_TOKEN, CIPHER_BOT_TOKEN, NEWSER_BOT_TOKEN
@@ -63,29 +76,39 @@ REDMOND_GOOGLE_API_KEY, REDMOND_GOOGLE_SEARCH_ENGINE_ID
 
 Template — `.env.example`.
 
-## Deploy на VM (текущий — Фаза 3 заменит на git pull)
+## Deploy на VM — через git pull (с 2026-05-16)
+
+**Workflow:**
+
+1. Локально: правка → `git commit` → `git push origin main`.
+2. На VM: `cd ~/redmond-hub && git pull` → рестарт v2.
+
+**НЕ использовать `scp`** для деплоя кода. Только git. Исключение — заливка ключей в `.env` (одноразово) или больших не-git артефактов.
 
 ```bash
 # SSH
 ssh -i "C:/Users/Vlad/Downloads/oracle-key.key" ubuntu@203.0.113.10
 
-# Залить файл (scp поверх — временно, до git deploy)
-scp -i "C:/Users/Vlad/Downloads/oracle-key.key" PATH ubuntu@203.0.113.10:~/redmond-hub/app/PATH
-
-# Рестарт (manual nohup, systemd ещё не обновлён под v2)
-ssh -i "..." ubuntu@203.0.113.10 "pkill -f cloud_main_v2"
-ssh -i "..." ubuntu@203.0.113.10 \
-  "cd ~/redmond-hub && set -a && . .env && set +a && \
-   nohup ./venv/bin/python app/cloud_main_v2.py > /tmp/v2.log 2>&1 & disown"
+# Подтянуть изменения и рестартануть
+ssh -i "..." ubuntu@203.0.113.10 "cd ~/redmond-hub && git pull && pkill -f cloud_main_v2; sleep 2; \
+   set -a && . .env && set +a && \
+   nohup ./venv/bin/python cloud_main_v2.py > /tmp/v2.log 2>&1 & disown"
 
 # Логи
 ssh -i "..." ubuntu@203.0.113.10 "tail -50 /tmp/v2.log"
 ```
 
-**Важно (из глобального CLAUDE.md):**
-- Не scp `.bak` файлы и не оставлять их на VM.
-- После любой заливки — sweep на VM (`ls ~/redmond-hub` + `ls ~/redmond-hub/app/`) на предмет дублей entrypoint и забытых файлов. **Не только в локальном repo.**
-- При cutover (замена файла): сначала `rm` старого на VM, потом scp нового. Не лить поверх.
+**Github SSH:** VM имеет deploy key (`~/.ssh/github_deploy` + `~/.ssh/config` маппит github.com на этот ключ). Read-only. Добавлен в `repo Settings → Deploy keys → "Oracle VM redmond-hub"`.
+
+**Что НЕ коммитится (gitignored, живёт только на VM):**
+- `.env` — секреты
+- `venv/` — Python venv
+- `data/` — runtime SQLite + JSON storage (memory, coach goals/diary, search usage, owner_dossier)
+- `config/owner_profile.json` — мутируется Iris в runtime
+
+При первичной инициализации VM или восстановлении из backup — эти файлы перенести руками поверх `git clone`.
+
+**TODO (не критично):** systemd unit для автостарта вместо ручного nohup.
 
 ## Правила поведения LLM (НЕ хардкодить в код — это для меня)
 
