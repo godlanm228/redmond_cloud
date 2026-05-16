@@ -194,10 +194,22 @@ def load_personality_profile(profile_path: Optional[Union[Path, str]] = None) ->
 
 
 def load_owner_profile(profile_path: Optional[Union[Path, str]] = None) -> Dict[str, Any]:
-    """Загружает профиль владельца (имя, тайм-зона, факты)."""
+    """
+    Загружает профиль владельца.
+    v2 schema: {core, current, historical, principles, communication_preferences}.
+    Legacy v1 keys (name/timezone/preferences) — оставлены для совместимости,
+    но Redmond/Iris v2 prompts ждут v2-схему.
+    """
     file = Path(profile_path) if profile_path else Path(__file__).parent / 'owner_profile.json'
 
     default = {
+        # v2 ожидаемые ключи (пустые, чтобы _compact_owner_facts не падал)
+        "core": {},
+        "current": {},
+        "historical": [],
+        "principles": [],
+        "communication_preferences": {},
+        # legacy v1
         "name": "",
         "timezone": "UTC",
         "preferences": {"language": "ru"},
@@ -207,12 +219,23 @@ def load_owner_profile(profile_path: Optional[Union[Path, str]] = None) -> Dict[
     }
 
     if not file.exists():
+        logger.warning(
+            "owner_profile.json не найден — используется пустой default. "
+            "Iris/Redmond не будут знать владельца. Создай файл с v2-схемой."
+        )
         return default
 
     try:
         data = json.loads(file.read_text(encoding='utf-8'))
         profile = default.copy()
         profile.update({k: v for k, v in data.items() if not k.startswith("_")})
+
+        # Sanity check — v2 keys должны быть непустыми, иначе тихий drift
+        if not (profile.get("core") or profile.get("current")):
+            logger.warning(
+                "owner_profile.json загружен, но v2-ключи (core/current) пустые. "
+                "Возможно legacy v1 schema. Iris/Redmond outputs без личного контекста."
+            )
         return profile
     except json.JSONDecodeError as e:
         logger.warning(f"Invalid JSON in owner profile, using defaults: {e}")

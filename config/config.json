@@ -5,7 +5,7 @@
   "plugin_dir": "plugins",
   "max_workers": 4,
 
-  "llm_provider_order": ["groq", "gemini", "transformers"],
+  "llm_provider_order": ["groq"],
   "llm_endpoint": "http://localhost:8001",
   "llm_model_path": "EleutherAI/gpt-neo-1.3B",
 

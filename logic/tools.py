@@ -612,12 +612,10 @@ def _tool_get_current_time() -> str:
 # Парсим по номеру раздела, а не по русскому названию, чтобы не зависеть
 # от формулировок.
 _DOSSIER_SECTION_MAP: Dict[str, Tuple[str, ...]] = {
-    "core": ("01",),           # Профиль и портфель
+    "core": ("01",),           # Профиль и портфель (имя/языки/проекты)
     "strengths": ("02",),      # Сильные стороны
-    "thinking": ("04",),       # Стиль мышления
-    "directives": ("06",),     # Рекомендованные директивы
-    # 03 (слабые) и 05 (нагрузка) намеренно НЕ выдаются по умолчанию —
-    # владелец просил не муссировать тему усталости.
+    "thinking": ("03",),       # Стиль работы / коммуникации
+    "directives": ("04",),     # Рекомендованные директивы для AI-агентов
 }
 
 
@@ -625,7 +623,6 @@ def _tool_read_dossier_section(section: str) -> str:
     """
     Возвращает указанный раздел досье.
     section ∈ {core, strengths, thinking, directives, all}.
-    Если 'all' — возвращает целый файл (без секций 03/05).
     """
     section = (section or "core").strip().lower()
     text = _read_dossier_raw()
@@ -633,8 +630,7 @@ def _tool_read_dossier_section(section: str) -> str:
         return "Досье не найдено."
 
     if section == "all":
-        # Удалить только разделы 03 и 05 — остальное всё (включая шапку с дисклеймером)
-        return _filter_dossier(text, exclude_section_ids=("03", "05"))
+        return text
 
     ids = _DOSSIER_SECTION_MAP.get(section)
     if not ids:

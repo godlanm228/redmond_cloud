@@ -62,11 +62,41 @@ DEFAULT_PERSONA = {
     },
 }
 
-JOKES = [
-    "Почему Python программисты предпочитают тёмную тему? Свет притягивает баги.",
-    "Сколько программистов нужно, чтобы поменять лампочку? Ни одного — это проблема железа.",
-    "В чём разница между железом и софтом? Железо — это то, что можно пнуть, когда софт не работает.",
-]
+# JOKES перенесены в handlers/fun.py — единственный источник правды.
+# Импортируем оттуда для legacy fallback.
+
+
+# Tools которые меняют состояние — для safety-net когда LLM не выдаёт
+# финальный текст после успешных вызовов (характерно для Qwen 3 после tool calls).
+_STATE_CHANGING_TOOLS = frozenset({
+    "update_profile",
+    "add_goal", "mark_goal_done",
+    "add_deadline",
+    "add_diary_entry",
+})
+
+_TOOL_HUMAN_LABEL = {
+    "update_profile": "обновила профиль",
+    "add_goal": "записала цель",
+    "mark_goal_done": "закрыла цель",
+    "add_deadline": "поставила дедлайн",
+    "add_diary_entry": "записала в дневник",
+}
+
+
+def _summarize_actions(tool_names: List[str]) -> str:
+    """
+    Краткое summary совершённых действий — используется когда LLM
+    не выдала текст после успешных tool calls. Безопаснее чем None
+    (handler не упадёт в generic "Понял уточните").
+    """
+    from collections import Counter
+    counts = Counter(tool_names)
+    parts = []
+    for name, n in counts.items():
+        label = _TOOL_HUMAN_LABEL.get(name, name)
+        parts.append(f"{label}" + (f" ×{n}" if n > 1 else ""))
+    return "Готово: " + ", ".join(parts) + "."
 
 
 @dataclass
@@ -85,45 +115,6 @@ class GenerationContext:
     # Какой агент отвечает (None = Redmond по умолчанию).
     # Влияет на system_prompt и набор доступных tools.
     agent: Any = None
-
-
-# Tools для function calling — Llama сама решает когда вызвать
-GROQ_TOOLS = [
-    {
-        "type": "function",
-        "function": {
-            "name": "web_search",
-            "description": (
-                "Поиск актуальной информации в интернете. Используй для вопросов про "
-                "погоду, курсы валют, новости, цены, актуальные события, неизвестные тебе "
-                "факты. Возвращает заголовки и сниппеты с указанием источника (Google или DuckDuckGo)."
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "query": {
-                        "type": "string",
-                        "description": "Поисковый запрос на любом языке",
-                    },
-                    "top_k": {
-                        "type": "integer",
-                        "description": "Количество результатов (1-5)",
-                        "default": 3,
-                    },
-                },
-                "required": ["query"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "get_current_time",
-            "description": "Текущая дата и время в формате ISO.",
-            "parameters": {"type": "object", "properties": {}},
-        },
-    },
-]
 
 
 if TRANSFORMERS_AVAILABLE:
@@ -182,10 +173,13 @@ class ResponseGenerator:
         self.mem: Optional[MemoryStore] = None
         self.searcher: Optional[WebSearcher] = None
 
-        # Состояние
-        self.history: List[Dict[str, str]] = []
+        # Состояние — per-chat, чтобы контекст Iris/Newser/Redmond не смешивался
+        # в multi-bot режиме где приходят сообщения параллельно от разных chat_id.
+        # Dict[chat_id → история]. chat_id = 0 для legacy home-режима без TG.
+        self.history_by_chat: Dict[int, List[Dict[str, str]]] = {}
         self.max_history = getattr(self.config, "max_history", 6)
         self.top_k = getattr(self.config, "top_k", 3)
+        # Prompt-cache (keyed by hash(user_text)) — глобальный, не зависит от chat
         self._prompt_cache: Dict[int, Dict[str, Any]] = {}
         self.last_response: str = ""
 
@@ -263,26 +257,33 @@ class ResponseGenerator:
         user_text: str,
         user_role: str = "guest",
         agent=None,
+        chat_id: int = 0,
     ) -> str:
+        """
+        Stateless по entry-point — все per-chat данные ходят через chat_id.
+        chat_id=0 — fallback для legacy/тестов без TG.
+        """
         from logic.agents import default_agent
         if agent is None:
             agent = default_agent()
+
+        # Per-chat история (изолирует контексты Iris/Newser/Redmond в multi-bot)
+        chat_history = self.history_by_chat.setdefault(chat_id, [])
 
         ctx = GenerationContext(
             intent=intent,
             user_text=user_text,
             user_role=user_role,
-            history=self.history[-self.max_history:],
+            history=chat_history[-self.max_history:],
             rg=self,
             agent=agent,
         )
 
         try:
-            # Сначала пробуем зарегистрированный handler (handlers/*.py)
             from handlers import run_handler
             response = run_handler(intent.name, ctx)
             if response:
-                self._save_interaction(user_text, response)
+                self._save_interaction(user_text, response, chat_id)
                 self.last_response = response
                 return response
 
@@ -294,7 +295,7 @@ class ResponseGenerator:
                 response = self._generate_fallback(ctx)
 
             response = self._postprocess(response, ctx)
-            self._save_interaction(user_text, response)
+            self._save_interaction(user_text, response, chat_id)
             self.last_response = response
             return response
         except Exception:
@@ -318,38 +319,10 @@ class ResponseGenerator:
         # Router сам формулирует query с учётом контекста — если владелец
         # живёт в Эссене и спрашивает «какая погода», query будет
         # «погода Эссен сегодня», а не сырой текст.
-        if self.searcher is not None and ctx.intent.name in ("chat", "question", "search"):
-            query = self._route_search_query(ctx)
-            if query:
-                try:
-                    results, source = self.searcher.search(query, top_k=3)
-                    ctx.search_results = results
-                    ctx.search_source = source
-                except Exception as e:
-                    logger.debug("Search error: %s", e)
-
+        # v2: pre-search router удалён — основной LLM сам вызывает web_search через tool calling
+        # когда действительно нужно. Раньше тут был отдельный llama-3.1-8b вызов + поиск
+        # перед основным LLM call, что давало ложные срабатывания и лишнюю latency.
         return ctx
-
-    def _route_search_query(self, ctx: GenerationContext) -> str:
-        """
-        Спрашиваем LLM: нужен ли web-поиск? Если да — сформулируй query.
-        Возвращает поисковую строку или пустую строку (поиск не нужен).
-        """
-        api_key = getattr(self.config, "groq_api_key", "")
-        if not api_key:
-            return ""
-
-        # v2: pre-search router отключён.
-        # Раньше до основного LLM делался отдельный 8b-вызов + web_search,
-        # чтобы вложить результаты в prompt. С работающим tool-calling это
-        # дублирование: основной LLM сам вызовет web_search через tool когда
-        # действительно нужно. Отключение экономит:
-        #   - один LLM-call (llama-3.1-8b) на каждый запрос
-        #   - 1-3 секунды latency
-        #   - ложные срабатывания (видел "Эссен" → решил это про погоду)
-        # Если когда-то понадобится preflight search — лучше делать его
-        # ТОЛЬКО для определённых intent'ов (weather, news), а не как универсальный шаг.
-        return ""
 
     # ---------- провайдеры LLM ----------
 
@@ -418,6 +391,9 @@ class ResponseGenerator:
         # Per-conversation cache: какие секции досье уже отдавали в этой генерации.
         # Защищает от повторных read_dossier_section, которые сжигают TPM.
         dossier_returned: set = set()
+        # Tracker успешно выполненных tool calls — для safety-net когда LLM
+        # «молчит» после tools (Qwen 3 часто так делает).
+        successful_tool_calls: List[str] = []
 
         # Tool-loop: максимум 5 итераций (модель → tools → модель → ...)
         for hop in range(5):
@@ -443,7 +419,16 @@ class ResponseGenerator:
 
             if not tool_calls:
                 content = (msg.get("content") or "").strip()
-                return content or None
+                if content:
+                    return content
+                # LLM молчит. Safety net: если в этой генерации уже были
+                # успешные tool calls (например update_profile / add_goal /
+                # mark_goal_done), сгенерируем краткое резюме вместо None.
+                # Без этого handler выдаст generic "Понял уточните" что
+                # вводит в заблуждение — действия-то совершились.
+                if successful_tool_calls:
+                    return _summarize_actions(successful_tool_calls)
+                return None
 
             # Модель просит tools — выполняем
             messages.append({
@@ -483,8 +468,13 @@ class ResponseGenerator:
                     "name": fn_name,
                     "content": result,
                 })
+                # Учитываем только tools которые меняют состояние (для safety net)
+                if fn_name in _STATE_CHANGING_TOOLS:
+                    successful_tool_calls.append(fn_name)
 
         logger.warning("Groq tool-loop hit limit (5 hops)")
+        if successful_tool_calls:
+            return _summarize_actions(successful_tool_calls)
         return None
 
     def _groq_chat(self, api_key: str, model: str, messages: list, tools: list) -> Optional[dict]:
@@ -522,31 +512,8 @@ class ResponseGenerator:
             logger.warning("Groq chat call failed: %s", e)
             return None
 
-    def _execute_tool(self, name: str, args: dict, ctx: GenerationContext) -> str:
-        """Выполнить вызванный моделью tool. Возвращает строку для tool-response."""
-        logger.info("Tool call: %s(%s)", name, args)
-
-        if name == "web_search":
-            query = args.get("query", "")
-            top_k = int(args.get("top_k", 3))
-            if not self.searcher:
-                return "Web search недоступен (searcher не инициализирован)."
-            results, source = self.searcher.search(query, top_k=top_k)
-            ctx.search_source = source  # запоминаем, чтобы пометить ответ
-            if not results:
-                return f"По запросу «{query}» ничего не найдено (источник: {source})."
-
-            lines = [f"Источник: {source}"]
-            for i, r in enumerate(results, 1):
-                lines.append(f"[{i}] {r.get('title', '')}")
-                lines.append(f"    {r.get('snippet', '')}")
-                lines.append(f"    URL: {r.get('url', '')}")
-            return "\n".join(lines)
-
-        if name == "get_current_time":
-            return datetime.now().isoformat()
-
-        return f"Неизвестный tool: {name}"
+    # _execute_tool удалён в v2 — заменён на execute_tool() из logic/tools.py
+    # (полный набор tools, единый dispatcher, agent-filter поддержка).
 
     @staticmethod
     def _safe_json_loads(s: str) -> dict:
@@ -777,8 +744,12 @@ class ResponseGenerator:
             "- Reply in the SAME language as user's last message.",
             "- Plain text + emoji. NO markdown bold (**) or headers (##).",
             "- For URLs use Markdown links [name](https://...) — Telegram will render them clickable.",
-            "- Use the read_dossier_section tool with section='core' as default. "
-            "Pull other sections only if needed. Do NOT quote dossier verbatim — it is AI interpretation.",
+            "- Owner facts are already in OWNER FACTS block below — use them directly.",
+            "- Call read_dossier_section ONLY for deep questions about character/style/strengths.",
+            "  Default section is 'core'. NEVER call it just to answer «что обо мне знаешь» — facts block has enough.",
+            "- NEVER quote dossier verbatim. Phrases like «режиссёр процесса», «бухгалтерия усталости», "
+            "  «дуга длиной в годы», «стратег-командир» are AI-literary inventions, NOT owner's words. "
+            "  Paraphrase in your own neutral voice or skip.",
             "",
             "WHEN OWNER SAYS:",
             "- «устал/выгорел» → add_diary_entry with tags=['усталость']. No consolation.",
@@ -939,7 +910,7 @@ class ResponseGenerator:
         intent_responses = {
             "greeting": "Приветствую! Чем могу помочь?",
             "weather": "Без подключения к сервису погоды актуальную информацию дать не могу.",
-            "joke": random.choice(JOKES),
+            "joke": "Без подключения к LLM шутки недоступны.",  # JOKES живёт в handlers/fun.py
             "search": self._format_search_results(ctx.search_results),
             "chat": "Понял. Уточните, что именно вас интересует?",
         }
@@ -962,7 +933,7 @@ class ResponseGenerator:
             lines.append(f"   {r.get('url', '')}")
         return "\n".join(lines)
 
-    def _save_interaction(self, user_text: str, response: str) -> None:
+    def _save_interaction(self, user_text: str, response: str, chat_id: int = 0) -> None:
         if not response:
             return
 
@@ -972,13 +943,16 @@ class ResponseGenerator:
             except Exception as e:
                 logger.debug("Failed to persist memory: %s", e)
 
-        self.history.append({
+        # Per-chat history — изоляция между chat_id (Iris не путается с Newser
+        # когда у Влада параллельно идут диалоги в разных меншенах).
+        chat_history = self.history_by_chat.setdefault(chat_id, [])
+        chat_history.append({
             "user": user_text,
             "bot": response,
             "timestamp": datetime.now().isoformat(),
         })
-        if len(self.history) > self.max_history * 2:
-            self.history = self.history[-self.max_history:]
+        if len(chat_history) > self.max_history * 2:
+            self.history_by_chat[chat_id] = chat_history[-self.max_history:]
 
         # Фоновое извлечение фактов о владельце — пока отключено (см. __init__)
         if self.fact_extractor is not None:

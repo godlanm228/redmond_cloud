@@ -1,93 +1,107 @@
-# Redmond — гид для Claude Code
+# Redmond Cloud v2 — гид для Claude Code
 
-Этот файл автоматически читается Claude Code при работе с этим репо.
-Полная история и архитектура — в `~/.claude/projects/.../memory/project_redmond.md`.
+> **Ты в CLOUD-инфре. Не PC.**
+> PC voice-версия живёт в `C:\Users\Vlad\IdeaProjects\redmond\` — это **отдельная независимая инфра**, не legacy этого репо. Изменения отсюда туда не транслируются без явного запроса. Если «Редмонд» сказано без уточнения — спросить.
 
-## TL;DR что это
+История и состояние — в memory: `project_redmond_v2_state.md` (читать первым), `project_redmond_agents.md`, `project_redmond.md` (про PC-инфру).
 
-Личный AI-ассистент Влада с **двумя режимами**:
-- **Cloud (production):** `@redmond_hub_bot` в Telegram на Oracle Cloud Free VM (`203.0.113.10`)
-- **Home (local):** голос через Whisper + edge-tts (запуск `python main.py`)
+## TL;DR
 
-**Multi-agent в Telegram:**
-- 🦞 **Redmond** — повседневный (погода, факты, поиск, болтовня)
-- 🎯 **Iris** — личный коуч (цели/дедлайны/дневник/дисциплина, женский character)
+Multi-agent Telegram-хаб на Oracle Cloud Free VM (`203.0.113.10`). 4 бота в TG-группе Redberry HUB (`chat_id=-1001234567890`), все слушают всё (Privacy OFF).
 
-Routing: smart (без префиксов работает через `llama-3.1-8b-instant`), либо явный `@redmond` / `@iris` / `@i`.
+| Бот | TG | Роль | Модель |
+|---|---|---|---|
+| 🦞 Redmond | `@redmond_hub_bot` | Listener + router + общий ассистент | Groq `gpt-oss-120b` |
+| 🎯 Iris | `@iris_redberry_bot` | Коуч/трекер (goals/diary/deadlines) | то же |
+| 📰 Newser | `@newser_redmond_bot` | Searcher + новости с источниками | то же |
+| 🧠 Cipher | `@cipher_redberry_bot` | Claude Code через Pro (stub) | subprocess |
 
-## Стек
+Fallback при rate_limit / tool_use_failed: `qwen/qwen3-32b`.
 
-- **LLM:** Groq + `openai/gpt-oss-120b` (function calling), fallback → Gemini → Transformers
-- **Router:** Groq `llama-3.1-8b-instant` (быстрый, бесплатный)
-- **TTS (home):** edge-tts `en-US-BrianMultilingualNeural`
-- **ASR (home):** Whisper `large-v3` на CUDA
-- **Memory:** SQLite + FAISS (home) / SQLite-only (cloud, 1 GB RAM)
-- **Web search:** Google CSE → DuckDuckGo fallback
-- **Weather:** wttr.in (бесплатно, без ключа)
+## Структура local vs VM
+
+| | Local (`redmond_cloud/`) | VM (`~/redmond-hub/`) |
+|---|---|---|
+| Layout | Всё в корне (`cloud_main_v2.py`, `config/`, `core/`, ...) | Слоистый: `.env` в корне, остальное в `app/` |
+| `.env` source of truth | `.env.example` (template) | **Корневой `~/redmond-hub/.env`** (НЕ `app/.env`) |
+| Entrypoint | `cloud_main_v2.py` (в корне) | `app/cloud_main_v2.py` |
+
+Расхождение в layout — артефакт scp-deploy. Унификация — Фаза 3 (git pull deploy).
 
 ## Ключевые файлы
 
 | Файл | Что |
 |---|---|
-| `cloud_main.py` | Entry для VPS — Telegram bot + router |
-| `main.py` | Entry для home — голосовой режим |
-| `core/engine.py` | RedmondEngine (home mode) |
-| `core/dispatcher.py` | Auth + safety + intent + дефолтный routing |
-| `logic/agents.py` | AgentConfig (Redmond, Iris) + триггеры |
-| `logic/agent_router.py` | Smart routing без @-меншинов |
-| `logic/response_generator.py` | LLM + function calling tool-loop |
-| `logic/tools.py` | TOOL_SCHEMAS + executors (weather/search/coach-tools) |
-| `logic/coach_storage.py` | JSON storage для целей/дневника/дедлайнов |
-| `config/personality_profile.json` | Принципы поведения Redmond v2 |
-| `config/owner_profile.json` | Структурированный профиль владельца |
-| `data/owner_dossier.md` | Полное AI-сгенерированное досье (не цитировать дословно) |
+| `cloud_main_v2.py` | **Единственный** entry point. Создаёт Dispatcher → передаёт в multi_bot_runner |
+| `core/multi_bot_runner.py` | 4 Application в asyncio.gather, shared Dispatcher + Coordinator |
+| `core/coordinator.py` | Bot registry + HTML output + typing indicator + safe chunking |
+| `core/dispatcher.py` | **Тонкая обёртка** для shared services (safety / intent_recognizer / response_generator). Auth-логики НЕТ — `AuthManager` снесён 2026-05-16, пароли не нужны (auth через Telegram whitelist). Возможен дальнейший рефактор: см. backlog «Dispatcher refactor pass» |
+| `handlers/multi_bot.py` | `_gate()` (auth по `chat.id == MAIN_CHAT_ID` + `user.id in ALLOWED_USER_IDS`), `redmond_handler` (router), `slim_agent_handler` |
+| `logic/agents.py` | AgentConfig (4 агента) + triggers + name_aliases |
+| `logic/agent_router.py` | Routing без явного @-mention (llama-3.1-8b-instant) |
+| `logic/response_generator.py` | Groq tool-loop + multi-model fallback + per-chat history |
+| `logic/tools.py` | TOOL_SCHEMAS (en) + execute_tool + source ranking |
+| `config/config.json` | Override defaults из `config.py` (например `llm_provider_order`) |
+| `config/owner_profile.json` | **gitignored** — мутируется Iris в runtime |
 
-## Деплой на VPS
+## Auth — как реально работает в v2
+
+- Бот отвечает ТОЛЬКО если `chat.id == MAIN_CHAT_ID` (Redberry HUB) И `user.id in ALLOWED_USER_IDS`.
+- DM → one-time multilingual notice + silent.
+- **Паролей нет.** `basic_password` / `super_password` / `AuthManager` снесены в Фазе 1 чистки 2026-05-16. Не возвращать.
+
+## Env vars (живут в корневом `~/redmond-hub/.env` на VM)
+
+```
+TELEGRAM_BOT_TOKEN, IRIS_BOT_TOKEN, CIPHER_BOT_TOKEN, NEWSER_BOT_TOKEN
+MAIN_CHAT_ID, ALLOWED_USER_IDS
+REDMOND_GROQ_API_KEY, REDMOND_GEMINI_API_KEY
+REDMOND_GOOGLE_API_KEY, REDMOND_GOOGLE_SEARCH_ENGINE_ID
+```
+
+Префиксированные имена с `REDMOND_` — то что реально читает `config/config.py`. Без префикса (`GROQ_API_KEY=`) — НЕ читается, не добавлять.
+
+Template — `.env.example`.
+
+## Deploy на VM (текущий — Фаза 3 заменит на git pull)
 
 ```bash
 # SSH
 ssh -i "C:/Users/Vlad/Downloads/oracle-key.key" ubuntu@203.0.113.10
 
-# Залить файлы
+# Залить файл (scp поверх — временно, до git deploy)
 scp -i "C:/Users/Vlad/Downloads/oracle-key.key" PATH ubuntu@203.0.113.10:~/redmond-hub/app/PATH
 
-# Restart service
-ssh -i "C:/Users/Vlad/Downloads/oracle-key.key" ubuntu@203.0.113.10 "sudo systemctl restart redmond-hub"
+# Рестарт (manual nohup, systemd ещё не обновлён под v2)
+ssh -i "..." ubuntu@203.0.113.10 "pkill -f cloud_main_v2"
+ssh -i "..." ubuntu@203.0.113.10 \
+  "cd ~/redmond-hub && set -a && . .env && set +a && \
+   nohup ./venv/bin/python app/cloud_main_v2.py > /tmp/v2.log 2>&1 & disown"
 
 # Логи
-ssh -i "C:/Users/Vlad/Downloads/oracle-key.key" ubuntu@203.0.113.10 "sudo journalctl -u redmond-hub -n 50 --no-pager"
+ssh -i "..." ubuntu@203.0.113.10 "tail -50 /tmp/v2.log"
 ```
 
-## Important context
+**Важно (из глобального CLAUDE.md):**
+- Не scp `.bak` файлы и не оставлять их на VM.
+- После любой заливки — sweep на VM (`ls ~/redmond-hub` + `ls ~/redmond-hub/app/`) на предмет дублей entrypoint и забытых файлов. **Не только в локальном repo.**
+- При cutover (замена файла): сначала `rm` старого на VM, потом scp нового. Не лить поверх.
 
-- **Личность Redmond ≠ Jarvis-калька.** Не использовать «сэр», «к Вашим услугам». Свой стиль.
-- **Iris женский character.** Греческая богиня-вестница. Жёсткая, без воды, не утешает.
-- **Никаких pep-talk** («Вы справитесь», «всё получится»). Влад не выносит.
-- **Не выдумывать цифры/погоду** — обязательно вызывать tools (`get_weather`, `web_search`).
-- **Не цитировать AI-литературщину** из досье («бухгалтерия усталости» и т.п.). Это не язык владельца.
-- **Не начинать ответ с «Влад, ...»** — обращение по имени только когда уместно.
-- **Длина ответа по ситуации** — короткий вопрос → одна фраза, инструкция → разворачиваться.
+## Правила поведения LLM (НЕ хардкодить в код — это для меня)
+
+- Personality v2 в `config/personality_profile.json` — стиль НЕ хардкодить в промпте.
+- Длина ответа по ситуации: короткий вопрос → одна фраза; инструкция → разворачиваться.
+- Не выдумывать факты — вызывать tools (`get_weather`, `web_search`).
+- Не цитировать AI-литературщину из owner_dossier (фразы вроде «бухгалтерия усталости»).
+- System prompts: CORE на английском (экономия токенов) + VOICE на русском.
+- Newser source ranking: trusted (Reuters/Bloomberg/Unity/GitHub) наверх, low-quality (lenta/ria/bcs-express/finam) вниз.
 
 ## Pending / TODO
 
-1. Voice messages из TG → Groq Whisper API
-2. News-агент + scheduler с утренними дайджестами
-3. Cipher — Claude Code as 3rd agent через Agent SDK + Pro
-4. rbry crypto bot интеграция (план в memory: `project_redmond_rbry_integration.md`)
-5. Google API: ждём активацию (Vorauszahlung прошла, проект-level pending)
+См. memory `project_redmond_v2_state.md` для актуального списка с приоритетами.
 
 ## Знакомство с владельцем
 
-Vladyslav Kulahin («Энди»), 25, Эссен (Германия). RU/DE(C1)/EN. ENTJ (AI-инференс).
-Проекты: rbry crypto bot (Python/Binance/FinBERT), Redmond v0.2 (этот), Billiard Club (Unity 6).
-Перегрузка: учёба + 2 работы + 3 проекта.
-
-Подробности — `config/owner_profile.json` + `data/owner_dossier.md`.
-
-## Tests
-
-```
-.venv/Scripts/python.exe -m pytest tests/
-```
-
-29/29 passed на момент 2026-05-14 до Iris/router рефакторинга. После — могут быть устаревшие, нужен прогон.
+Vladyslav Kulahin («Энди»), 25, родом из Киева, живёт в Эссене. RU/UA(native)/DE(C1)/EN.
+3 активных проекта: rbry crypto bot, Redmond Cloud (этот), Billiard Club (Unity 6).
+Подробности — `config/owner_profile.json` (gitignored) + `data/owner_dossier.md`.

@@ -151,21 +151,20 @@ async def _generate(
     agent: AgentConfig,
     user_text: str,
     context: ContextTypes.DEFAULT_TYPE,
+    chat_id: int = 0,
 ) -> str:
     """
-    Вызывает response_generator для указанного агента. Stateless,
-    параллелизация безопасна.
-
-    Cipher идёт отдельным путём через subprocess (см. _generate_cipher).
+    Вызывает response_generator для указанного агента.
+    chat_id → per-chat history (изоляция Iris/Newser/Redmond контекстов).
+    Cipher идёт через subprocess.
     """
     if agent.executor == "cipher_subprocess":
         return await _generate_cipher(user_text, context)
 
     bot_data = context.application.bot_data
     dispatcher = bot_data["dispatcher"]
-    role = "owner"  # авторизованный пользователь (проверено выше)
+    role = "owner"
 
-    # safety check
     try:
         dispatcher.safety.assert_safe(user_text)
     except Exception as e:
@@ -174,7 +173,6 @@ async def _generate(
 
     intent = dispatcher.intent_recognizer.recognize(user_text)
 
-    # response_generator.generate синхронный → выносим в thread
     try:
         response = await asyncio.to_thread(
             dispatcher.response_generator.generate,
@@ -182,6 +180,7 @@ async def _generate(
             user_text,
             role,
             agent,
+            chat_id,
         )
     except Exception:
         logger.exception("Generation failed for %s", agent.name)
@@ -260,7 +259,7 @@ async def redmond_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
     # 4. Генерация и отправка — typing indicator пока работаем
     async with coordinator.typing(agent.name, chat_id):
-        response = await _generate(agent, clean_text, context)
+        response = await _generate(agent, clean_text, context, chat_id)
     state.add("assistant", response, agent.name)
 
     await coordinator.respond_as(agent.name, chat_id, response, agent.emoji, agent.output_format)
@@ -313,7 +312,7 @@ async def slim_agent_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
     )
 
     async with coordinator.typing(agent.name, chat_id):
-        response = await _generate(agent, clean_text, context)
+        response = await _generate(agent, clean_text, context, chat_id)
 
     # Обновляем router_states — это критично для sticky.
     # Чтобы когда Влад следом напишет без @-меншина, Redmond router увидел

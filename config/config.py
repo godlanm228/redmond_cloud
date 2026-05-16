@@ -68,10 +68,6 @@ class AppConfig(BaseModel):
     google_search_engine_id: str = Field(default="", description="env: REDMOND_GOOGLE_SEARCH_ENGINE_ID")
     google_search_daily_limit: int = Field(default=100, ge=1)
 
-    # ---------- пароли ролевой модели ----------
-    basic_password: str = Field(default="", description="env: REDMOND_BASIC_PASSWORD")
-    super_password: str = Field(default="", description="env: REDMOND_SUPER_PASSWORD")
-
     # ---------- профили и память ----------
     supergoals_file: str = Field(default="config/supergoals.json")
     personality_profile: str = Field(default="config/personality_profile.json")
@@ -120,8 +116,6 @@ class AppConfig(BaseModel):
         env_map = {
             "google_api_key": "REDMOND_GOOGLE_API_KEY",
             "google_search_engine_id": "REDMOND_GOOGLE_SEARCH_ENGINE_ID",
-            "basic_password": "REDMOND_BASIC_PASSWORD",
-            "super_password": "REDMOND_SUPER_PASSWORD",
             "groq_api_key": "REDMOND_GROQ_API_KEY",
             "gemini_api_key": "REDMOND_GEMINI_API_KEY",
         }
@@ -129,8 +123,5 @@ class AppConfig(BaseModel):
             env_val = os.environ.get(env_var)
             if env_val:
                 object.__setattr__(self, field_name, env_val)
-
-        if self.basic_password and self.super_password and self.basic_password == self.super_password:
-            raise ValueError("Basic and super passwords must be different")
 
         return self
