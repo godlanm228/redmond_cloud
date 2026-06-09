@@ -1,4 +1,4 @@
-"""
+﻿"""
 Coach storage — JSON-файлы для целей/дедлайнов/дневника.
 
 Структура:
@@ -17,6 +17,8 @@ import os
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+
+from utils.time import now_local
 
 logger = logging.getLogger(__name__)
 
@@ -77,7 +79,7 @@ def add_goal(title: str, why: str = "", target_date: Optional[str] = None) -> Di
         "why": why.strip(),
         "target_date": target_date,
         "status": "active",
-        "created": datetime.now().strftime("%Y-%m-%d"),
+        "created": now_local().strftime("%Y-%m-%d"),
         "progress_log": [],
     }
     goals.append(goal)
@@ -90,10 +92,10 @@ def mark_goal_done(goal_id: int, note: str = "") -> Optional[Dict[str, Any]]:
     for g in goals:
         if g.get("id") == goal_id:
             g["status"] = "done"
-            g["closed"] = datetime.now().strftime("%Y-%m-%d")
+            g["closed"] = now_local().strftime("%Y-%m-%d")
             if note:
                 g.setdefault("progress_log", []).append({
-                    "date": datetime.now().strftime("%Y-%m-%d"),
+                    "date": now_local().strftime("%Y-%m-%d"),
                     "note": note,
                 })
             _save_json("goals.json", goals)
@@ -109,12 +111,12 @@ def list_deadlines(upcoming_days: Optional[int] = None) -> List[Dict[str, Any]]:
     deadlines = _load_json("deadlines.json", [])
     if upcoming_days is not None:
         from datetime import timedelta
-        cutoff = datetime.now().date() + timedelta(days=upcoming_days)
+        cutoff = now_local().date() + timedelta(days=upcoming_days)
         result = []
         for d in deadlines:
             try:
                 dt = datetime.strptime(d.get("due", ""), "%Y-%m-%d").date()
-                if datetime.now().date() <= dt <= cutoff:
+                if now_local().date() <= dt <= cutoff:
                     result.append(d)
             except ValueError:
                 continue
@@ -131,7 +133,7 @@ def add_deadline(title: str, due: str, importance: str = "medium") -> Dict[str, 
         "due": due,
         "importance": importance,
         "status": "pending",
-        "created": datetime.now().strftime("%Y-%m-%d"),
+        "created": now_local().strftime("%Y-%m-%d"),
     }
     deadlines.append(deadline)
     _save_json("deadlines.json", deadlines)
@@ -146,7 +148,7 @@ def add_diary_entry(text: str, tags: Optional[List[str]] = None) -> Dict[str, An
     diary = _load_json("diary.json", [])
     entry = {
         "id": _next_id(diary),
-        "timestamp": datetime.now().isoformat(timespec="minutes"),
+        "timestamp": now_local().isoformat(timespec="minutes"),
         "text": text.strip(),
         "tags": tags or [],
     }
@@ -160,3 +162,37 @@ def read_diary(last_n: int = 10, tag: Optional[str] = None) -> List[Dict[str, An
     if tag:
         diary = [d for d in diary if tag in (d.get("tags") or [])]
     return diary[-last_n:]
+
+
+# ============================================================================
+# Presence — фиксация «проснулся» по первому сообщению дня
+# ============================================================================
+
+# Окно пробуждения: первое сообщение Влада в этом интервале считается подъёмом.
+# Сообщения 00:00–05:00 — ночные посиделки, не подъём.
+_WAKE_WINDOW = (5, 14)  # часы, [from, to)
+
+
+def log_wake_if_first() -> Optional[Dict[str, Any]]:
+    """
+    Вызывается на каждом сообщении владельца. Если это первое сообщение
+    сегодня в окне пробуждения — пишет запись в дневник (тег «сон»)
+    и возвращает её; иначе None. Идемпотентно по дате (presence.json).
+    Sync без await — в одном event loop гонки между 4 ботами нет.
+    """
+    now = now_local()
+    if not (_WAKE_WINDOW[0] <= now.hour < _WAKE_WINDOW[1]):
+        return None
+
+    presence = _load_json("presence.json", {})
+    today = now.strftime("%Y-%m-%d")
+    if presence.get("last_wake_date") == today:
+        return None
+
+    presence["last_wake_date"] = today
+    presence["wake_time"] = now.strftime("%H:%M")
+    _save_json("presence.json", presence)
+    return add_diary_entry(
+        f"Проснулся — первое сообщение в {presence['wake_time']}",
+        tags=["сон"],
+    )

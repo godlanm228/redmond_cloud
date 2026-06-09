@@ -118,6 +118,17 @@ async def _gate(
         # Если ответим — раскрываем что бот живой, плюс лишняя нагрузка.
         return False
 
+    if is_owner:
+        # Первое сообщение Влада за день (в окне 05-14) = «проснулся» → дневник.
+        # Идемпотентно по дате, поэтому 4 параллельных _gate не плодят дублей.
+        try:
+            from logic.coach_storage import log_wake_if_first
+            entry = log_wake_if_first()
+            if entry:
+                logger.info("Wake detected: %s", entry["text"])
+        except Exception:
+            logger.debug("wake detection failed", exc_info=True)
+
     main_chat = _main_chat_id()
     if main_chat is not None and chat.id != main_chat:
         # Влад (или наш бот) пишет, но НЕ в Redberry HUB.

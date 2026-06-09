@@ -85,8 +85,10 @@ TOOL_SCHEMAS = [
             "name": "get_news_headlines",
             "description": (
                 "Fresh headlines from trusted RSS feeds (BBC, The Verge, TechCrunch, "
-                "VentureBeat AI, Game Developer, CNBC). PREFER this over web_search for "
-                "generic news requests / daily digests — cheap, fast, no search engine. "
+                "VentureBeat AI, Game Developer, CNBC, CoinDesk, Cointelegraph, BBC Sport). "
+                "PREFER this over web_search for news requests / daily digests — cheap, "
+                "fast, no search engine. 'all' = grouped digest (world / markets / tech / "
+                "sport, 2 headlines each) — use for generic «что по новостям». "
                 "Use web_search only for specific topics or follow-up questions."
             ),
             "parameters": {
@@ -94,10 +96,10 @@ TOOL_SCHEMAS = [
                 "properties": {
                     "category": {
                         "type": "string",
-                        "enum": ["world", "tech", "ai", "gamedev", "finance"],
-                        "description": "News category. Default: world.",
+                        "enum": ["all", "world", "tech", "ai", "gamedev", "finance", "crypto", "sport"],
+                        "description": "News category. 'all' = grouped daily digest. Default: all.",
                     },
-                    "limit": {"type": "integer", "description": "Max headlines 3-15, default 8"},
+                    "limit": {"type": "integer", "description": "Max headlines 3-15, default 8. Ignored for 'all'."},
                 },
             },
         },
@@ -316,7 +318,7 @@ def execute_tool(name: str, args: Dict[str, Any], rg=None) -> str:
     if name == "web_search":
         return _tool_web_search(args.get("query", ""), int(args.get("top_k", 3)), rg)
     if name == "get_news_headlines":
-        return _tool_get_news_headlines(args.get("category", "world"), int(args.get("limit", 8)))
+        return _tool_get_news_headlines(args.get("category", "all"), int(args.get("limit", 8)))
     if name == "web_fetch":
         return _tool_web_fetch(args.get("url", ""))
     if name == "get_current_time":
@@ -600,7 +602,24 @@ _RSS_FEEDS: Dict[str, List[Tuple[str, str]]] = {
         ("CNBC", "https://www.cnbc.com/id/100003114/device/rss/rss.html"),
         ("BBC Business", "https://feeds.bbci.co.uk/news/business/rss.xml"),
     ],
+    "crypto": [
+        ("CoinDesk", "https://www.coindesk.com/arc/outboundfeeds/rss/"),
+        ("Cointelegraph", "https://cointelegraph.com/rss"),
+    ],
+    "sport": [
+        ("BBC Sport", "https://feeds.bbci.co.uk/sport/rss.xml"),
+    ],
 }
+
+# Секции дайджеста (category="all"): заголовок → категории-источники.
+# По 2 заголовка на секцию — компактно; подробности юзер просит по секции.
+_DIGEST_SECTIONS: List[Tuple[str, List[str]]] = [
+    ("Мир", ["world"]),
+    ("Экономика и рынки", ["finance", "crypto"]),
+    ("Tech / AI", ["tech"]),
+    ("Спорт", ["sport"]),
+]
+_DIGEST_PER_SECTION = 2
 
 
 def _parse_feed(xml_bytes: bytes, max_items: int) -> List[Tuple[str, str, str]]:
@@ -639,47 +658,72 @@ def _parse_feed(xml_bytes: bytes, max_items: int) -> List[Tuple[str, str, str]]:
     return items
 
 
-def _tool_get_news_headlines(category: str, limit: int) -> str:
-    """Заголовки из доверенных RSS — дешёвая альтернатива web_search для дайджестов."""
-    category = (category or "world").strip().lower()
-    feeds = _RSS_FEEDS.get(category)
-    if not feeds:
-        return f"Неизвестная категория: {category}. Доступны: {', '.join(_RSS_FEEDS)}."
+def _fetch_feed_items(name: str, url: str, n: int) -> List[Tuple[str, str, str]]:
+    """Скачать и распарсить один фид. Пустой список при любой ошибке."""
+    try:
+        resp = requests.get(
+            url,
+            timeout=8,
+            headers={"User-Agent": "Mozilla/5.0 (compatible; redmond-hub/1.0)"},
+        )
+        if resp.status_code != 200:
+            logger.warning("RSS %s → HTTP %s", name, resp.status_code)
+            return []
+        return _parse_feed(resp.content, n)
+    except Exception as e:
+        logger.warning("RSS %s failed: %s", name, e)
+        return []
 
-    limit = max(3, min(limit or 8, 15))
-    per_feed = max(3, limit // len(feeds) + 1)
-    blocks: List[str] = []
-    total = 0
+
+def _headlines_for_category(category: str, limit: int) -> List[str]:
+    """Строки «• title (date)\\n  URL: …» для категории, с пометкой источника."""
+    feeds = _RSS_FEEDS.get(category) or []
+    out: List[str] = []
     for name, url in feeds:
-        if total >= limit:
+        if len(out) >= limit:
             break
-        try:
-            resp = requests.get(
-                url,
-                timeout=10,
-                headers={"User-Agent": "Mozilla/5.0 (compatible; redmond-hub/1.0)"},
-            )
-            if resp.status_code != 200:
-                logger.warning("RSS %s → HTTP %s", name, resp.status_code)
-                continue
-            items = _parse_feed(resp.content, per_feed)
-        except Exception as e:
-            logger.warning("RSS %s failed: %s", name, e)
-            continue
-        if not items:
-            continue
-        lines = [f"[{name}]"]
-        for title, link, date in items:
-            if total >= limit:
-                break
+        for title, link, date in _fetch_feed_items(name, url, limit - len(out)):
             date_part = f" ({date})" if date else ""
-            lines.append(f"• {title}{date_part}\n  URL: {link}")
-            total += 1
-        blocks.append("\n".join(lines))
+            out.append(f"• {title}{date_part} — {name}\n  URL: {link}")
+            if len(out) >= limit:
+                break
+    return out
 
+
+def _digest_all() -> str:
+    """Сгруппированный дайджест: по секциям, по 2 заголовка. Один tool-вызов."""
+    blocks: List[str] = []
+    for section_title, categories in _DIGEST_SECTIONS:
+        lines: List[str] = []
+        # Для секций из двух категорий (finance+crypto) — по 1 заголовку из каждой.
+        per_cat = max(1, _DIGEST_PER_SECTION // len(categories))
+        for cat in categories:
+            lines.extend(_headlines_for_category(cat, per_cat))
+        if lines:
+            blocks.append(f"=== {section_title} ===\n" + "\n".join(lines[:_DIGEST_PER_SECTION]))
     if not blocks:
         return "RSS-ленты недоступны. Используй web_search."
-    return f"Свежие заголовки ({category}), источники доверенные:\n\n" + "\n\n".join(blocks)
+    return (
+        "Дайджест по секциям (источники доверенные). Формат ответа: жирный заголовок "
+        "секции, пункты с ссылками, в конце предложи спросить секцию подробнее.\n\n"
+        + "\n\n".join(blocks)
+    )
+
+
+def _tool_get_news_headlines(category: str, limit: int) -> str:
+    """Заголовки из доверенных RSS — дешёвая альтернатива web_search для новостей."""
+    category = (category or "all").strip().lower()
+    if category == "all":
+        return _digest_all()
+
+    if category not in _RSS_FEEDS:
+        return f"Неизвестная категория: {category}. Доступны: all, {', '.join(_RSS_FEEDS)}."
+
+    limit = max(3, min(limit or 8, 15))
+    lines = _headlines_for_category(category, limit)
+    if not lines:
+        return "RSS-ленты недоступны. Используй web_search."
+    return f"Свежие заголовки ({category}), источники доверенные:\n\n" + "\n".join(lines)
 
 
 def _tool_web_fetch(url: str) -> str:
@@ -726,12 +770,8 @@ def _extract_text(html: str) -> str:
 
 
 def _tool_get_current_time() -> str:
-    try:
-        from zoneinfo import ZoneInfo
-        now = datetime.now(ZoneInfo("Europe/Berlin"))
-    except Exception:
-        now = datetime.now()
-    return now.strftime("%Y-%m-%d %H:%M:%S %Z").strip()
+    from utils.time import now_local
+    return now_local().strftime("%Y-%m-%d %H:%M:%S %Z").strip()
 
 
 # ============================================================================
