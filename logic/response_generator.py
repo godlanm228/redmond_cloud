@@ -85,6 +85,35 @@ _TOOL_HUMAN_LABEL = {
 }
 
 
+def _clip(s: str, n: int = 300) -> str:
+    """Обрезка реплики для контекстных блоков промпта. Длинные ответы (расклады,
+    выжимки) пересылались целиком в каждом следующем запросе — жгли TPM впустую."""
+    s = s or ""
+    return s if len(s) <= n else s[:n].rstrip() + "…"
+
+
+_TOOL_COMPRESS_MARKER = "…[compressed — already processed above]"
+
+
+def _compress_tool_content(text: str, head: int = 400) -> str:
+    """
+    Сжать tool-результат, который модель уже прочитала на предыдущем хопе.
+    Без этого каждый web_fetch/web_search пересылается полностью на КАЖДОМ
+    следующем хопе — расход токенов растёт квадратично. Голову оставляем,
+    URL-строки сохраняем (нужны для цитирования в финальном ответе).
+    Идемпотентно (повторный вызов ничего не меняет).
+    """
+    if len(text) <= head or _TOOL_COMPRESS_MARKER in text:
+        return text
+    kept_urls = [
+        ln.strip() for ln in text[head:].splitlines() if ln.strip().startswith("URL:")
+    ]
+    out = text[:head].rstrip() + "\n" + _TOOL_COMPRESS_MARKER
+    if kept_urls:
+        out += "\n" + "\n".join(kept_urls[:5])
+    return out
+
+
 def _summarize_actions(tool_names: List[str]) -> str:
     """
     Краткое summary совершённых действий — используется когда LLM
@@ -454,7 +483,13 @@ class ResponseGenerator:
                     return _summarize_actions(successful_tool_calls)
                 return None
 
-            # Модель просит tools — выполняем
+            # Модель просит tools. Прошлые tool-результаты она уже прочитала
+            # на этом вызове — сжимаем их, чтобы не пересылать полные тексты
+            # на каждом следующем хопе (квадратичный расход TPM).
+            for m in messages:
+                if m.get("role") == "tool" and m.get("content"):
+                    m["content"] = _compress_tool_content(m["content"])
+
             messages.append({
                 "role": "assistant",
                 "content": msg.get("content") or "",
@@ -858,9 +893,13 @@ class ResponseGenerator:
             "",
             f"Current time: {now_str}.",
             "",
-            "ROLE: one high-quality search pass per request:",
-            "1) web_search the topic. 2) If snippets are thin, web_fetch top URLs.",
-            "3) Cross-reference facts. 4) Output bulleted summary with clickable sources.",
+            "ROLE: one high-quality pass per request.",
+            "- Generic news / daily digest («что нового», «что по новостям») → call",
+            "  get_news_headlines (trusted RSS, cheap, reliable). ONE call is usually enough:",
+            "  pick relevant items, summarize in user's language with their links.",
+            "  Do NOT chain web_search after it unless user explicitly asks to dig deeper.",
+            "- Specific topic/question → web_search; if snippets are thin, web_fetch 1-2 top URLs.",
+            "- Cross-reference facts. Output bulleted summary with clickable sources.",
             "",
             "STRICT FORMAT (must follow):",
             "- Each fact = a bullet • on its OWN line.",
@@ -922,7 +961,7 @@ class ResponseGenerator:
         if ctx.retrieved_docs:
             parts.append("[Релевантное из памяти]")
             for i, doc in enumerate(ctx.retrieved_docs[:3], 1):
-                parts.append(f"  {i}. {doc}")
+                parts.append(f"  {i}. {_clip(doc)}")
             parts.append("")
 
         if ctx.search_results:
@@ -935,8 +974,8 @@ class ResponseGenerator:
         if ctx.history:
             parts.append("[Предыдущий диалог]")
             for turn in ctx.history[-4:]:
-                parts.append(f"  Я: {turn['user']}")
-                parts.append(f"  Ты: {turn['bot']}")
+                parts.append(f"  Я: {_clip(turn['user'])}")
+                parts.append(f"  Ты: {_clip(turn['bot'])}")
             parts.append("")
 
         parts.append(ctx.user_text)

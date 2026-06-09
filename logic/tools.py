@@ -82,9 +82,32 @@ TOOL_SCHEMAS = [
     {
         "type": "function",
         "function": {
+            "name": "get_news_headlines",
+            "description": (
+                "Fresh headlines from trusted RSS feeds (BBC, The Verge, TechCrunch, "
+                "VentureBeat AI, Game Developer, CNBC). PREFER this over web_search for "
+                "generic news requests / daily digests — cheap, fast, no search engine. "
+                "Use web_search only for specific topics or follow-up questions."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "category": {
+                        "type": "string",
+                        "enum": ["world", "tech", "ai", "gamedev", "finance"],
+                        "description": "News category. Default: world.",
+                    },
+                    "limit": {"type": "integer", "description": "Max headlines 3-15, default 8"},
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "web_fetch",
             "description": (
-                "Download a webpage by URL and return cleaned text (~3000 chars). "
+                "Download a webpage by URL and return cleaned text (~1500 chars). "
                 "Use after web_search gave you a URL and you need page details."
             ),
             "parameters": {
@@ -292,6 +315,8 @@ def execute_tool(name: str, args: Dict[str, Any], rg=None) -> str:
         return _tool_get_weather(args.get("city", ""))
     if name == "web_search":
         return _tool_web_search(args.get("query", ""), int(args.get("top_k", 3)), rg)
+    if name == "get_news_headlines":
+        return _tool_get_news_headlines(args.get("category", "world"), int(args.get("limit", 8)))
     if name == "web_fetch":
         return _tool_web_fetch(args.get("url", ""))
     if name == "get_current_time":
@@ -553,6 +578,110 @@ def _tool_web_search(query: str, top_k: int, rg) -> str:
     return "\n".join(lines)
 
 
+# RSS-фиды для get_news_headlines. Только доверенные источники (tier A) —
+# поэтому stdlib-XML-парсер приемлем (фиды захардкожены, не пользовательский ввод).
+_RSS_FEEDS: Dict[str, List[Tuple[str, str]]] = {
+    "world": [
+        ("BBC World", "https://feeds.bbci.co.uk/news/world/rss.xml"),
+    ],
+    "tech": [
+        ("The Verge", "https://www.theverge.com/rss/index.xml"),
+        ("TechCrunch", "https://techcrunch.com/feed/"),
+    ],
+    "ai": [
+        ("TechCrunch AI", "https://techcrunch.com/category/artificial-intelligence/feed/"),
+        ("VentureBeat AI", "https://venturebeat.com/category/ai/feed/"),
+    ],
+    "gamedev": [
+        ("Game Developer", "https://www.gamedeveloper.com/rss.xml"),
+        ("GameFromScratch", "https://gamefromscratch.com/feed/"),
+    ],
+    "finance": [
+        ("CNBC", "https://www.cnbc.com/id/100003114/device/rss/rss.html"),
+        ("BBC Business", "https://feeds.bbci.co.uk/news/business/rss.xml"),
+    ],
+}
+
+
+def _parse_feed(xml_bytes: bytes, max_items: int) -> List[Tuple[str, str, str]]:
+    """(title, link, date) из RSS 2.0 или Atom. Stdlib ET, bytes на входе
+    (str с encoding-декларацией ET не принимает)."""
+    import xml.etree.ElementTree as ET
+    try:
+        root = ET.fromstring(xml_bytes)
+    except ET.ParseError:
+        return []
+
+    items: List[Tuple[str, str, str]] = []
+    # RSS 2.0: <item><title><link><pubDate>
+    for it in root.iter("item"):
+        title = (it.findtext("title") or "").strip()
+        link = (it.findtext("link") or "").strip()
+        date = (it.findtext("pubDate") or "").strip()[:16]  # «Tue, 10 Jun 2026»
+        if title and link:
+            items.append((title, link, date))
+        if len(items) >= max_items:
+            return items
+    if items:
+        return items
+
+    # Atom: <entry><title><link href=...><updated>
+    ns = "{http://www.w3.org/2005/Atom}"
+    for e in root.iter(f"{ns}entry"):
+        title = (e.findtext(f"{ns}title") or "").strip()
+        link_el = e.find(f"{ns}link")
+        link = (link_el.get("href") or "").strip() if link_el is not None else ""
+        date = (e.findtext(f"{ns}updated") or e.findtext(f"{ns}published") or "").strip()[:10]
+        if title and link:
+            items.append((title, link, date))
+        if len(items) >= max_items:
+            break
+    return items
+
+
+def _tool_get_news_headlines(category: str, limit: int) -> str:
+    """Заголовки из доверенных RSS — дешёвая альтернатива web_search для дайджестов."""
+    category = (category or "world").strip().lower()
+    feeds = _RSS_FEEDS.get(category)
+    if not feeds:
+        return f"Неизвестная категория: {category}. Доступны: {', '.join(_RSS_FEEDS)}."
+
+    limit = max(3, min(limit or 8, 15))
+    per_feed = max(3, limit // len(feeds) + 1)
+    blocks: List[str] = []
+    total = 0
+    for name, url in feeds:
+        if total >= limit:
+            break
+        try:
+            resp = requests.get(
+                url,
+                timeout=10,
+                headers={"User-Agent": "Mozilla/5.0 (compatible; redmond-hub/1.0)"},
+            )
+            if resp.status_code != 200:
+                logger.warning("RSS %s → HTTP %s", name, resp.status_code)
+                continue
+            items = _parse_feed(resp.content, per_feed)
+        except Exception as e:
+            logger.warning("RSS %s failed: %s", name, e)
+            continue
+        if not items:
+            continue
+        lines = [f"[{name}]"]
+        for title, link, date in items:
+            if total >= limit:
+                break
+            date_part = f" ({date})" if date else ""
+            lines.append(f"• {title}{date_part}\n  URL: {link}")
+            total += 1
+        blocks.append("\n".join(lines))
+
+    if not blocks:
+        return "RSS-ленты недоступны. Используй web_search."
+    return f"Свежие заголовки ({category}), источники доверенные:\n\n" + "\n\n".join(blocks)
+
+
 def _tool_web_fetch(url: str) -> str:
     """Скачать страницу, вытащить текст. Без тяжёлых либ — regex/bs4."""
     if not url:
@@ -572,8 +701,10 @@ def _tool_web_fetch(url: str) -> str:
             return f"HTTP {resp.status_code} — страница недоступна."
 
         text = _extract_text(resp.text)
-        if len(text) > 3000:
-            text = text[:3000] + "\n…[обрезано]"
+        # 1500, не 3000: в сырой текст попадает навигация/меню, а каждый лишний
+        # символ пересылается в Groq на каждом следующем хопе tool-loop (TPM 8K).
+        if len(text) > 1500:
+            text = text[:1500] + "\n…[обрезано]"
         return f"URL: {url}\n\n{text}"
     except Exception as e:
         logger.exception("web_fetch failed")
