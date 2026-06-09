@@ -28,10 +28,12 @@ from telegram.constants import ChatAction, ParseMode
 logger = logging.getLogger(__name__)
 
 
-# Регэкспы для очистки markdown (LLM любит **bold**, ## headers и пр.)
+# Регэкспы для markdown (LLM любит **bold**, ## headers и пр.)
 _RX_BOLD = re.compile(r"\*\*([^\*\n]+)\*\*")
 _RX_ITALIC = re.compile(r"(?<!\*)\*([^\*\n]+)\*(?!\*)")
 _RX_HEADER = re.compile(r"^#{1,6}\s+", re.MULTILINE)
+# Header с захватом текста — для конверсии в <b> (html-режим)
+_RX_HEADER_LINE = re.compile(r"^#{1,6}\s+(.+)$", re.MULTILINE)
 _RX_BACKTICK = re.compile(r"`+([^`\n]+)`+")
 # ВАЖНО: используем [ \t]* (не \s*) чтобы не съесть переносы между пунктами.
 _RX_BULLET = re.compile(r"^[ \t]*[\*\-•][ \t]+", re.MULTILINE)
@@ -56,10 +58,12 @@ def _to_html(text: str) -> str:
     """
     Для html режима:
       1. Сохраняем [text](url) как плейсхолдер
-      2. Чистим markdown-обозначения (**, *, #, `)
-      3. HTML-escape всего остального
+      2. HTML-escape всего текста
+      3. Конвертируем markdown → Telegram HTML:
+         **bold** → <b>, *italic* → <i>, `code` → <code>, ## Header → <b>
       4. Восстанавливаем плейсхолдеры как <a href="url">text</a>
       5. Голые URL → <a href="url">url</a>
+    Переносы строк НЕ трогаем — Telegram их отображает как есть.
     """
     # Шаг 1: достаём ссылки и заменяем их временным маркером.
     links: list[tuple[str, str]] = []
@@ -71,15 +75,15 @@ def _to_html(text: str) -> str:
 
     text = _RX_MD_LINK.sub(_stash, text)
 
-    # Шаг 2: чистим markdown как для plain (без замены ссылок — уже спрятаны)
-    text = _RX_HEADER.sub("", text)
-    text = _RX_BOLD.sub(r"\1", text)
-    text = _RX_ITALIC.sub(r"\1", text)
-    text = _RX_BACKTICK.sub(r"\1", text)
-    text = _RX_BULLET.sub("• ", text)
-
-    # Шаг 3: HTML escape
+    # Шаг 2: escape ДО вставки тегов, чтобы наши теги выжили
     text = html.escape(text, quote=False)
+
+    # Шаг 3: markdown → HTML-теги (Telegram рендерит <b>/<i>/<code>)
+    text = _RX_HEADER_LINE.sub(r"<b>\1</b>", text)
+    text = _RX_BOLD.sub(r"<b>\1</b>", text)
+    text = _RX_ITALIC.sub(r"<i>\1</i>", text)
+    text = _RX_BACKTICK.sub(r"<code>\1</code>", text)
+    text = _RX_BULLET.sub("• ", text)
 
     # Шаг 4: восстанавливаем ссылки как <a>
     for i, (label, url) in enumerate(links):
@@ -100,8 +104,21 @@ def _to_html(text: str) -> str:
 
 
 def _chunk(text: str, size: int = 4000):
-    for i in range(0, len(text), size):
-        yield text[i : i + size]
+    """Режем длинные сообщения по границам абзацев/строк/пробелов,
+    чтобы не разорвать HTML-тег или слово посередине."""
+    while text:
+        if len(text) <= size:
+            yield text
+            return
+        cut = text.rfind("\n\n", 0, size)
+        if cut < size // 2:
+            cut = text.rfind("\n", 0, size)
+        if cut < size // 2:
+            cut = text.rfind(" ", 0, size)
+        if cut <= 0:
+            cut = size
+        yield text[:cut].rstrip()
+        text = text[cut:].lstrip(" \n")
 
 
 class Coordinator:
