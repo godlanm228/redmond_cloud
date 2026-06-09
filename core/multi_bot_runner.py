@@ -142,12 +142,35 @@ async def run_multi_bot(dispatcher: Dispatcher) -> None:
 
     logger.info("All %d bots are listening", len(apps))
 
-    # 6. Держим живыми до cancel
+    # 6. Proactive scheduler (утренний дайджест, дедлайны, вечерний итог)
+    scheduler = None
+    main_chat_raw = os.getenv("MAIN_CHAT_ID")
+    if main_chat_raw:
+        try:
+            from core.scheduler import setup_scheduler
+            scheduler = setup_scheduler(dispatcher, coordinator, int(main_chat_raw))
+            scheduler.start()
+            logger.info(
+                "Scheduler started: %s",
+                ", ".join(j.id for j in scheduler.get_jobs()),
+            )
+        except Exception:
+            scheduler = None
+            logger.exception("Scheduler failed to start — боты работают без проактивных джоб")
+    else:
+        logger.warning("MAIN_CHAT_ID not set — scheduler disabled")
+
+    # 7. Держим живыми до cancel
     try:
         await asyncio.Event().wait()
     except (KeyboardInterrupt, asyncio.CancelledError):
         logger.info("Shutdown signal received")
     finally:
+        if scheduler is not None:
+            try:
+                scheduler.shutdown(wait=False)
+            except Exception:
+                logger.debug("Scheduler shutdown failed", exc_info=True)
         for app in reversed(apps):
             try:
                 await app.updater.stop()
