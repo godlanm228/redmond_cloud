@@ -125,7 +125,7 @@ NEWSER = AgentConfig(
     executor="groq",
     output_format="html",  # ссылки кликабельные через <a href>
     temperature=0.2,
-    allowed_tools=["web_search", "web_fetch", "get_current_time"],
+    allowed_tools=["get_news_headlines", "web_search", "web_fetch", "get_current_time"],
 )
 
 CIPHER = AgentConfig(
