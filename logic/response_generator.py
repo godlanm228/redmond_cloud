@@ -1,6 +1,7 @@
 import logging
 import os
 import random
+import re
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Dict, List, Optional
@@ -685,7 +686,9 @@ class ResponseGenerator:
             "RULES:",
             "- Never invent facts (weather, prices, dates). Call tools instead.",
             "- Reply in the SAME language as the user's last message (Russian/German/English/Ukrainian).",
-            "- Plain text + emoji. No markdown bold (**) or headers (##) — Telegram does not parse them here.",
+            "- FORMATTING: split your answer into short paragraphs separated by a BLANK line.",
+            "  Lists: one item per line (• or 1. 2. 3.). **bold** for key terms is OK (rendered).",
+            "  No ## headers, no tables.",
             "- For URLs use Markdown links [name](https://...) — they will be made clickable.",
             "- Length proportional to question. Short Q → short A. Don't pad.",
             "",
@@ -747,7 +750,8 @@ class ResponseGenerator:
             "- In Russian, use FEMININE grammatical forms — you are SHE. "
             "Say «поняла», «записала», «решила», «уверена», «довольна», «я бы». "
             "NEVER «понял», «записал», «решил», «уверен», «доволен», «я бы сделал».",
-            "- Plain text + emoji. NO markdown bold (**) or headers (##).",
+            "- FORMATTING: short paragraphs separated by a BLANK line. Lists: one item per line.",
+            "  **bold** for key terms is OK (rendered). No ## headers, no tables.",
             "- For URLs use Markdown links [name](https://...) — Telegram will render them clickable.",
             "- Owner facts are already in OWNER FACTS block below — use them directly.",
             "- Call read_dossier_section ONLY for deep questions about character/style/strengths.",
@@ -840,7 +844,7 @@ class ResponseGenerator:
             "- Translate / summarize search results into the user's language (usually Russian).",
             "  Don't dump raw English snippets when user wrote in Russian.",
             "- No journalist clichés («as reported», «according to sources»).",
-            "- No markdown bold (**), headers (##). Only • bullets and [name](url) links.",
+            "- **bold** for key terms is OK (rendered). No ## headers, no tables.",
             "- Length: 3-8 bullets typically. Don't pad.",
             "",
             "SOURCE QUALITY:",
@@ -927,7 +931,13 @@ class ResponseGenerator:
 
     @staticmethod
     def _postprocess(response: str, ctx: GenerationContext) -> str:
-        return " ".join(response.split())
+        # Нормализуем пробелы ВНУТРИ строк, но сохраняем переносы —
+        # иначе абзацы и списки LLM схлопываются в стену текста.
+        lines = [" ".join(line.split()) for line in response.split("\n")]
+        text = "\n".join(lines)
+        # 3+ пустых строк подряд → одна пустая
+        text = re.sub(r"\n{3,}", "\n\n", text)
+        return text.strip()
 
     @staticmethod
     def _format_search_results(results: List[Dict[str, str]]) -> str:
