@@ -33,6 +33,9 @@ class AgentConfig:
     allowed_tools: Optional[List[str]] = None  # None = все доступные
     name_aliases: List[str] = field(default_factory=list)  # имена без @: ["айрис", "iris"]
     output_format: str = "plain"   # "plain" | "html" — определяет parse_mode в Coordinator
+    # Температура LLM — главный рычаг различия «голосов» агентов:
+    # Newser сухой и фактологичный, Iris собранная, Redmond живой.
+    temperature: float = 0.5
 
     def _all_triggers(self) -> List[str]:
         """@-триггеры + имена-алиасы с разделителями (запятая/пробел/двоеточие).
@@ -78,6 +81,7 @@ REDMOND = AgentConfig(
     bot_username="redmond_hub_bot",
     executor="groq",
     output_format="html",
+    temperature=0.6,
     allowed_tools=None,  # все tools
 )
 
@@ -96,6 +100,7 @@ IRIS = AgentConfig(
     bot_username="iris_redberry_bot",
     executor="groq",
     output_format="html",
+    temperature=0.3,
     allowed_tools=[
         "get_current_time", "read_dossier_section", "update_profile",
         "add_goal", "list_goals", "mark_goal_done",
@@ -119,6 +124,7 @@ NEWSER = AgentConfig(
     bot_username="newser_redmond_bot",
     executor="groq",
     output_format="html",  # ссылки кликабельные через <a href>
+    temperature=0.2,
     allowed_tools=["web_search", "web_fetch", "get_current_time"],
 )
 

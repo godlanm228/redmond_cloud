@@ -396,13 +396,36 @@ class ResponseGenerator:
         # «молчит» после tools (Qwen 3 часто так делает).
         successful_tool_calls: List[str] = []
 
-        # Tool-loop: максимум 5 итераций (модель → tools → модель → ...)
-        for hop in range(5):
+        temperature = getattr(ctx.agent, "temperature", 0.5) if ctx.agent else 0.5
+
+        # Tool-loop: максимум 5 итераций (модель → tools → модель → ...).
+        # ПОСЛЕДНИЙ хоп — принудительный compose БЕЗ tools: вся нарезерченная
+        # информация уже в messages, модель обязана выдать финальный текст.
+        # Без этого лимит хопов выбрасывал весь рисёрч и юзер получал
+        # generic «уточните» — сожжённые токены впустую.
+        max_hops = 5
+        for hop in range(max_hops):
+            final_hop = hop == max_hops - 1
+            if final_hop:
+                messages.append({
+                    "role": "system",
+                    "content": (
+                        "Tool budget is exhausted — do NOT request more tools. "
+                        "Compose your final answer NOW from the data gathered above, "
+                        "in the user's language, following your FORMAT rules. "
+                        "If the data is thin, honestly say what you found and what is "
+                        "missing, and give the best link(s) you have."
+                    ),
+                })
+            hop_tools = None if final_hop else tools_for_agent
+
             # Пробуем модели по цепочке: primary, потом fallback.
             # Fallback включается при rate_limit / tool_use_failed / любой transient ошибке.
             completion = None
             for model in model_chain:
-                completion = self._groq_chat(api_key, model, messages, tools=tools_for_agent)
+                completion = self._groq_chat(
+                    api_key, model, messages, tools=hop_tools, temperature=temperature,
+                )
                 if completion is not None:
                     if model != primary_model:
                         logger.warning(
@@ -473,38 +496,50 @@ class ResponseGenerator:
                 if fn_name in _STATE_CHANGING_TOOLS:
                     successful_tool_calls.append(fn_name)
 
-        logger.warning("Groq tool-loop hit limit (5 hops)")
+        logger.warning("Groq tool-loop hit limit (%d hops)", max_hops)
         if successful_tool_calls:
             return _summarize_actions(successful_tool_calls)
         return None
 
-    def _groq_chat(self, api_key: str, model: str, messages: list, tools: list) -> Optional[dict]:
-        """Низкоуровневый chat-completion с tools. Возвращает сырой JSON ответа или None."""
+    def _groq_chat(
+        self,
+        api_key: str,
+        model: str,
+        messages: list,
+        tools: Optional[list],
+        temperature: float = 0.5,
+    ) -> Optional[dict]:
+        """Низкоуровневый chat-completion с tools. Возвращает сырой JSON ответа или None.
+        tools=None — финальный compose-вызов без tools (модель обязана дать текст)."""
         base_url = getattr(self.config, "groq_api_base", "https://api.groq.com").rstrip("/")
         try:
             if GROQ_SDK_AVAILABLE:
-                client = Groq(api_key=api_key)
-                completion = client.chat.completions.create(
+                kwargs = dict(
                     model=model,
                     messages=messages,
-                    tools=tools,
-                    tool_choice="auto",
-                    temperature=0.5,
+                    temperature=temperature,
                     max_tokens=800,
                 )
+                if tools:
+                    kwargs["tools"] = tools
+                    kwargs["tool_choice"] = "auto"
+                client = Groq(api_key=api_key)
+                completion = client.chat.completions.create(**kwargs)
                 return completion.to_dict() if hasattr(completion, "to_dict") else completion.model_dump()
 
+            payload = {
+                "model": model,
+                "messages": messages,
+                "temperature": temperature,
+                "max_tokens": 800,
+            }
+            if tools:
+                payload["tools"] = tools
+                payload["tool_choice"] = "auto"
             resp = requests.post(
                 f"{base_url}/openai/v1/chat/completions",
                 headers={"Authorization": f"Bearer {api_key}"},
-                json={
-                    "model": model,
-                    "messages": messages,
-                    "tools": tools,
-                    "tool_choice": "auto",
-                    "temperature": 0.5,
-                    "max_tokens": 800,
-                },
+                json=payload,
                 timeout=45,
             )
             resp.raise_for_status()
@@ -709,6 +744,9 @@ class ResponseGenerator:
         voice = [
             "",
             "ГОЛОС / СТИЛЬ:",
+            "  • «Живой?» / «вы живые?» / «есть кто?» = healthcheck, НЕ философский вопрос. "
+            "Ответ короткий, в духе «На связи, всё работает 🦞». "
+            "Никаких «нет, я не живой, я виртуальный помощник».",
             "  • На «ты», по-дружески, без канцелярита.",
             "  • Не начинай ответ с «Влад, …» — обращение по имени только когда уместно.",
             "  • Без pep-talk типа «у тебя всё получится». Влад этого не любит.",

@@ -1,0 +1,22 @@
+[Unit]
+Description=Redmond Hub multi-bot (cloud_main_v2)
+After=network-online.target
+Wants=network-online.target
+# 10 падений за 5 минут = стоп (защита от бесконечного restart-loop при битом конфиге)
+StartLimitIntervalSec=300
+StartLimitBurst=10
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/redmond-hub
+EnvironmentFile=/home/ubuntu/redmond-hub/.env
+ExecStart=/home/ubuntu/redmond-hub/venv/bin/python /home/ubuntu/redmond-hub/cloud_main_v2.py
+Restart=always
+RestartSec=5
+# Лог туда же, куда привычный tail (после ребута /tmp чистится — systemd пересоздаст)
+StandardOutput=append:/tmp/v2.log
+StandardError=append:/tmp/v2.log
+
+[Install]
+WantedBy=multi-user.target
