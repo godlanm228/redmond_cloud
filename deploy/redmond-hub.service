@@ -14,9 +14,11 @@ EnvironmentFile=/home/ubuntu/redmond-hub/.env
 ExecStart=/home/ubuntu/redmond-hub/venv/bin/python /home/ubuntu/redmond-hub/cloud_main_v2.py
 Restart=always
 RestartSec=5
-# Лог туда же, куда привычный tail (после ребута /tmp чистится — systemd пересоздаст)
-StandardOutput=append:/tmp/v2.log
-StandardError=append:/tmp/v2.log
+# НЕ /tmp: fs.protected_regular на Ubuntu запрещает systemd append-открытие
+# чужого файла в sticky-каталоге (ловили 209/STDOUT). Смотреть лог:
+#   tail -f ~/redmond-hub/logs/v2.log   (или journalctl -u redmond-hub -f)
+StandardOutput=append:/home/ubuntu/redmond-hub/logs/v2.log
+StandardError=append:/home/ubuntu/redmond-hub/logs/v2.log
 
 [Install]
 WantedBy=multi-user.target
