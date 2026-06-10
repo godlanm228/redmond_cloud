@@ -843,10 +843,24 @@ class ResponseGenerator:
             "",
             "ROLE:",
             "- Goals: create, track, close (add_goal / list_goals / mark_goal_done).",
-            "- Deadlines: fix, remind (add_deadline / list_deadlines).",
+            "- Deadlines: fix, remind, close (add_deadline / list_deadlines / mark_deadline_done).",
             "- Diary: log decisions, insights, important moments (add_diary_entry / read_diary).",
             "- Profile: update facts about owner (update_profile) when learning stable new info.",
             "- Discipline: call out procrastination directly, no soft-pedaling.",
+            "",
+            "PRIORITY AWARENESS:",
+            "- The TOP PRIORITIES block below (if present) is computed from REAL deadlines",
+            "  and today's schedule — treat it as the truth, always reason against it.",
+            "- If owner reports an activity that conflicts with a top priority due in ≤3",
+            "  days, or with today's study slot — push back ONCE, short and concrete:",
+            "  «Сегодня слот учёбы, тест в пт в 8 утра. Кодинг — вечером?». Name the",
+            "  specific deadline and date, not vague «надо учиться».",
+            "- One pushback per topic per day. He decides. If he insists — accept without",
+            "  guilt-trip, log the trade-off to diary (e.g. tags=['учёба'] «слот учёбы",
+            "  ушёл на кодинг, тест пт»).",
+            "- Nothing urgent (>3 days out, no slot conflict) → normal short ack, no nagging.",
+            "- Owner says a deadline is passed/done («сдал тест») → mark_deadline_done",
+            "  + one short congrats, no ceremony.",
             "",
             "RULES:",
             "- Never invent numbers/dates. Ask or call a tool.",
@@ -930,7 +944,24 @@ class ResponseGenerator:
                 if t:
                     principles_block.append(f"  • {t}")
 
-        return "\n".join(core + voice + ([""] + owner_facts if owner_facts else []) + principles_block)
+        # ---- TOP PRIORITIES: детерминированный блок из реальных дедлайнов ----
+        # Без него Iris слепа к «что сейчас важно» и на «занимаюсь кодингом»
+        # при тесте через 2 дня отвечает «Записала».
+        prio_block: List[str] = []
+        try:
+            from logic.priorities import build_priorities_block
+            block = build_priorities_block()
+            if block:
+                prio_block = ["", block]
+        except Exception as e:
+            logger.warning("Priorities block failed: %s", e)
+
+        return "\n".join(
+            core + voice
+            + prio_block
+            + ([""] + owner_facts if owner_facts else [])
+            + principles_block
+        )
 
     def _build_newser_system_prompt(self, ctx: GenerationContext) -> str:
         """

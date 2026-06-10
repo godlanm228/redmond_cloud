@@ -140,6 +140,19 @@ def add_deadline(title: str, due: str, importance: str = "medium") -> Dict[str, 
     return deadline
 
 
+def mark_deadline_done(deadline_id: int) -> Optional[Dict[str, Any]]:
+    """Закрыть дедлайн (сдал/прошло). Без этого сданный тест вечно висит
+    в TOP PRIORITIES и Iris продолжает пушить."""
+    deadlines = _load_json("deadlines.json", [])
+    for d in deadlines:
+        if d.get("id") == deadline_id:
+            d["status"] = "done"
+            d["closed"] = now_local().strftime("%Y-%m-%d")
+            _save_json("deadlines.json", deadlines)
+            return d
+    return None
+
+
 # ============================================================================
 # Diary
 # ============================================================================

@@ -16,6 +16,7 @@ from datetime import datetime, timedelta
 from typing import Optional, Tuple
 
 from logic import coach_storage
+from logic.priorities import crunch_deadline
 from logic.week_schedule import (
     HOME_STUDY_WEEKDAYS,
     STUDY_TIMETABLE,
@@ -94,7 +95,30 @@ def decide_ping() -> Optional[Tuple[str, str]]:
             "и если нет — пусть поест по-нормальному, не кофе единым."
         ))
 
-    # --- 3. Тренировка ---
+    # --- 3. Crunch: HIGH-дедлайн ≤3 дней, а учёбы за день не было ---
+    # Работает в ЛЮБОЙ день недели (горящий тест важнее правила «учёба ср/чт»).
+    crunch = crunch_deadline()
+    if (
+        crunch is not None
+        and "crunch" not in pings
+        and "study" not in pings
+        and not ({"учёба", "учеба"} & tags)
+        and now.hour >= 11
+        and (shift_start is None or now < shift_start - timedelta(hours=2))
+    ):
+        left = (crunch["_due"] - now.date()).days
+        when = (
+            "СЕГОДНЯ" if left == 0
+            else f"просрочен на {-left} дн" if left < 0
+            else f"через {left} дн ({crunch['due']})"
+        )
+        return ("crunch", (
+            f"Горящий дедлайн: «{crunch['title']}» — {when}. Записей про учёбу за день нет. "
+            f"Спроси прямо: когда сегодня сядет за подготовку — и предложи конкретный слот "
+            f"по расписанию дня. Один раз, жёстко, но без пиления."
+        ))
+
+    # --- 4. Тренировка ---
     if "спорт" not in tags and "training" not in pings:
         if shift_start is None and now.hour >= 17:
             return ("training", (
@@ -107,10 +131,11 @@ def decide_ping() -> Optional[Tuple[str, str]]:
                 f"Мягко предложи короткую треньку до работы, если есть силы. Одно сообщение, без давления."
             ))
 
-    # --- 4. Домашняя учёба (ср — вместо туториума, чт — пар нет) ---
+    # --- 5. Домашняя учёба (ср — вместо туториума, чт — пар нет) ---
     if (
         now.weekday() in HOME_STUDY_WEEKDAYS
         and "study" not in pings
+        and "crunch" not in pings  # crunch уже пинганул про учёбу — не дублируем
         and not ({"работа", "учёба", "учеба"} & tags)
         and now.hour >= 13
         and (shift_start is None or now < shift_start - timedelta(hours=2))
