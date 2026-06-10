@@ -52,6 +52,37 @@ def crunch_deadline(days: int = 3) -> Optional[Dict[str, Any]]:
     return None
 
 
+def build_day_context() -> str:
+    """DAY CONTEXT для Iris: когда проснулся, что было за день (дневник),
+    что завтра. Лечит класс проблем «план в прошлое»: модель видит реальный
+    день владельца, а не сочиняет идеальный с 09:00."""
+    now = now_local()
+    today = now.strftime("%Y-%m-%d")
+    lines = ["DAY CONTEXT (computed from real data):"]
+    lines.append(f"  Сейчас: {_DAY_NAMES[now.weekday()]} {now.strftime('%d.%m %H:%M')}")
+
+    wake = coach_storage.wake_time_today()
+    if wake:
+        lines.append(f"  Проснулся: {wake}")
+
+    entries = [e for e in coach_storage.read_diary(last_n=30)
+               if str(e.get("timestamp", "")).startswith(today)]
+    if entries:
+        lines.append("  Сегодня в дневнике:")
+        for e in entries[-8:]:
+            t = str(e.get("timestamp", ""))[11:16]
+            tags = ",".join(e.get("tags") or [])
+            text = (e.get("text") or "").replace("\n", " ")[:60]
+            lines.append(f"    {t} [{tags}] {text}")
+
+    shift = get_shift(now.date() + timedelta(days=1))
+    if shift:
+        lines.append(f"  Завтра: смена {shift['start']}–{shift['end']}")
+
+    lines.append("  ПРАВИЛО: план дня — только вперёд от «Сейчас», прошедшие часы не планировать.")
+    return "\n".join(lines)
+
+
 def build_priorities_block() -> str:
     """Блок для системного промпта Iris. Пустая строка если показывать нечего."""
     now = now_local()

@@ -234,6 +234,14 @@ def woke_today() -> bool:
     return presence.get("last_wake_date") == now_local().strftime("%Y-%m-%d")
 
 
+def wake_time_today() -> Optional[str]:
+    """«HH:MM» пробуждения, если зафиксировано сегодня."""
+    presence = _load_json("presence.json", {})
+    if presence.get("last_wake_date") == now_local().strftime("%Y-%m-%d"):
+        return presence.get("wake_time")
+    return None
+
+
 # ============================================================================
 # Day state — анти-спам для проактивных пингов (тикер)
 # ============================================================================
