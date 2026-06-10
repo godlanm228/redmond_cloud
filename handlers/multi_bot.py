@@ -323,8 +323,9 @@ async def _generate_cipher(user_text: str, context: ContextTypes.DEFAULT_TYPE) -
 
 async def redmond_photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """
-    Фото от Влада в HUB = скрин графика смен (других кейсов с картинками пока нет).
-    Groq vision разбирает смены → shifts.json → подтверждение списком в чат.
+    Фото от Влада: один vision-вызов классифицирует (смены / еда / другое) и
+    маршрутизирует. Раньше ВСЕ фото слепо парсились как график смен (фото ужина →
+    «смен не увидел»), а на «что видишь?» текстовая модель врала «не вижу картинки».
     """
     if not await _gate(update, context):
         return
@@ -343,29 +344,65 @@ async def redmond_photo_handler(update: Update, context: ContextTypes.DEFAULT_TY
     raw = bytes(await tg_file.download_as_bytearray())
     image_b64 = base64.b64encode(raw).decode()
 
-    logger.info("Photo from owner (%d KB) — parsing as shift schedule", len(raw) // 1024)
-    from logic.week_schedule import ingest_shift_screenshot
+    logger.info("Photo from owner (%d KB) — vision analyze", len(raw) // 1024)
+    from logic.vision import analyze_image
     async with coordinator.typing("Redmond", chat_id):
-        result_text, saved_n = await asyncio.to_thread(
-            ingest_shift_screenshot, image_b64, dispatcher.config.groq_api_key,
+        result = await asyncio.to_thread(
+            analyze_image, image_b64, dispatcher.config.groq_api_key,
         )
-    await coordinator.respond_as("Redmond", chat_id, result_text, "🦞", "html")
+    logger.info("Vision: type=%s, shifts=%d", result.get("type"), len(result.get("shifts") or []))
 
-    # Смены загружены → Iris сразу составляет план недели (учёба под дедлайны,
-    # треньки в лёгкие дни, 1-2 защищённых вечера). Правится потом словами.
-    if saved_n > 0:
+    if result.get("error") and not result.get("description"):
+        await coordinator.respond_as(
+            "Redmond", chat_id,
+            "Не разобрал картинку — попробуй ещё раз или опиши текстом.", "🦞", "plain",
+        )
+        return
+
+    ptype = result.get("type")
+    shifts = result.get("shifts") or []
+
+    # 1. График смен → сохранить + план недели от Iris
+    if ptype == "shift_schedule" and shifts:
+        from logic.week_schedule import save_shifts, describe_saved_shifts
+        n = await asyncio.to_thread(save_shifts, shifts)
+        await coordinator.respond_as(
+            "Redmond", chat_id, describe_saved_shifts(shifts, n), "🦞", "html",
+        )
+        if n > 0:
+            iris = agent_by_name("Iris")
+            if iris is not None:
+                plan_prompt = (
+                    "(scheduled week-plan) Влад загрузил новый график смен. Составь "
+                    "план недели по правилам WEEK PLANNING и сохрани его."
+                )
+                async with coordinator.typing(iris.name, chat_id):
+                    plan = await _generate_with_status(iris, plan_prompt, context, chat_id)
+                if plan.startswith(DELEGATION_MARKER):
+                    await _run_delegation(iris, plan[len(DELEGATION_MARKER):], context, chat_id)
+                else:
+                    await coordinator.respond_as(iris.name, chat_id, plan, iris.emoji, iris.output_format)
+        return
+
+    # 2. Еда → Iris фиксирует питание + короткая реакция (рацион, без лекций)
+    if ptype == "food":
         iris = agent_by_name("Iris")
+        desc = result.get("description") or "тарелка с едой"
         if iris is not None:
-            plan_prompt = (
-                "(scheduled week-plan) Влад загрузил новый график смен. Составь "
-                "план недели по правилам WEEK PLANNING и сохрани его."
+            prompt = (
+                f"(фото еды) Влад прислал фото своей еды: «{desc}». "
+                "Запиши в дневник (add_diary_entry tags=['питание']) что он поел, и "
+                "дай короткую тёплую реакцию в своём стиле — без лекций о диете."
             )
             async with coordinator.typing(iris.name, chat_id):
-                plan = await _generate_with_status(iris, plan_prompt, context, chat_id)
-            if plan.startswith(DELEGATION_MARKER):
-                await _run_delegation(iris, plan[len(DELEGATION_MARKER):], context, chat_id)
-            else:
-                await coordinator.respond_as(iris.name, chat_id, plan, iris.emoji, iris.output_format)
+                resp = await _generate_with_status(iris, prompt, context, chat_id)
+            if not resp.startswith(DELEGATION_MARKER):
+                await coordinator.respond_as(iris.name, chat_id, resp, iris.emoji, iris.output_format)
+        return
+
+    # 3. Что угодно ещё → Redmond описывает, что видит (без вранья «не вижу картинок»)
+    desc = result.get("description") or "Вижу картинку, но не пойму, что именно на ней."
+    await coordinator.respond_as("Redmond", chat_id, desc, "🦞", "plain")
 
 
 # ---------- Routing core (текст и голос идут одним путём) ----------

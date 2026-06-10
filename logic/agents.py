@@ -104,6 +104,7 @@ IRIS = AgentConfig(
     executor="groq",
     output_format="html",
     temperature=0.3,
+    max_tokens=1100,  # планы дня/недели обрезались на 800 посреди списка
     allowed_tools=[
         "get_current_time", "read_dossier_section", "update_profile",
         "add_goal", "list_goals", "mark_goal_done",
