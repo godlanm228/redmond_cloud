@@ -6,13 +6,13 @@ Handlers для multi-bot режима (4 параллельных Application'�
   • Каждый Application получает свой апдейт от TG (Iris-апдейт идёт в Iris-app и т.д.).
   • Redmond — главный router (если нет явного @-меншина, решает кому отвечать).
   • Iris/Cipher/Newser — slim handler: реагируют только на свой @-меншин
-    (от Влада ИЛИ от другого нашего бота — это видимое делегирование).
+    (только от Влада; делегирование агент→агент идёт in-process).
 
 Авторизация:
-  • Сообщения от Влада (user_id in ALLOWED_USER_IDS) — обрабатываем.
-  • Сообщения от наших ботов (is_bot + username из all_bot_usernames()) — обрабатываем
-    (поддержка inter-bot делегирования: Cipher пишет "@newser найди X" → Newser отвечает).
-  • Всё остальное — игнор.
+  • Обрабатываем только сообщения Влада (user_id in ALLOWED_USER_IDS) в MAIN_CHAT.
+  • Всё остальное — игнор. Telegram НЕ доставляет ботам сообщения других ботов
+    (ограничение Bot API), поэтому межагентное делегирование живёт in-process
+    (_run_delegation), а @-меншен в чате — витрина для владельца.
 """
 
 from __future__ import annotations
@@ -30,7 +30,6 @@ from logic.agents import (
     AgentConfig,
     REDMOND,
     agent_by_name,
-    all_bot_usernames,
     find_by_trigger,
 )
 from logic.agent_router import RouterState, llm_research_flag, route
@@ -56,16 +55,6 @@ def _main_chat_id() -> Optional[int]:
         return None
 
 
-_OUR_BOTS_LOWER: Optional[set] = None
-
-
-def _our_bots_lower() -> set:
-    global _OUR_BOTS_LOWER
-    if _OUR_BOTS_LOWER is None:
-        _OUR_BOTS_LOWER = {u.lower() for u in all_bot_usernames()}
-    return _OUR_BOTS_LOWER
-
-
 # ---------- авторизация ----------
 
 # Multilingual фраза при попытке использовать бота вне Redberry HUB.
@@ -84,16 +73,6 @@ def _is_from_owner(update: Update) -> bool:
     return user is not None and not user.is_bot and user.id in _allowed_user_ids()
 
 
-def _is_from_our_bot(update: Update) -> bool:
-    """True если сообщение от одного из наших ботов (inter-bot делегирование)."""
-    user = update.effective_user
-    return (
-        user is not None
-        and user.is_bot
-        and (user.username or "").lower() in _our_bots_lower()
-    )
-
-
 async def _gate(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
@@ -103,7 +82,8 @@ async def _gate(
     Возвращает True если можно обрабатывать сообщение.
 
     Правила:
-      1. Сообщение должно быть от Влада ИЛИ от нашего бота.
+      1. Сообщение должно быть от Влада (боты сообщений других ботов
+         не получают вообще — Bot API, проверять нечего).
       2. Чат должен быть MAIN_CHAT_ID (если задан в env).
       3. Если правила нарушены и это первое нарушение в этом чате —
          отправляем one-time multilingual фразу. Дальше silent.
@@ -113,33 +93,24 @@ async def _gate(
     if user is None or chat is None:
         return False
 
-    is_owner = _is_from_owner(update)
-    is_our_bot = _is_from_our_bot(update)
-    if not (is_owner or is_our_bot):
-        # Не Влад и не наш бот — silent ignore всегда (даже без one-time message).
+    if not _is_from_owner(update):
+        # Не Влад — silent ignore всегда (даже без one-time message).
         # Если ответим — раскрываем что бот живой, плюс лишняя нагрузка.
         return False
 
-    if is_owner:
-        # Первое сообщение Влада за день (в окне 05-14) = «проснулся» → дневник.
-        # Идемпотентно по дате, поэтому 4 параллельных _gate не плодят дублей.
-        try:
-            from logic.coach_storage import log_wake_if_first
-            entry = log_wake_if_first()
-            if entry:
-                logger.info("Wake detected: %s", entry["text"])
-        except Exception:
-            logger.debug("wake detection failed", exc_info=True)
+    # Первое сообщение Влада за день (в окне 05-14) = «проснулся» → дневник.
+    # Идемпотентно по дате, поэтому 4 параллельных _gate не плодят дублей.
+    try:
+        from logic.coach_storage import log_wake_if_first
+        entry = log_wake_if_first()
+        if entry:
+            logger.info("Wake detected: %s", entry["text"])
+    except Exception:
+        logger.debug("wake detection failed", exc_info=True)
 
     main_chat = _main_chat_id()
     if main_chat is not None and chat.id != main_chat:
-        # Влад (или наш бот) пишет, но НЕ в Redberry HUB.
-        # One-time multilingual ответ → дальше silent.
-        # Inter-bot сообщения (is_our_bot) НЕ должны попадать сюда —
-        # они шлются coordinator'ом строго в MAIN_CHAT. Но если попало — тоже silent.
-        if is_our_bot:
-            return False
-
+        # Влад пишет, но НЕ в Redberry HUB: one-time multilingual ответ → дальше silent.
         warned: Set[int] = context.application.bot_data.setdefault("warned_chats", set())
         if chat.id not in warned:
             warned.add(chat.id)
@@ -475,7 +446,7 @@ async def slim_agent_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
     Реагирует только на свой @-меншин. Используется для всех агентов кроме Redmond.
 
     Логика:
-      1) Авторизация (Влад или другой наш бот)
+      1) Авторизация (только Влад)
       2) Этот апдейт содержит @-меншин моего агента? Если нет — молчу
       3) Если меншин чужого агента в начале → тоже молчу (это не мне)
       4) Генерирую ответ, отправляю через coordinator (от своего токена)
