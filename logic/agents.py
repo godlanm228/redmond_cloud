@@ -109,6 +109,7 @@ IRIS = AgentConfig(
         "add_goal", "list_goals", "mark_goal_done",
         "add_diary_entry", "read_diary",
         "add_deadline", "list_deadlines",
+        "snooze_pings", "get_week_schedule",
     ],
 )
 
