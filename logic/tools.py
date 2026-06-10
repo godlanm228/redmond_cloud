@@ -268,6 +268,39 @@ TOOL_SCHEMAS = [
     {
         "type": "function",
         "function": {
+            "name": "snooze_pings",
+            "description": (
+                "Silence proactive pings (meal/training/study reminders). Call when owner "
+                "says «отстань», «не сейчас», «занят», «потом». Default 2 hours."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "hours": {"type": "number", "description": "Hours of silence, 0.5-12. Default 2."},
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_week_schedule",
+            "description": (
+                "Owner's schedule for the next days: work shifts (bar) + university classes. "
+                "Call when planning, or when owner asks «когда у меня смены/пары», or to "
+                "check if today/tomorrow is busy."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "days": {"type": "integer", "description": "How many days ahead, default 8"},
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "update_profile",
             "description": (
                 "Update config/owner_profile.json — add/remove/change a fact about owner. "
@@ -323,6 +356,13 @@ def execute_tool(name: str, args: Dict[str, Any], rg=None) -> str:
         return _tool_web_fetch(args.get("url", ""))
     if name == "get_current_time":
         return _tool_get_current_time()
+    if name == "snooze_pings":
+        from logic.coach_storage import set_snooze
+        until = set_snooze(float(args.get("hours", 2)))
+        return f"Пинги выключены до {until}."
+    if name == "get_week_schedule":
+        from logic.week_schedule import format_week
+        return format_week(int(args.get("days", 8)))
     if name == "read_dossier_section":
         return _tool_read_dossier_section(args.get("section", "core"))
     # Backward compat — старое имя tool, на случай если LLM где-то его помнит

@@ -21,7 +21,7 @@ from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandl
 
 from core.coordinator import Coordinator
 from core.dispatcher import Dispatcher
-from handlers.multi_bot import _gate, redmond_handler, slim_agent_handler
+from handlers.multi_bot import _gate, redmond_handler, redmond_photo_handler, slim_agent_handler
 from logic.agents import AGENTS, AgentConfig
 
 logger = logging.getLogger(__name__)
@@ -90,6 +90,9 @@ def _build_app(
         app.add_handler(CommandHandler("ping", cmd_ping))
         app.add_handler(CommandHandler("whoami", cmd_whoami))
         app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, redmond_handler))
+        # Скрин графика смен от Влада → vision-парсинг (только Redmond, чтобы 4 бота
+        # не обрабатывали одно фото параллельно)
+        app.add_handler(MessageHandler(filters.PHOTO, redmond_photo_handler))
     else:
         app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, slim_agent_handler))
 

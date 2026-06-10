@@ -212,6 +212,39 @@ async def _generate_cipher(user_text: str, context: ContextTypes.DEFAULT_TYPE) -
     )
 
 
+# ---------- Photo handler (скрин графика смен → расписание) ----------
+
+async def redmond_photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    Фото от Влада в HUB = скрин графика смен (других кейсов с картинками пока нет).
+    Groq vision разбирает смены → shifts.json → подтверждение списком в чат.
+    """
+    if not await _gate(update, context):
+        return
+    if not _is_from_owner(update) or not update.message or not update.message.photo:
+        return
+    chat_id = update.effective_chat.id if update.effective_chat else None
+    if chat_id is None:
+        return
+
+    coordinator = context.application.bot_data["coordinator"]
+    dispatcher = context.application.bot_data["dispatcher"]
+
+    import base64
+    photo = update.message.photo[-1]  # максимальное разрешение
+    tg_file = await photo.get_file()
+    raw = bytes(await tg_file.download_as_bytearray())
+    image_b64 = base64.b64encode(raw).decode()
+
+    logger.info("Photo from owner (%d KB) — parsing as shift schedule", len(raw) // 1024)
+    from logic.week_schedule import ingest_shift_screenshot
+    async with coordinator.typing("Redmond", chat_id):
+        result_text = await asyncio.to_thread(
+            ingest_shift_screenshot, image_b64, dispatcher.config.groq_api_key,
+        )
+    await coordinator.respond_as("Redmond", chat_id, result_text, "🦞", "html")
+
+
 # ---------- Redmond handler (с router) ----------
 
 async def redmond_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:

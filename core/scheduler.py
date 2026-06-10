@@ -94,6 +94,25 @@ async def morning_deadlines(dispatcher: Dispatcher, coordinator: Coordinator, ch
     await _generate_and_send(dispatcher, coordinator, chat_id, IRIS, prompt)
 
 
+async def day_ticker(dispatcher: Dispatcher, coordinator: Coordinator, chat_id: int) -> None:
+    """
+    Каждые 30 мин (10–23): чистый Python решает нужен ли пинг (еда/тренька/учёба
+    с учётом смен и пар), LLM зовём только при решении «да». mark_ping ДО генерации —
+    защита от дублей при медленном Groq.
+    """
+    from logic.coach_storage import mark_ping
+    from logic.pings import decide_ping
+
+    decision = decide_ping()
+    if decision is None:
+        return
+    ping_id, context_text = decision
+    mark_ping(ping_id)
+    logger.info("Day ticker: ping «%s»", ping_id)
+    prompt = f"(scheduled, пинг дня) {context_text} В твоём стиле, коротко."
+    await _generate_and_send(dispatcher, coordinator, chat_id, IRIS, prompt)
+
+
 async def evening_summary(dispatcher: Dispatcher, coordinator: Coordinator, chat_id: int) -> None:
     today = now_local().strftime("%Y-%m-%d")
     prompt = (
@@ -123,5 +142,7 @@ def setup_scheduler(
                   id="morning_deadlines", coalesce=True, misfire_grace_time=600)
     sched.add_job(evening_summary, CronTrigger(hour=22, minute=30), args=args,
                   id="evening_summary", coalesce=True, misfire_grace_time=600)
+    sched.add_job(day_ticker, CronTrigger(hour="10-22", minute="0,30"), args=args,
+                  id="day_ticker", coalesce=True, misfire_grace_time=300)
 
     return sched

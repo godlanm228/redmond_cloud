@@ -196,3 +196,52 @@ def log_wake_if_first() -> Optional[Dict[str, Any]]:
         f"Проснулся — первое сообщение в {presence['wake_time']}",
         tags=["сон"],
     )
+
+
+def woke_today() -> bool:
+    presence = _load_json("presence.json", {})
+    return presence.get("last_wake_date") == now_local().strftime("%Y-%m-%d")
+
+
+# ============================================================================
+# Day state — анти-спам для проактивных пингов (тикер)
+# ============================================================================
+
+def get_day_state() -> Dict[str, Any]:
+    """State за сегодня: какие пинги отправлены, snooze. Авто-сброс на новой дате."""
+    state = _load_json("day_state.json", {})
+    today = now_local().strftime("%Y-%m-%d")
+    if state.get("date") != today:
+        state = {"date": today, "pings": {}, "snooze_until": None}
+    return state
+
+
+def save_day_state(state: Dict[str, Any]) -> None:
+    _save_json("day_state.json", state)
+
+
+def mark_ping(ping_id: str) -> None:
+    state = get_day_state()
+    state["pings"][ping_id] = now_local().strftime("%H:%M")
+    save_day_state(state)
+
+
+def set_snooze(hours: float) -> str:
+    """Тишина пингов до (сейчас + hours). Возвращает «HH:MM» до которого молчим."""
+    from datetime import timedelta
+    hours = max(0.5, min(hours, 12.0))
+    until = now_local() + timedelta(hours=hours)
+    state = get_day_state()
+    state["snooze_until"] = until.isoformat(timespec="minutes")
+    save_day_state(state)
+    return until.strftime("%H:%M")
+
+
+def today_tags() -> set:
+    """Все теги дневника за сегодня — тикер проверяет закрыт ли слот (питание/спорт/…)."""
+    today = now_local().strftime("%Y-%m-%d")
+    tags: set = set()
+    for e in _load_json("diary.json", []):
+        if str(e.get("timestamp", "")).startswith(today):
+            tags.update(e.get("tags") or [])
+    return tags
