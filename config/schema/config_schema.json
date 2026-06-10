@@ -24,9 +24,7 @@
     "gemini_api_key": {"type": "string"},
     "gemini_model": {"type": "string"},
 
-    "asr_engine": {"type": "string", "enum": ["whisper", "vosk", "google"]},
-    "whisper_device": {"type": "string", "enum": ["cpu", "cuda", ""]},
-    "whisper_model_size": {"type": "string", "enum": ["tiny", "base", "small", "medium", "large"]},
+    "groq_whisper_model": {"type": "string", "minLength": 1},
     "tts_engine": {"type": "string", "enum": ["edge-tts", "pyttsx3", "console", "gTTS", "azure"]},
     "edge_tts_voice": {"type": "string"},
     "edge_tts_rate": {"type": "string"},

@@ -30,8 +30,7 @@
   "tts_engine": "edge-tts",
   "edge_tts_voice": "en-US-BrianMultilingualNeural",
   "edge_tts_rate": "+0%",
-  "whisper_model_size": "large-v3",
-  "whisper_device": "cuda",
+  "groq_whisper_model": "whisper-large-v3-turbo",
   "log_level": "INFO",
   "idle_timeout_sec": 300,
 

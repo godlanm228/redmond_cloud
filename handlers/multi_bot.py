@@ -262,11 +262,12 @@ async def _run_delegation(
         payload = {}
     task = str(payload.get("task", "")).strip()
     region = str(payload.get("region", "")).strip()
+    mode = str(payload.get("mode", "") or "handoff").strip().lower()
     if not task:
         logger.warning("Delegation with empty task from %s — ignored", delegator.name)
         return
 
-    logger.info("DELEGATE [%s → Newser]: %s", delegator.name, task[:120])
+    logger.info("DELEGATE [%s → Newser, %s]: %s", delegator.name, mode, task[:120])
 
     # Витрина: кто кому что передал. Ты видишь таск и можешь поправить.
     await coordinator.respond_as(
@@ -289,6 +290,27 @@ async def _run_delegation(
     state.last_agent_name = newser.name
 
     await coordinator.respond_as(newser.name, chat_id, response, newser.emoji, newser.output_format)
+
+    # collect-режим: ресёрч — сырьё, делегатор постит СВОЙ вывод поверх него
+    # (совет/вердикт), не пересказывая. +1 LLM-вызов, по делу.
+    if mode == "collect":
+        verdict_prompt = (
+            f"(collect-режим) Ньюсер отресёрчил твой таск: «{task}».\n"
+            f"Его ответ уже запощен в чат — НЕ пересказывай его.\n"
+            f"РЕЗУЛЬТАТ РИСЁРЧА:\n{response[:2500]}\n\n"
+            f"Дай владельцу только твой вывод/совет поверх этих данных, коротко, "
+            f"в своём стиле."
+        )
+        async with coordinator.typing(delegator.name, chat_id):
+            verdict = await _generate_with_status(delegator, verdict_prompt, context, chat_id)
+        if verdict.startswith(DELEGATION_MARKER):
+            logger.warning("Recursive delegation in collect verdict — suppressed")
+            return
+        state.add("assistant", verdict, delegator.name)
+        state.last_agent_name = delegator.name
+        await coordinator.respond_as(
+            delegator.name, chat_id, verdict, delegator.emoji, delegator.output_format,
+        )
 
 
 async def _generate_cipher(user_text: str, context: ContextTypes.DEFAULT_TYPE) -> str:
@@ -352,66 +374,52 @@ async def redmond_photo_handler(update: Update, context: ContextTypes.DEFAULT_TY
                 await coordinator.respond_as(iris.name, chat_id, plan, iris.emoji, iris.output_format)
 
 
-# ---------- Redmond handler (с router) ----------
+# ---------- Routing core (текст и голос идут одним путём) ----------
 
-async def redmond_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def _route_and_respond(
+    text: str,
+    context: ContextTypes.DEFAULT_TYPE,
+    chat_id: int,
+    user,
+    handle_foreign: bool = False,
+) -> None:
     """
-    Redmond — единственный с router'ом.
+    Ядро обработки сообщения владельца: роутинг (явный @-меншин → LLM-классификатор
+    → keywords → sticky), research-флаг, генерация, делегирование, отправка.
 
-    Логика:
-      1) Авторизация
-      2) Если в тексте @-меншин ДРУГОГО агента → молчу (тот ответит сам)
-      3) Если @redmond или нет триггера → запускаю router
-         - router выбрал Redmond → отвечаю сам
-         - router выбрал другого → генерирую ответ под того агента
-           и отправляю через coordinator от его имени (видимая «делегация»)
+    handle_foreign: текстовые апдейты чужих @-меншинов обрабатывают их собственные
+    Application'ы (False); голосовые видит только Redmond-app, поэтому «Айрис, …»
+    голосом он должен исполнить сам от имени Айрис (True).
     """
-    if not await _gate(update, context):
-        return
-
-    text = (update.message.text or "").strip()
-    if not text:
-        return
-
-    chat_id = update.effective_chat.id if update.effective_chat else None
-    if chat_id is None:
-        return
-
     bot_data = context.application.bot_data
     coordinator = bot_data["coordinator"]
     dispatcher = bot_data["dispatcher"]
     router_states: dict = bot_data["router_states"]
 
-    # 1. Явный @-меншин кого-то другого → этот апдейт не для Redmond
-    explicit = find_by_trigger(text)
-    if explicit is not None and explicit.name != "Redmond":
-        return
-
-    # 2. Снимаем @redmond префикс если есть
-    clean_text = explicit.strip_trigger(text) if explicit else text
-
-    # 3. Routing (только если не было явного @redmond — иначе оставляем Redmond).
-    # research-флаг считает классификатор (8b) — решение о делегировании в коде,
-    # не на воле 120b-модели.
     state: RouterState = router_states.setdefault(chat_id, RouterState())
     groq_key = dispatcher.config.groq_api_key
+
+    # research-флаг считает классификатор (8b) — решение о делегировании в коде,
+    # не на воле 120b-модели.
+    explicit = find_by_trigger(text)
+    needs_research = False
     if explicit is not None:
-        agent = REDMOND
-        needs_research = llm_research_flag(clean_text, state, groq_key)
+        if explicit.name != "Redmond" and not handle_foreign:
+            return  # текстовый апдейт — ответит Application того агента
+        agent = explicit
+        clean_text = explicit.strip_trigger(text) or "(привет)"
+        if agent.name == "Redmond":
+            needs_research = llm_research_flag(clean_text, state, groq_key)
     else:
+        clean_text = text
         agent, needs_research = route(text, state, groq_api_key=groq_key)
     state.add("user", clean_text, agent.name)
 
-    user = update.effective_user
     logger.info(
         "IN [%s %s → %s]: %s",
-        user.id,
-        user.first_name or user.username,
-        agent.name,
-        clean_text[:120],
+        user.id, user.first_name or user.username, agent.name, clean_text[:120],
     )
 
-    # 4. Генерация и отправка — typing indicator пока работаем.
     # research + Redmond = принудительное делегирование: единственный tool в
     # вызове — delegate_research с tool_choice forced (модель только
     # формулирует таск с контекстом, решение уже принято).
@@ -436,7 +444,84 @@ async def redmond_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         return
 
     state.add("assistant", response, agent.name)
+    state.last_agent_name = agent.name
     await coordinator.respond_as(agent.name, chat_id, response, agent.emoji, agent.output_format)
+
+
+# ---------- Redmond handler (с router) ----------
+
+async def redmond_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    Redmond — единственный с router'ом.
+
+    Логика:
+      1) Авторизация
+      2) Если в тексте @-меншин ДРУГОГО агента → молчу (тот ответит сам)
+      3) Если @redmond или нет триггера → router решает кто отвечает
+    """
+    if not await _gate(update, context):
+        return
+
+    text = (update.message.text or "").strip()
+    if not text:
+        return
+
+    chat_id = update.effective_chat.id if update.effective_chat else None
+    if chat_id is None:
+        return
+
+    await _route_and_respond(text, context, chat_id, update.effective_user)
+
+
+# ---------- Voice handler (голосовые → Groq Whisper → обычный пайплайн) ----------
+
+async def redmond_voice_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    Голосовое от Влада: Groq Whisper API (whisper-large-v3-turbo, free tier) →
+    транскрипт постится в чат (видно, что распознано) → обычный роутинг,
+    как будто это текст. Висит только на Redmond-app (как фото), поэтому
+    «Айрис, …» голосом исполняется здесь же от её имени (handle_foreign).
+    """
+    if not await _gate(update, context):
+        return
+    if not _is_from_owner(update) or not update.message or not update.message.voice:
+        return
+    chat_id = update.effective_chat.id if update.effective_chat else None
+    if chat_id is None:
+        return
+
+    coordinator = context.application.bot_data["coordinator"]
+    dispatcher = context.application.bot_data["dispatcher"]
+
+    voice = update.message.voice
+    if voice.duration and voice.duration > 300:
+        await coordinator.respond_as(
+            "Redmond", chat_id,
+            "Войс длиннее 5 минут — не возьму, накидай короче или текстом.",
+            "🦞", "plain",
+        )
+        return
+
+    tg_file = await voice.get_file()
+    data = bytes(await tg_file.download_as_bytearray())
+    logger.info("Voice from owner (%d KB, %ss) — transcribing", len(data) // 1024, voice.duration)
+
+    from utils.speech import transcribe_voice
+    model = getattr(dispatcher.config, "groq_whisper_model", "whisper-large-v3-turbo")
+    async with coordinator.typing("Redmond", chat_id):
+        text, err = await asyncio.to_thread(
+            transcribe_voice, data, dispatcher.config.groq_api_key, model,
+        )
+
+    if err:
+        await coordinator.respond_as(
+            "Redmond", chat_id, f"Не расслышал (транскрипция упала: {err}).", "🦞", "plain",
+        )
+        return
+
+    # Транскрипт видим — Влад сразу заметит, если распознало криво
+    await coordinator.respond_as("Redmond", chat_id, f"🎙 «{text}»", "🦞", "plain")
+    await _route_and_respond(text, context, chat_id, update.effective_user, handle_foreign=True)
 
 
 # ---------- Slim handler (Iris/Cipher/Newser) ----------

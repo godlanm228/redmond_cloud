@@ -132,7 +132,8 @@ NEWSER = AgentConfig(
     output_format="html",  # ссылки кликабельные через <a href>
     temperature=0.2,
     max_tokens=1300,  # дайджест: 4 секции × 2 пункта на русском не влезали в 800
-    allowed_tools=["get_news_headlines", "web_search", "web_fetch", "get_current_time"],
+    allowed_tools=["get_news_headlines", "web_search", "web_fetch",
+                   "get_crypto_market", "get_current_time"],
 )
 
 CIPHER = AgentConfig(
