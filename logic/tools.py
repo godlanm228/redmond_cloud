@@ -229,6 +229,20 @@ TOOL_SCHEMAS = [
     {
         "type": "function",
         "function": {
+            "name": "mark_deadline_done",
+            "description": "Close a deadline when owner reports it is passed/done («сдал тест»).",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "deadline_id": {"type": "integer", "description": "Deadline id from list_deadlines"},
+                },
+                "required": ["deadline_id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "list_deadlines",
             "description": "List deadlines. Can limit to N days ahead.",
             "parameters": {
@@ -392,6 +406,8 @@ def execute_tool(name: str, args: Dict[str, Any], rg=None) -> str:
         return _tool_mark_goal_done(args)
     if name == "add_deadline":
         return _tool_add_deadline(args)
+    if name == "mark_deadline_done":
+        return _tool_mark_deadline_done(args)
     if name == "list_deadlines":
         return _tool_list_deadlines(args)
     if name == "add_diary_entry":
@@ -447,6 +463,15 @@ def _tool_add_deadline(args: Dict[str, Any]) -> str:
         importance=args.get("importance", "medium"),
     )
     return f"Дедлайн #{d['id']} «{d['title']}» → {d['due']} ({d['importance']})"
+
+
+def _tool_mark_deadline_done(args: Dict[str, Any]) -> str:
+    from logic import coach_storage
+    did = int(args.get("deadline_id", 0))
+    d = coach_storage.mark_deadline_done(did)
+    if not d:
+        return f"Дедлайн #{did} не найден."
+    return f"Дедлайн #{did} «{d['title']}» закрыт."
 
 
 def _tool_list_deadlines(args: Dict[str, Any]) -> str:
