@@ -33,6 +33,7 @@ from logic.agents import (
     find_by_trigger,
 )
 from logic.agent_router import RouterState, route
+from logic.tools import DELEGATION_MARKER
 
 logger = logging.getLogger(__name__)
 
@@ -200,6 +201,107 @@ async def _generate(
     return response or "Не знаю, что ответить."
 
 
+_PLACEHOLDER_AFTER_SEC = 5.0
+
+
+async def _generate_with_placeholder(
+    agent: AgentConfig,
+    user_text: str,
+    context: ContextTypes.DEFAULT_TYPE,
+    chat_id: int,
+) -> str:
+    """
+    Генерация + плейсхолдер «копаю» если дольше _PLACEHOLDER_AFTER_SEC.
+    Плейсхолдер удаляется перед отправкой ответа (delete+send, не edit —
+    редактирование не даёт новой нотификации) и НЕ попадает в history:
+    он шлётся напрямую ботом, мимо generate/_save_interaction.
+    """
+    coordinator = context.application.bot_data["coordinator"]
+    gen_task = asyncio.create_task(_generate(agent, user_text, context, chat_id))
+    try:
+        return await asyncio.wait_for(asyncio.shield(gen_task), timeout=_PLACEHOLDER_AFTER_SEC)
+    except asyncio.TimeoutError:
+        pass
+
+    placeholder = None
+    bot = coordinator.bot_for(agent.name)
+    if bot is not None:
+        try:
+            placeholder = await bot.send_message(
+                chat_id=chat_id, text=f"{agent.emoji} Копаю, минуту…",
+            )
+            logger.info("Placeholder posted (%s, msg %s)", agent.name, placeholder.message_id)
+        except Exception:
+            logger.debug("placeholder send failed", exc_info=True)
+
+    response = await gen_task
+    if placeholder is not None:
+        try:
+            await placeholder.delete()
+        except Exception:
+            logger.warning(
+                "placeholder delete failed (chat %s, msg %s) — останется висеть",
+                chat_id, placeholder.message_id,
+            )
+    return response
+
+
+async def _run_delegation(
+    delegator: AgentConfig,
+    raw_payload: str,
+    context: ContextTypes.DEFAULT_TYPE,
+    chat_id: int,
+) -> None:
+    """
+    Handoff-делегирование Ньюсеру. In-process: Telegram НЕ доставляет ботам
+    сообщения других ботов, поэтому @-меншен в чате — витрина для владельца,
+    а сама задача передаётся прямым вызовом генерации.
+    Ход делегатора окончен — финальный ответ постит только Newser.
+    """
+    import json as _json
+
+    coordinator = context.application.bot_data["coordinator"]
+    router_states: dict = context.application.bot_data["router_states"]
+    newser = agent_by_name("Newser")
+    if newser is None:
+        logger.error("Delegation failed: Newser agent not registered")
+        return
+
+    try:
+        payload = _json.loads(raw_payload or "{}")
+    except _json.JSONDecodeError:
+        payload = {}
+    task = str(payload.get("task", "")).strip()
+    region = str(payload.get("region", "")).strip()
+    if not task:
+        logger.warning("Delegation with empty task from %s — ignored", delegator.name)
+        return
+
+    logger.info("DELEGATE [%s → Newser]: %s", delegator.name, task[:120])
+
+    # Витрина: кто кому что передал. Ты видишь таск и можешь поправить.
+    await coordinator.respond_as(
+        delegator.name, chat_id,
+        f"Это к Ньюсеру — @{newser.bot_username}, найди: {task}",
+        delegator.emoji, "plain",
+    )
+
+    envelope = (
+        f"(delegated by {delegator.name} on behalf of owner)\n"
+        f"TASK: {task}\n"
+        + (f"REGION HINT: {region}\n" if region else "")
+    )
+    async with coordinator.typing(newser.name, chat_id):
+        response = await _generate_with_placeholder(newser, envelope, context, chat_id)
+
+    # Sticky на Newser: «а подробнее?» следом уйдёт ему — контекст рисёрча у него.
+    state: RouterState = router_states.setdefault(chat_id, RouterState())
+    state.add("assistant", response, newser.name)
+    state.last_agent_name = newser.name
+
+    await coordinator.respond_as(newser.name, chat_id, response, newser.emoji, newser.output_format)
+
+
 async def _generate_cipher(user_text: str, context: ContextTypes.DEFAULT_TYPE) -> str:
     """
     Stub для Cipher (Claude Code CLI subprocess).
@@ -303,9 +405,14 @@ async def redmond_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
     # 4. Генерация и отправка — typing indicator пока работаем
     async with coordinator.typing(agent.name, chat_id):
-        response = await _generate(agent, clean_text, context, chat_id)
-    state.add("assistant", response, agent.name)
+        response = await _generate_with_placeholder(agent, clean_text, context, chat_id)
 
+    # Агент делегировал → его ход окончен, оркеструем handoff (ответит Newser)
+    if response.startswith(DELEGATION_MARKER):
+        await _run_delegation(agent, response[len(DELEGATION_MARKER):], context, chat_id)
+        return
+
+    state.add("assistant", response, agent.name)
     await coordinator.respond_as(agent.name, chat_id, response, agent.emoji, agent.output_format)
 
 
@@ -356,13 +463,19 @@ async def slim_agent_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
     )
 
     async with coordinator.typing(agent.name, chat_id):
-        response = await _generate(agent, clean_text, context, chat_id)
+        response = await _generate_with_placeholder(agent, clean_text, context, chat_id)
+
+    state: RouterState = router_states.setdefault(chat_id, RouterState())
+    state.add("user", clean_text, agent.name)
+
+    # Агент делегировал (например Iris → Newser за внешним фактом)
+    if response.startswith(DELEGATION_MARKER):
+        await _run_delegation(agent, response[len(DELEGATION_MARKER):], context, chat_id)
+        return
 
     # Обновляем router_states — это критично для sticky.
     # Чтобы когда Влад следом напишет без @-меншина, Redmond router увидел
     # «только что отвечала Iris» и сохранил Iris (если LLM согласен).
-    state: RouterState = router_states.setdefault(chat_id, RouterState())
-    state.add("user", clean_text, agent.name)
     state.add("assistant", response, agent.name)
     state.last_agent_name = agent.name
 
