@@ -37,6 +37,10 @@ from logic.tools import DELEGATION_MARKER
 
 logger = logging.getLogger(__name__)
 
+# Потолок на одну генерацию. Groq-вызов сам ограничен 40с × ≤5 хопов × 2 модели;
+# этот таймаут — внешняя страховка, чтобы зависшая генерация не держала хендлер.
+GENERATION_TIMEOUT_SEC = 200.0
+
 
 # ---------- конфиг ----------
 
@@ -161,16 +165,24 @@ async def _generate(
     intent = dispatcher.intent_recognizer.recognize(user_text)
 
     try:
-        response = await asyncio.to_thread(
-            dispatcher.response_generator.generate,
-            intent,
-            user_text,
-            role,
-            agent,
-            chat_id,
-            status_cb=status_cb,
-            force_tool=force_tool,
+        response = await asyncio.wait_for(
+            asyncio.to_thread(
+                dispatcher.response_generator.generate,
+                intent,
+                user_text,
+                role,
+                agent,
+                chat_id,
+                status_cb=status_cb,
+                force_tool=force_tool,
+            ),
+            timeout=GENERATION_TIMEOUT_SEC,
         )
+    except asyncio.TimeoutError:
+        # Страховка от зависания: даже если поток застрял, хендлер не держит
+        # event loop и не копит зависшие задачи (так встал хаб 10.06).
+        logger.warning("Generation timed out (%s, %ds)", agent.name, GENERATION_TIMEOUT_SEC)
+        return "Что-то долго думаю — видимо, затык с моделью. Попробуй ещё раз через минуту."
     except Exception:
         logger.exception("Generation failed for %s", agent.name)
         return "⚠ Внутренняя ошибка генерации."
@@ -351,6 +363,17 @@ async def redmond_photo_handler(update: Update, context: ContextTypes.DEFAULT_TY
             analyze_image, image_b64, dispatcher.config.groq_api_key,
         )
     logger.info("Vision: type=%s, shifts=%d", result.get("type"), len(result.get("shifts") or []))
+
+    # Описание фото → в историю чата, чтобы последующие текстовые вопросы
+    # («что на фото?») имели контекст и модель не галлюцинировала (кейс «ракумаки»).
+    vdesc = result.get("description") or ""
+    if vdesc:
+        try:
+            dispatcher.response_generator.note_to_history(
+                chat_id, "(прислал фото)", f"На фото: {vdesc}",
+            )
+        except Exception:
+            logger.debug("note_to_history failed", exc_info=True)
 
     if result.get("error") and not result.get("description"):
         await coordinator.respond_as(
