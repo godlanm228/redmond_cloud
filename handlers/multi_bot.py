@@ -314,15 +314,9 @@ async def _run_delegation(
 
 
 async def _generate_cipher(user_text: str, context: ContextTypes.DEFAULT_TYPE) -> str:
-    """
-    Stub для Cipher (Claude Code CLI subprocess).
-    Пока возвращает заглушку — реальная имплементация в core/cipher_wrapper.py
-    после того как Node.js + Claude CLI установлены на VM.
-    """
-    return (
-        "🚧 Cipher пока не подключён к Claude Code CLI на этой VM. "
-        "Поставь Node.js + `claude login` под Pro подпиской, и я заработаю."
-    )
+    """Cipher = Claude Code CLI subprocess на VM (см. core/cipher_wrapper.py)."""
+    from core.cipher_wrapper import run_cipher
+    return await run_cipher(user_text)
 
 
 # ---------- Photo handler (скрин графика смен → расписание) ----------

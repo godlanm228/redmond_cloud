@@ -1,0 +1,14 @@
+{
+  "permissions": {
+    "allow": [
+      "Read", "Grep", "Glob",
+      "Bash(git log:*)", "Bash(git diff:*)", "Bash(git status:*)", "Bash(git show:*)",
+      "Bash(journalctl:*)", "Bash(systemctl status:*)",
+      "Bash(free:*)", "Bash(df:*)", "Bash(ps:*)"
+    ],
+    "deny": [
+      "Read(**/.env)", "Read(**/.env.*)",
+      "WebFetch", "WebSearch"
+    ]
+  }
+}
