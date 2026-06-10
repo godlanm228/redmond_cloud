@@ -66,6 +66,16 @@ DEFAULT_PERSONA = {
 # JOKES перенесены в handlers/fun.py — единственный источник правды.
 # Импортируем оттуда для legacy fallback.
 
+# Таймаут одного Groq-вызова (сек). Без него SDK на 429/TPD спит десятками
+# секунд и виснет в потоке — пул потоков забивается, хаб встаёт.
+GROQ_TIMEOUT_SEC = 40.0
+
+
+def _is_rate_limit_error(err: str) -> bool:
+    """429 / исчерпание лимита Groq (в т.ч. дневной TPD)."""
+    low = (err or "").lower()
+    return "rate_limit" in low or "429" in low or "tokens per day" in low or "tpd" in low
+
 
 # Tools которые меняют состояние — для safety-net когда LLM не выдаёт
 # финальный текст после успешных вызовов (характерно для Qwen 3 после tool calls).
@@ -546,6 +556,15 @@ class ResponseGenerator:
                     break
             if completion is None:
                 logger.warning("All Groq models failed in chain: %s", model_chain)
+                # Все модели исчерпали лимит — не зависаем и не отдаём generic.
+                # Если что-то уже записали (tools) — резюмируем, иначе честный ответ.
+                if _is_rate_limit_error(getattr(self, "_last_groq_error", "")):
+                    if successful_tool_calls:
+                        return _summarize_actions(successful_tool_calls)
+                    return (
+                        "Упёрся в дневной лимит Groq (бесплатный тариф, сброс в полночь "
+                        "по UTC). Чуть позже отвечу нормально."
+                    )
                 return None
 
             choice = completion["choices"][0]
@@ -666,7 +685,12 @@ class ResponseGenerator:
                     # Qwen3 — reasoning-модель: без этого думает в <think>-блоке,
                     # сжигая max_tokens на рассуждения. none = сразу ответ.
                     kwargs["extra_body"] = {"reasoning_effort": "none"}
-                client = Groq(api_key=api_key)
+                # timeout + max_retries=0: НЕ давать SDK уходить в долгие повторы.
+                # На 429 (особенно TPD) дефолтный retry спит десятки секунд ×N,
+                # генерация виснет в потоке, пул потоков забивается → весь хаб
+                # встаёт (так пропал вечерний итог 10.06). Свой fallback на qwen
+                # и явный ответ при исчерпании лимита делаем сами, выше по стеку.
+                client = Groq(api_key=api_key, timeout=GROQ_TIMEOUT_SEC, max_retries=0)
                 completion = client.chat.completions.create(**kwargs)
                 return completion.to_dict() if hasattr(completion, "to_dict") else completion.model_dump()
 
@@ -685,7 +709,7 @@ class ResponseGenerator:
                 f"{base_url}/openai/v1/chat/completions",
                 headers={"Authorization": f"Bearer {api_key}"},
                 json=payload,
-                timeout=45,
+                timeout=GROQ_TIMEOUT_SEC,
             )
             resp.raise_for_status()
             return resp.json()
@@ -1288,6 +1312,12 @@ class ResponseGenerator:
             lines.append(f"   {r.get('snippet', '')}")
             lines.append(f"   {r.get('url', '')}")
         return "\n".join(lines)
+
+    def note_to_history(self, chat_id: int, user_text: str, note: str) -> None:
+        """Записать факт в историю чата без LLM-вызова. Нужно чтобы внешние
+        события (разбор фото зрением) попадали в контекст: иначе на «что на
+        фото?» текстовая модель галлюцинирует (был кейс «ракумаки»)."""
+        self._save_interaction(user_text, note, chat_id)
 
     def _save_interaction(self, user_text: str, response: str, chat_id: int = 0) -> None:
         if not response:

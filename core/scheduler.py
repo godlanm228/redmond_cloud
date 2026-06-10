@@ -19,6 +19,7 @@ import asyncio
 import logging
 from datetime import datetime, timedelta
 
+from apscheduler.events import EVENT_JOB_ERROR, EVENT_JOB_EXECUTED, EVENT_JOB_MISSED
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 
@@ -30,6 +31,9 @@ from utils.time import OWNER_TZ, now_local
 logger = logging.getLogger(__name__)
 
 
+_JOB_TIMEOUT_SEC = 200.0
+
+
 async def _generate_and_send(
     dispatcher: Dispatcher,
     coordinator: Coordinator,
@@ -37,19 +41,24 @@ async def _generate_and_send(
     agent: AgentConfig,
     prompt: str,
 ) -> None:
-    """Общий путь scheduled-джобы: generate → respond_as. Ошибки не роняют scheduler."""
+    """Общий путь scheduled-джобы: generate → respond_as. Ошибки/зависания не роняют scheduler."""
     try:
         intent = dispatcher.intent_recognizer.recognize(prompt)
         async with coordinator.typing(agent.name, chat_id):
-            response = await asyncio.to_thread(
-                dispatcher.response_generator.generate,
-                intent, prompt, "owner", agent, chat_id,
+            response = await asyncio.wait_for(
+                asyncio.to_thread(
+                    dispatcher.response_generator.generate,
+                    intent, prompt, "owner", agent, chat_id,
+                ),
+                timeout=_JOB_TIMEOUT_SEC,
             )
         if not response:
             logger.warning("Scheduled job for %s: empty response, nothing sent", agent.name)
             return
         await coordinator.respond_as(agent.name, chat_id, response, agent.emoji, agent.output_format)
         logger.info("Scheduled job done: %s → chat %s (%d chars)", agent.name, chat_id, len(response))
+    except asyncio.TimeoutError:
+        logger.warning("Scheduled job for %s timed out (%ds)", agent.name, _JOB_TIMEOUT_SEC)
     except Exception:
         logger.exception("Scheduled job failed for %s", agent.name)
 
@@ -143,13 +152,27 @@ def setup_scheduler(
     sched = AsyncIOScheduler(timezone=OWNER_TZ or "Europe/Berlin")
     args = [dispatcher, coordinator, chat_id]
 
+    # grace_time щедрый: даже если event loop был занят, джоба ВЫПОЛНИТСЯ
+    # с опозданием, а не пропустится молча (так пропал вечерний итог 10.06).
     sched.add_job(morning_digest, CronTrigger(hour=9, minute=0), args=args,
-                  id="morning_digest", coalesce=True, misfire_grace_time=600)
+                  id="morning_digest", coalesce=True, misfire_grace_time=3600)
     sched.add_job(morning_deadlines, CronTrigger(hour=9, minute=3), args=args,
-                  id="morning_deadlines", coalesce=True, misfire_grace_time=600)
+                  id="morning_deadlines", coalesce=True, misfire_grace_time=3600)
     sched.add_job(evening_summary, CronTrigger(hour=22, minute=30), args=args,
-                  id="evening_summary", coalesce=True, misfire_grace_time=600)
+                  id="evening_summary", coalesce=True, misfire_grace_time=3600)
     sched.add_job(day_ticker, CronTrigger(hour="10-22", minute="0,30"), args=args,
-                  id="day_ticker", coalesce=True, misfire_grace_time=300)
+                  id="day_ticker", coalesce=True, misfire_grace_time=600)
+
+    # Диагностика: явно логируем выполнение/пропуск/ошибку джоб. Раньше misfire
+    # был невидим (apscheduler-логгер подавлен), причину сбоя нельзя было понять.
+    def _on_job_event(event) -> None:
+        if event.code == EVENT_JOB_MISSED:
+            logger.warning("Scheduler: job %s MISSED (loop был занят дольше grace)", event.job_id)
+        elif event.code == EVENT_JOB_ERROR:
+            logger.error("Scheduler: job %s ERROR: %s", event.job_id, event.exception)
+        else:
+            logger.debug("Scheduler: job %s executed", event.job_id)
+
+    sched.add_listener(_on_job_event, EVENT_JOB_EXECUTED | EVENT_JOB_ERROR | EVENT_JOB_MISSED)
 
     return sched
