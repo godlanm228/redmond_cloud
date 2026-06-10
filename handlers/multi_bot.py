@@ -18,6 +18,7 @@ Handlers для multi-bot режима (4 параллельных Application'�
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 from typing import Optional, Set
@@ -32,7 +33,7 @@ from logic.agents import (
     all_bot_usernames,
     find_by_trigger,
 )
-from logic.agent_router import RouterState, route
+from logic.agent_router import RouterState, llm_research_flag, route
 from logic.tools import DELEGATION_MARKER
 
 logger = logging.getLogger(__name__)
@@ -164,11 +165,14 @@ async def _generate(
     user_text: str,
     context: ContextTypes.DEFAULT_TYPE,
     chat_id: int = 0,
+    status_cb=None,
+    force_tool: Optional[str] = None,
 ) -> str:
     """
     Вызывает response_generator для указанного агента.
     chat_id → per-chat history (изоляция Iris/Newser/Redmond контекстов).
-    Cipher идёт через subprocess.
+    status_cb — живой статус из tool-loop; force_tool — принудительное
+    делегирование (классификатор решил «research»). Cipher идёт через subprocess.
     """
     if agent.executor == "cipher_subprocess":
         return await _generate_cipher(user_text, context)
@@ -193,6 +197,8 @@ async def _generate(
             role,
             agent,
             chat_id,
+            status_cb=status_cb,
+            force_tool=force_tool,
         )
     except Exception:
         logger.exception("Generation failed for %s", agent.name)
@@ -201,57 +207,62 @@ async def _generate(
     return response or "Не знаю, что ответить."
 
 
-_PLACEHOLDER_AFTER_SEC = 5.0
-
-# Персональные плейсхолдеры: «копаю» уместно Ньюсеру, но не Айрис —
-# её долгие ответы это обычно «посмотрю расписание/план», не рисёрч.
-_PLACEHOLDER_TEXTS = {
-    "Redmond": "🦞 Сейчас гляну…",
-    "Iris": "🎯 Сейчас посмотрю, минутку…",
-    "Newser": "📰 Копаю, минуту…",
-}
-
-
-async def _generate_with_placeholder(
+async def _generate_with_status(
     agent: AgentConfig,
     user_text: str,
     context: ContextTypes.DEFAULT_TYPE,
     chat_id: int,
+    force_tool: Optional[str] = None,
 ) -> str:
     """
-    Генерация + плейсхолдер «копаю» если дольше _PLACEHOLDER_AFTER_SEC.
-    Плейсхолдер удаляется перед отправкой ответа (delete+send, не edit —
-    редактирование не даёт новой нотификации) и НЕ попадает в history:
-    он шлётся напрямую ботом, мимо generate/_save_interaction.
+    Генерация + живой статус из РЕАЛЬНЫХ tool calls: первый вызов тула постит
+    сообщение («📰 ищу: курс биткоина…»), следующие редактируют его же,
+    по готовности ответа статус удаляется (delete+send — новая нотификация).
+    Болтовня без tools не постит ничего — только typing indicator. Статус
+    не попадает в history: шлётся напрямую ботом, мимо generate.
     """
     coordinator = context.application.bot_data["coordinator"]
-    gen_task = asyncio.create_task(_generate(agent, user_text, context, chat_id))
+    loop = asyncio.get_running_loop()
+    queue: asyncio.Queue = asyncio.Queue()
+
+    def status_cb(text: str) -> None:
+        # Вызывается из generation-потока (to_thread) — мост в event loop
+        loop.call_soon_threadsafe(queue.put_nowait, text)
+
+    status_msg = None
+
+    async def _status_watcher() -> None:
+        nonlocal status_msg
+        bot = coordinator.bot_for(agent.name)
+        if bot is None:
+            return
+        while True:
+            text = await queue.get()
+            body = f"{agent.emoji} {text}"
+            try:
+                if status_msg is None:
+                    status_msg = await bot.send_message(chat_id=chat_id, text=body)
+                else:
+                    await status_msg.edit_text(body)
+            except Exception:
+                logger.debug("status update failed", exc_info=True)
+
+    watcher = asyncio.create_task(_status_watcher())
     try:
-        return await asyncio.wait_for(asyncio.shield(gen_task), timeout=_PLACEHOLDER_AFTER_SEC)
-    except asyncio.TimeoutError:
-        pass
-
-    placeholder = None
-    bot = coordinator.bot_for(agent.name)
-    if bot is not None:
-        try:
-            placeholder = await bot.send_message(
-                chat_id=chat_id,
-                text=_PLACEHOLDER_TEXTS.get(agent.name, f"{agent.emoji} Минутку…"),
-            )
-            logger.info("Placeholder posted (%s, msg %s)", agent.name, placeholder.message_id)
-        except Exception:
-            logger.debug("placeholder send failed", exc_info=True)
-
-    response = await gen_task
-    if placeholder is not None:
-        try:
-            await placeholder.delete()
-        except Exception:
-            logger.warning(
-                "placeholder delete failed (chat %s, msg %s) — останется висеть",
-                chat_id, placeholder.message_id,
-            )
+        response = await _generate(
+            agent, user_text, context, chat_id,
+            status_cb=status_cb, force_tool=force_tool,
+        )
+    finally:
+        watcher.cancel()
+        if status_msg is not None:
+            try:
+                await status_msg.delete()
+            except Exception:
+                logger.warning(
+                    "status delete failed (chat %s, msg %s) — останется висеть",
+                    chat_id, status_msg.message_id,
+                )
     return response
 
 
@@ -267,8 +278,6 @@ async def _run_delegation(
     а сама задача передаётся прямым вызовом генерации.
     Ход делегатора окончен — финальный ответ постит только Newser.
     """
-    import json as _json
-
     coordinator = context.application.bot_data["coordinator"]
     router_states: dict = context.application.bot_data["router_states"]
     newser = agent_by_name("Newser")
@@ -277,8 +286,8 @@ async def _run_delegation(
         return
 
     try:
-        payload = _json.loads(raw_payload or "{}")
-    except _json.JSONDecodeError:
+        payload = json.loads(raw_payload or "{}")
+    except json.JSONDecodeError:
         payload = {}
     task = str(payload.get("task", "")).strip()
     region = str(payload.get("region", "")).strip()
@@ -301,7 +310,7 @@ async def _run_delegation(
         + (f"REGION HINT: {region}\n" if region else "")
     )
     async with coordinator.typing(newser.name, chat_id):
-        response = await _generate_with_placeholder(newser, envelope, context, chat_id)
+        response = await _generate_with_status(newser, envelope, context, chat_id)
 
     # Sticky на Newser: «а подробнее?» следом уйдёт ему — контекст рисёрча у него.
     state: RouterState = router_states.setdefault(chat_id, RouterState())
@@ -365,7 +374,7 @@ async def redmond_photo_handler(update: Update, context: ContextTypes.DEFAULT_TY
                 "план недели по правилам WEEK PLANNING и сохрани его."
             )
             async with coordinator.typing(iris.name, chat_id):
-                plan = await _generate_with_placeholder(iris, plan_prompt, context, chat_id)
+                plan = await _generate_with_status(iris, plan_prompt, context, chat_id)
             if plan.startswith(DELEGATION_MARKER):
                 await _run_delegation(iris, plan[len(DELEGATION_MARKER):], context, chat_id)
             else:
@@ -410,13 +419,16 @@ async def redmond_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     # 2. Снимаем @redmond префикс если есть
     clean_text = explicit.strip_trigger(text) if explicit else text
 
-    # 3. Routing (только если не было явного @redmond — иначе оставляем Redmond)
+    # 3. Routing (только если не было явного @redmond — иначе оставляем Redmond).
+    # research-флаг считает классификатор (8b) — решение о делегировании в коде,
+    # не на воле 120b-модели.
     state: RouterState = router_states.setdefault(chat_id, RouterState())
+    groq_key = dispatcher.config.groq_api_key
     if explicit is not None:
         agent = REDMOND
+        needs_research = llm_research_flag(clean_text, state, groq_key)
     else:
-        groq_key = dispatcher.config.groq_api_key
-        agent = route(text, state, groq_api_key=groq_key)
+        agent, needs_research = route(text, state, groq_api_key=groq_key)
     state.add("user", clean_text, agent.name)
 
     user = update.effective_user
@@ -428,13 +440,28 @@ async def redmond_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         clean_text[:120],
     )
 
-    # 4. Генерация и отправка — typing indicator пока работаем
+    # 4. Генерация и отправка — typing indicator пока работаем.
+    # research + Redmond = принудительное делегирование: единственный tool в
+    # вызове — delegate_research с tool_choice forced (модель только
+    # формулирует таск с контекстом, решение уже принято).
+    force_tool = "delegate_research" if (agent.name == "Redmond" and needs_research) else None
     async with coordinator.typing(agent.name, chat_id):
-        response = await _generate_with_placeholder(agent, clean_text, context, chat_id)
+        response = await _generate_with_status(agent, clean_text, context, chat_id, force_tool=force_tool)
 
     # Агент делегировал → его ход окончен, оркеструем handoff (ответит Newser)
     if response.startswith(DELEGATION_MARKER):
         await _run_delegation(agent, response[len(DELEGATION_MARKER):], context, chat_id)
+        return
+
+    if force_tool:
+        # Модель умудрилась ответить текстом вопреки forced tool_choice
+        # (или вся цепочка моделей упала) — жёсткий fallback кодом:
+        # делегируем с сырым текстом как таском. Гарантия, не пожелание.
+        logger.warning("Forced delegation bypassed (%s) — hard fallback", agent.name)
+        await _run_delegation(
+            agent, json.dumps({"task": clean_text, "region": ""}, ensure_ascii=False),
+            context, chat_id,
+        )
         return
 
     state.add("assistant", response, agent.name)
@@ -488,7 +515,7 @@ async def slim_agent_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
     )
 
     async with coordinator.typing(agent.name, chat_id):
-        response = await _generate_with_placeholder(agent, clean_text, context, chat_id)
+        response = await _generate_with_status(agent, clean_text, context, chat_id)
 
     state: RouterState = router_states.setdefault(chat_id, RouterState())
     state.add("user", clean_text, agent.name)

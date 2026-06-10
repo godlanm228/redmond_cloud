@@ -86,16 +86,35 @@ def _build_router_prompt() -> str:
         "разговора в его зоне → ОСТАВАЙСЯ на X. Не переключайся без явной смены темы.\n"
         "  Пример: Iris спросила про цели → пользователь рассказывает свой график → это ВСЁ ЕЩЁ Iris.\n"
         "  Пример: Newser выдал дайджест → пользователь спросил «а ещё про X» → ВСЁ ЕЩЁ Newser.\n"
+        "  Пример: Newser разбирал крипту → «а в акциях мб?» → ВСЁ ЕЩЁ Newser (та же тема — инвестиции).\n"
         "\n"
         "  Если непонятно — Redmond.\n\n"
-        "ОТВЕТЬ ОДНИМ СЛОВОМ — точное имя агента. Без объяснений."
+        "ФЛАГ research:\n"
+        "  Если ответ требует СВЕЖЕГО веб-рисёрча по нескольким источникам — новости, "
+        "рынки/инвестиции/крипта/акции, «что пишут про», обзоры тем, сравнения, "
+        "«как лучше вложить/заработать» — добавь к имени «+research».\n"
+        "  Одиночный быстрый факт (погода, время, один адрес/цена, «когда выйдет X») — "
+        "НЕ research.\n\n"
+        "ФОРМАТ ОТВЕТА: «Имя» или «Имя+research». Одна строка, без объяснений."
     )
 
 
-def _llm_route(text: str, history: List[Dict[str, str]], api_key: str) -> Optional[str]:
-    """Спрашиваем дешёвую LLM кому отдать. Возвращает имя агента или None."""
+def _parse_router_reply(raw: str) -> tuple:
+    """«Имя» / «Имя+research» → (имя | None, research: bool). Чистая функция."""
+    line = (raw or "").strip().splitlines()[0].strip() if (raw or "").strip() else ""
+    if not line:
+        return None, False
+    parts = line.split("+", 1)
+    name = parts[0].strip().strip(".,!?\"'`«»").strip()
+    research = len(parts) > 1 and "research" in parts[1].lower()
+    return (name or None), research
+
+
+def _llm_route(text: str, history: List[Dict[str, str]], api_key: str) -> tuple:
+    """Спрашиваем дешёвую LLM кому отдать + нужен ли research.
+    Возвращает (имя агента | None, research: bool)."""
     if not api_key or not GROQ_AVAILABLE:
-        return None
+        return None, False
 
     history_block = ""
     if history:
@@ -124,19 +143,18 @@ def _llm_route(text: str, history: List[Dict[str, str]], api_key: str) -> Option
         raw = (completion.choices[0].message.content or "").strip()
     except Exception as e:
         logger.debug("Router LLM failed: %s", e)
-        return None
+        return None, False
 
-    # Чистим артефакты — иногда модель добавляет точку, кавычки, и т.п.
-    name = raw.strip().strip(".,!?\"'`«»").splitlines()[0].strip()
+    name, research = _parse_router_reply(raw)
     if not name:
-        return None
+        return None, False
 
     agent = agent_by_name(name)
     if agent is None:
         logger.debug("Router returned unknown agent: %r", raw)
-        return None
+        return None, False
 
-    return agent.name
+    return agent.name, research
 
 
 # ============================================================================
@@ -181,21 +199,24 @@ def _keyword_route(text: str) -> Optional[str]:
 # Public router
 # ============================================================================
 
-def route(text: str, state: RouterState, groq_api_key: str = "") -> AgentConfig:
+def route(text: str, state: RouterState, groq_api_key: str = "") -> tuple:
     """
-    Главный роутер. Возвращает выбранного AgentConfig + обновляет state.
+    Главный роутер. Возвращает (AgentConfig, research: bool) + обновляет state.
+    research=True означает «нужен глубокий веб-рисёрч»: если агент при этом
+    Redmond — handler принудительно делегирует Ньюсеру (решение в коде,
+    не на воле 120b-модели).
     """
     if not text or not text.strip():
-        return default_agent()
+        return default_agent(), False
 
     # 1. Явный @-меншин (точное переключение, перезаписывает sticky)
     explicit = find_by_trigger(text)
     if explicit is not None:
         state.last_agent_name = explicit.name
-        return explicit
+        return explicit, False
 
-    # 2. LLM-классификация
-    chosen_name = _llm_route(text, state.recent_messages, groq_api_key)
+    # 2. LLM-классификация (агент + research-флаг одним вызовом)
+    chosen_name, research = _llm_route(text, state.recent_messages, groq_api_key)
 
     # 3. Keyword fallback (если LLM не доступна или вернула мусор)
     if not chosen_name:
@@ -207,5 +228,12 @@ def route(text: str, state: RouterState, groq_api_key: str = "") -> AgentConfig:
 
     agent = agent_by_name(chosen_name) or default_agent()
     state.last_agent_name = agent.name
-    logger.info("Router: %r → %s", text[:60], agent.name)
-    return agent
+    logger.info("Router: %r → %s%s", text[:60], agent.name, "+research" if research else "")
+    return agent, research
+
+
+def llm_research_flag(text: str, state: RouterState, groq_api_key: str = "") -> bool:
+    """Research-флаг для явного @-меншина Redmond (route() там скипается).
+    Один дешёвый 8b-вызов; при недоступности LLM — False (Redmond сам решит)."""
+    _, research = _llm_route(text, state.recent_messages, groq_api_key)
+    return research

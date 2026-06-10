@@ -88,6 +88,34 @@ _TOOL_HUMAN_LABEL = {
 }
 
 
+def _tool_status_label(name: str, args: Dict[str, Any]) -> Optional[str]:
+    """Человекочитаемый статус реального tool call — для живого статуса в чате.
+    None = действие не показываем (мгновенное или уже видимое иначе)."""
+    if name == "web_search":
+        q = str(args.get("query", "")).strip()
+        return f"ищу: {q[:60]}…" if q else "ищу в сети…"
+    if name == "web_fetch":
+        url = str(args.get("url", ""))
+        domain = re.sub(r"^https?://(www\.)?", "", url).split("/")[0]
+        return f"читаю {domain}…" if domain else "читаю страницу…"
+    if name == "get_news_headlines":
+        return "листаю ленты…"
+    if name == "get_weather":
+        return "смотрю погоду…"
+    if name == "get_week_schedule":
+        return "смотрю расписание…"
+    if name in ("get_week_plan", "save_week_plan"):
+        return "работаю с планом недели…"
+    if name in ("read_dossier_section", "read_dossier"):
+        return "сверяюсь с досье…"
+    if name in ("list_goals", "list_deadlines", "read_diary"):
+        return "смотрю записи…"
+    if name in ("add_goal", "mark_goal_done", "add_deadline",
+                "mark_deadline_done", "add_diary_entry", "update_profile"):
+        return "записываю…"
+    return None  # delegate_research (виден меншеном), get_current_time, snooze
+
+
 def _clip(s: str, n: int = 300) -> str:
     """Обрезка реплики для контекстных блоков промпта. Длинные ответы (расклады,
     выжимки) пересылались целиком в каждом следующем запросе — жгли TPM впустую."""
@@ -148,6 +176,12 @@ class GenerationContext:
     # Какой агент отвечает (None = Redmond по умолчанию).
     # Влияет на system_prompt и набор доступных tools.
     agent: Any = None
+    # Живой статус для чата: вызывается из tool-loop с человекочитаемым
+    # описанием реального действия («ищу: …»). None = статусы не нужны.
+    status_cb: Any = None
+    # Принудительный tool на первом хопе (tool_choice forced) — классификатор
+    # решил «research» и Redmond ОБЯЗАН делегировать, не на воле модели.
+    force_tool: Optional[str] = None
 
 
 if TRANSFORMERS_AVAILABLE:
@@ -291,6 +325,8 @@ class ResponseGenerator:
         user_role: str = "guest",
         agent=None,
         chat_id: int = 0,
+        status_cb=None,
+        force_tool: Optional[str] = None,
     ) -> str:
         """
         Stateless по entry-point — все per-chat данные ходят через chat_id.
@@ -310,6 +346,8 @@ class ResponseGenerator:
             history=chat_history[-self.max_history:],
             rg=self,
             agent=agent,
+            status_cb=status_cb,
+            force_tool=force_tool,
         )
 
         try:
@@ -428,6 +466,13 @@ class ResponseGenerator:
         else:
             tools_for_agent = TOOL_SCHEMAS
 
+        # Принудительный tool (классификатор решил «research» → делегирование
+        # гарантируется кодом): оставляем только его + tool_choice forced на хопе 0.
+        if ctx.force_tool:
+            forced = [t for t in tools_for_agent if t["function"]["name"] == ctx.force_tool]
+            if forced:
+                tools_for_agent = forced
+
         # Per-conversation cache: какие секции досье уже отдавали в этой генерации.
         # Защищает от повторных read_dossier_section, которые сжигают TPM.
         dossier_returned: set = set()
@@ -458,6 +503,9 @@ class ResponseGenerator:
                     ),
                 })
             hop_tools = None if final_hop else tools_for_agent
+            hop_tool_choice = None
+            if ctx.force_tool and hop == 0 and hop_tools:
+                hop_tool_choice = {"type": "function", "function": {"name": ctx.force_tool}}
 
             # Пробуем модели по цепочке: primary, потом fallback.
             # Fallback включается при rate_limit / tool_use_failed / любой transient ошибке.
@@ -466,6 +514,7 @@ class ResponseGenerator:
                 completion = self._groq_chat(
                     api_key, model, messages, tools=hop_tools,
                     temperature=temperature, max_tokens=max_tokens,
+                    tool_choice=hop_tool_choice,
                 )
                 # Финальный compose: модель иногда игнорирует запрет tools и
                 # пишет tool call → Groq 400 tool_use_failed. Один повтор с
@@ -502,6 +551,9 @@ class ResponseGenerator:
             if not tool_calls:
                 content = (msg.get("content") or "").strip()
                 if content:
+                    # Упёрлись в max_tokens — не обрывать на полуслове молча
+                    if choice.get("finish_reason") == "length":
+                        content += "\n\n…(обрезалось по лимиту — скажи «продолжи»)"
                     return content
                 # LLM молчит. Safety net: если в этой генерации уже были
                 # успешные tool calls (например update_profile / add_goal /
@@ -534,6 +586,15 @@ class ResponseGenerator:
 
                 # Cache dossier: если ту же секцию уже отдавали — возвращаем
                 # короткий маркер. Экономия ~1500-3000 токенов на повторном вызове.
+                # Живой статус в чат — фактическое действие, не гадание
+                if ctx.status_cb:
+                    status = _tool_status_label(fn_name, fn_args)
+                    if status:
+                        try:
+                            ctx.status_cb(status)
+                        except Exception:
+                            logger.debug("status_cb failed", exc_info=True)
+
                 if fn_name in ("read_dossier_section", "read_dossier"):
                     section = (fn_args.get("section") or
                                ("all" if fn_name == "read_dossier" else "core"))
@@ -579,9 +640,11 @@ class ResponseGenerator:
         tools: Optional[list],
         temperature: float = 0.5,
         max_tokens: int = 800,
+        tool_choice: Optional[dict] = None,
     ) -> Optional[dict]:
         """Низкоуровневый chat-completion с tools. Возвращает сырой JSON ответа или None.
-        tools=None — финальный compose-вызов без tools (модель обязана дать текст)."""
+        tools=None — финальный compose-вызов без tools (модель обязана дать текст).
+        tool_choice — forced choice (принудительное делегирование), иначе auto."""
         base_url = getattr(self.config, "groq_api_base", "https://api.groq.com").rstrip("/")
         self._last_groq_error = ""
         try:
@@ -594,7 +657,7 @@ class ResponseGenerator:
                 )
                 if tools:
                     kwargs["tools"] = tools
-                    kwargs["tool_choice"] = "auto"
+                    kwargs["tool_choice"] = tool_choice or "auto"
                 if "qwen" in model:
                     # Qwen3 — reasoning-модель: без этого думает в <think>-блоке,
                     # сжигая max_tokens на рассуждения. none = сразу ответ.
@@ -611,7 +674,7 @@ class ResponseGenerator:
             }
             if tools:
                 payload["tools"] = tools
-                payload["tool_choice"] = "auto"
+                payload["tool_choice"] = tool_choice or "auto"
             if "qwen" in model:
                 payload["reasoning_effort"] = "none"
             resp = requests.post(
@@ -798,15 +861,12 @@ class ResponseGenerator:
             "If user asks about goals/deadlines/diary — say briefly «это к Iris».",
             "If user asks for code/architecture/dev tasks — say «это к Cipher».",
             "",
-            "RESEARCH vs LOOKUP (decision rule, check BEFORE any web_search):",
-            "- «Что пишут про X», any news/markets/IPO/releases topic, digests,",
-            "  overviews, comparisons, anything needing 2+ sources or freshness",
-            "  checking → delegate_research IMMEDIATELY as your FIRST action.",
-            "  Do NOT web_search these yourself — Newser does it better (sources,",
-            "  cross-checking). Delegating is the designed flow, not a failure.",
-            "- Only quick single facts stay yours: weather, time, one address /",
-            "  price / opening hours, «когда выйдет X» — one web_search, done.",
-            "- After delegate_research you are DONE — do not compose an answer.",
+            "RESEARCH:",
+            "- Deep research is routed to Newser by a classifier before you even run —",
+            "  not your concern. But if MID-TASK you realize the answer needs fresh",
+            "  multi-source research, call delegate_research yourself (after it you",
+            "  are DONE — no own answer). Quick single facts (weather, time, one",
+            "  address/price) stay yours: one web_search, short answer.",
             "",
             "RULES:",
             "- Never invent facts (weather, prices, dates). Call tools instead.",
@@ -877,6 +937,15 @@ class ResponseGenerator:
             "- Profile: update facts about owner (update_profile) when learning stable new info.",
             "- Discipline: call out procrastination directly, no soft-pedaling.",
             "",
+            "DAY AWARENESS:",
+            "- The DAY CONTEXT block below is computed from real data (wake time,",
+            "  today's diary, tomorrow's shift). Day plans start from NOW — NEVER",
+            "  schedule hours that already passed. Build around what he already did",
+            "  and what he committed to.",
+            "- Owner mentions a concrete plan for today/tonight («в 21 бильярд»,",
+            "  «вечером кино») → add_diary_entry tags=['план','отдых'] with the time,",
+            "  and respect it in any plan — committed rest is not negotiable.",
+            "",
             "PRIORITY AWARENESS:",
             "- The TOP PRIORITIES block below (if present) is computed from REAL deadlines",
             "  and today's schedule — treat it as the truth, always reason against it.",
@@ -941,6 +1010,11 @@ class ResponseGenerator:
             "- «сделал X» → if X was a goal — mark_goal_done; otherwise diary tag='достижение'.",
             "- «забей/не получается» → ask «что блокирует?» once, no pressure.",
             "- Asks to remove/change his profile fact → call update_profile with the right action.",
+            "- Going out to play/rest («иду в бильярд», «пойду поиграю», «гулять»,",
+            "  «кино с друзьями») → add_diary_entry tags=['план','отдых'], plus ONE",
+            "  warm line in style («Хорошей игры 🎱»). Situational warmth like this",
+            "  is wanted and is NOT the banned pep-talk: pep-talk is empty cheering",
+            "  («у тебя всё получится»), this is human courtesy tied to a real moment.",
             "- «отстань / не сейчас / занят / потом» → call snooze_pings (default 2h),",
             "  reply ONE line like «ок, до 16:00 молчу». No hurt feelings, no lecture.",
             "- «сегодня без трени / не пойду в зал» → add_diary_entry tags=['спорт'] with the",
@@ -992,17 +1066,17 @@ class ResponseGenerator:
                 if t:
                     principles_block.append(f"  • {t}")
 
-        # ---- TOP PRIORITIES: детерминированный блок из реальных дедлайнов ----
-        # Без него Iris слепа к «что сейчас важно» и на «занимаюсь кодингом»
-        # при тесте через 2 дня отвечает «Записала».
+        # ---- Детерминированные блоки: TOP PRIORITIES + DAY CONTEXT ----
+        # Без них Iris слепа к «что важно» и «что уже было сегодня»: отвечала
+        # «Записала» при тесте через 2 дня и планировала прошедшие часы.
         prio_block: List[str] = []
         try:
-            from logic.priorities import build_priorities_block
-            block = build_priorities_block()
-            if block:
-                prio_block = ["", block]
+            from logic.priorities import build_day_context, build_priorities_block
+            for block in (build_priorities_block(), build_day_context()):
+                if block:
+                    prio_block += ["", block]
         except Exception as e:
-            logger.warning("Priorities block failed: %s", e)
+            logger.warning("Priorities/day-context block failed: %s", e)
 
         return "\n".join(
             core + voice
@@ -1059,6 +1133,9 @@ class ResponseGenerator:
             "  one short line, NO tools, never repeat the previous answer.",
             "- If nothing found — say plainly «не нашёл инфу про X», no fluff.",
             "- If sources conflict — flag it explicitly.",
+            "- Investment / «на чём заработать» questions: summarize what sources say",
+            "  + ONE plain line that this is a news digest, not financial analysis or",
+            "  a recommendation. No confident profit promises. Short, not preachy.",
             "- Translate / summarize search results into the user's language (usually Russian).",
             "  Don't dump raw English snippets when user wrote in Russian.",
             "- No journalist clichés («as reported», «according to sources»).",
