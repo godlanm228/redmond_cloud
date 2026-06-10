@@ -457,6 +457,23 @@ class ResponseGenerator:
                     api_key, model, messages, tools=hop_tools,
                     temperature=temperature, max_tokens=max_tokens,
                 )
+                # Финальный compose: модель иногда игнорирует запрет tools и
+                # пишет tool call → Groq 400 tool_use_failed. Один повтор с
+                # жёстким стоп-сообщением обычно дисциплинирует — финальный
+                # ответ не роняем на fallback-модель.
+                if (completion is None and final_hop
+                        and "tool_use_failed" in getattr(self, "_last_groq_error", "")):
+                    messages.append({
+                        "role": "system",
+                        "content": (
+                            "You just attempted a tool call. Tools are GONE. "
+                            "Write the final plain-text answer immediately."
+                        ),
+                    })
+                    completion = self._groq_chat(
+                        api_key, model, messages, tools=None,
+                        temperature=temperature, max_tokens=max_tokens,
+                    )
                 if completion is not None:
                     if model != primary_model:
                         logger.warning(
@@ -550,6 +567,7 @@ class ResponseGenerator:
         """Низкоуровневый chat-completion с tools. Возвращает сырой JSON ответа или None.
         tools=None — финальный compose-вызов без tools (модель обязана дать текст)."""
         base_url = getattr(self.config, "groq_api_base", "https://api.groq.com").rstrip("/")
+        self._last_groq_error = ""
         try:
             if GROQ_SDK_AVAILABLE:
                 kwargs = dict(
@@ -561,6 +579,10 @@ class ResponseGenerator:
                 if tools:
                     kwargs["tools"] = tools
                     kwargs["tool_choice"] = "auto"
+                if "qwen" in model:
+                    # Qwen3 — reasoning-модель: без этого думает в <think>-блоке,
+                    # сжигая max_tokens на рассуждения. none = сразу ответ.
+                    kwargs["extra_body"] = {"reasoning_effort": "none"}
                 client = Groq(api_key=api_key)
                 completion = client.chat.completions.create(**kwargs)
                 return completion.to_dict() if hasattr(completion, "to_dict") else completion.model_dump()
@@ -574,6 +596,8 @@ class ResponseGenerator:
             if tools:
                 payload["tools"] = tools
                 payload["tool_choice"] = "auto"
+            if "qwen" in model:
+                payload["reasoning_effort"] = "none"
             resp = requests.post(
                 f"{base_url}/openai/v1/chat/completions",
                 headers={"Authorization": f"Bearer {api_key}"},
@@ -583,6 +607,7 @@ class ResponseGenerator:
             resp.raise_for_status()
             return resp.json()
         except Exception as e:
+            self._last_groq_error = str(e)
             logger.warning("Groq chat call failed: %s", e)
             return None
 
@@ -764,6 +789,11 @@ class ResponseGenerator:
             "  No ## headers, no tables.",
             "- For URLs use Markdown links [name](https://...) — they will be made clickable.",
             "- Length proportional to question. Short Q → short A. Don't pad.",
+            "- META-COMMENTS: if owner's message is only a reaction/comment/thanks/joke",
+            "  about previous answers («молодец», «ну ты даёшь», «спасибо», «ок», feedback",
+            "  on how you work) with NO new question — reply ONE short line. NO tools.",
+            "- NEVER re-answer a question that you or another agent already answered in",
+            "  this chat. Add details only if the owner explicitly asks for more.",
             "",
             "TOOL CONTEXT FORMAT (in user message):",
             "- [Web search — source: google] reliable.",
@@ -823,6 +853,8 @@ class ResponseGenerator:
             "- Stay out of other agents' zones: weather/facts → say «это к Redmond»; "
             "news/search → «это к Newser»; code → «это к Cipher».",
             "- Reply in the SAME language as user's last message.",
+            "- If owner's message is just a reaction/comment/thanks with no new request —",
+            "  one short line back, NO tools, don't repeat what was already said.",
             "- In Russian, use FEMININE grammatical forms — you are SHE. "
             "Say «поняла», «записала», «решила», «уверена», «довольна», «я бы». "
             "NEVER «понял», «записал», «решил», «уверен», «доволен», «я бы сделал».",
@@ -944,6 +976,8 @@ class ResponseGenerator:
             "",
             "RULES:",
             "- NEVER invent numbers, dates, events. Only what's in search results.",
+            "- If owner's message is just a reaction/comment/thanks with no new question —",
+            "  one short line, NO tools, never repeat the previous answer.",
             "- If nothing found — say plainly «не нашёл инфу про X», no fluff.",
             "- If sources conflict — flag it explicitly.",
             "- Translate / summarize search results into the user's language (usually Russian).",
@@ -951,6 +985,14 @@ class ResponseGenerator:
             "- No journalist clichés («as reported», «according to sources»).",
             "- **bold** for key terms is OK (rendered). No ## headers, no tables.",
             "- Length: 3-8 bullets typically. Don't pad.",
+            "",
+            "SEARCH PRECISION:",
+            "- Build the query in the language of the topic's region: German transit /",
+            "  local services → German query + region='de-de'; Russian topics → 'ru-ru'.",
+            "  Example: «Bus Essen Hbf nach Bottrop Hbf Fahrplan», not an English query.",
+            "- Prefer official sources (operator/vendor sites) over aggregators; for NRW",
+            "  transit that is vrr.de / bahn.de / vestische.de.",
+            "- One precise query beats three vague ones — you have a tight tool budget.",
             "",
             "SOURCE QUALITY:",
             "- Prefer results marked [trusted] in the search output — these are official "
@@ -1036,6 +1078,11 @@ class ResponseGenerator:
 
     @staticmethod
     def _postprocess(response: str, ctx: GenerationContext) -> str:
+        # Qwen (fallback) — reasoning-модель: рассуждает в <think>…</think>,
+        # в Telegram это уходить не должно. Незакрытый тег (обрезан по
+        # max_tokens) означает что весь хвост — рассуждение, режем целиком.
+        response = re.sub(r"<think>.*?</think>", "", response, flags=re.DOTALL | re.IGNORECASE)
+        response = re.sub(r"<think>.*", "", response, flags=re.DOTALL | re.IGNORECASE)
         # Нормализуем пробелы ВНУТРИ строк, но сохраняем переносы —
         # иначе абзацы и списки LLM схлопываются в стену текста.
         lines = [" ".join(line.split()) for line in response.split("\n")]

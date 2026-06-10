@@ -89,10 +89,14 @@ class WebSearcher:
 
     # ---------- публичный API ----------
 
-    def search(self, query: str, top_k: int = 3) -> Tuple[List[Dict[str, str]], str]:
+    def search(
+        self, query: str, top_k: int = 3, region: str = "wt-wt"
+    ) -> Tuple[List[Dict[str, str]], str]:
         """
         Поиск с автоматическим fallback. Возвращает (results, source).
         source ∈ {"google", "duckduckgo", "none"}.
+        region — хинт для DDG ("de-de", "ru-ru", …), даёт локальную выдачу
+        для региональных тем (транспорт, локальные сервисы).
         """
         if not query or not query.strip():
             return [], "none"
@@ -108,7 +112,7 @@ class WebSearcher:
 
         # 2. DuckDuckGo fallback
         if self._ddg_available:
-            ddg_results = self._search_ddg(query, top_k)
+            ddg_results = self._search_ddg(query, top_k, region)
             if ddg_results:
                 return ddg_results, "duckduckgo"
 
@@ -143,11 +147,12 @@ class WebSearcher:
             logger.exception("Google search error")
             return None
 
-    def _search_ddg(self, query: str, top_k: int) -> List[Dict[str, str]]:
+    def _search_ddg(self, query: str, top_k: int, region: str = "wt-wt") -> List[Dict[str, str]]:
         try:
             from ddgs import DDGS
+            region = (region or "wt-wt").lower()
             with DDGS() as ddgs:
-                raw = list(ddgs.text(query, region="wt-wt", safesearch="moderate", max_results=top_k))
+                raw = list(ddgs.text(query, region=region, safesearch="moderate", max_results=top_k))
             return [
                 {
                     "title": r.get("title", ""),

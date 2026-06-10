@@ -67,13 +67,23 @@ TOOL_SCHEMAS = [
             "description": (
                 "Web search via Google (primary) or DuckDuckGo (fallback). "
                 "Use for current events, news, prices, facts you don't know. "
-                "Returns titles + snippets + URLs."
+                "Returns titles + snippets + URLs. For region-specific topics "
+                "(transit, local services, local news) write the query in that "
+                "region's language AND pass the region parameter."
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
                     "query": {"type": "string", "description": "Search query"},
                     "top_k": {"type": "integer", "description": "Results count 1-5", "default": 3},
+                    "region": {
+                        "type": "string",
+                        "description": (
+                            "Region hint like 'de-de', 'ru-ru', 'us-en'. "
+                            "Use the topic's region (German transit → 'de-de'). "
+                            "Default: 'wt-wt' (worldwide)."
+                        ),
+                    },
                 },
                 "required": ["query"],
             },
@@ -109,7 +119,7 @@ TOOL_SCHEMAS = [
         "function": {
             "name": "web_fetch",
             "description": (
-                "Download a webpage by URL and return cleaned text (~1500 chars). "
+                "Download a webpage or PDF by URL and return cleaned text (~1500 chars). "
                 "Use after web_search gave you a URL and you need page details."
             ),
             "parameters": {
@@ -349,7 +359,10 @@ def execute_tool(name: str, args: Dict[str, Any], rg=None) -> str:
     if name == "get_weather":
         return _tool_get_weather(args.get("city", ""))
     if name == "web_search":
-        return _tool_web_search(args.get("query", ""), int(args.get("top_k", 3)), rg)
+        return _tool_web_search(
+            args.get("query", ""), int(args.get("top_k", 3)), rg,
+            region=str(args.get("region", "") or "wt-wt"),
+        )
     if name == "get_news_headlines":
         return _tool_get_news_headlines(args.get("category", "all"), int(args.get("limit", 8)))
     if name == "web_fetch":
@@ -583,7 +596,7 @@ def _rank_results(results: list) -> list:
     return [r for _, r in indexed]
 
 
-def _tool_web_search(query: str, top_k: int, rg) -> str:
+def _tool_web_search(query: str, top_k: int, rg, region: str = "wt-wt") -> str:
     if not query or not query.strip():
         return "Пустой запрос."
     if rg is None or rg.searcher is None:
@@ -593,7 +606,7 @@ def _tool_web_search(query: str, top_k: int, rg) -> str:
         # вытащить надёжные источники наверх если они есть в выдаче.
         raw_k = max(1, min(top_k, 5))
         search_k = max(raw_k * 2, raw_k + 3)
-        results, source = rg.searcher.search(query, top_k=search_k)
+        results, source = rg.searcher.search(query, top_k=search_k, region=region)
     except Exception as e:
         return f"Ошибка поиска: {e}"
 
@@ -784,7 +797,11 @@ def _tool_web_fetch(url: str) -> str:
         if resp.status_code != 200:
             return f"HTTP {resp.status_code} — страница недоступна."
 
-        text = _extract_text(resp.text)
+        ctype = (resp.headers.get("Content-Type") or "").lower()
+        if "pdf" in ctype or resp.content[:5] == b"%PDF-":
+            text = _extract_pdf_text(resp.content)
+        else:
+            text = _extract_text(resp.text)
         # 1500, не 3000: в сырой текст попадает навигация/меню, а каждый лишний
         # символ пересылается в Groq на каждом следующем хопе tool-loop (TPM 8K).
         if len(text) > 1500:
@@ -793,6 +810,23 @@ def _tool_web_fetch(url: str) -> str:
     except Exception as e:
         logger.exception("web_fetch failed")
         return f"Ошибка загрузки: {e}"
+
+
+def _extract_pdf_text(data: bytes) -> str:
+    """Текст из PDF (расписания транспорта, прайсы — частый случай в выдаче).
+    Раньше PDF отдавался как бинарный мусор и модель жгла хопы впустую."""
+    try:
+        from pypdf import PdfReader
+    except ImportError:
+        return "(PDF — извлечение текста недоступно: pypdf не установлен)"
+    import io
+    try:
+        reader = PdfReader(io.BytesIO(data))
+        pages = [p.extract_text() or "" for p in reader.pages[:5]]
+        text = re.sub(r"\s+", " ", " ".join(pages)).strip()
+        return text or "(PDF без текстового слоя — вероятно скан)"
+    except Exception as e:
+        return f"(PDF не разобрался: {e})"
 
 
 def _extract_text(html: str) -> str:
