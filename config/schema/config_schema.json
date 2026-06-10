@@ -7,7 +7,6 @@
     "port": {"type": "integer", "minimum": 1, "maximum": 65535, "default": 8000},
     "debug": {"type": "boolean", "default": false},
     "data_dir": {"type": "string", "minLength": 1},
-    "plugin_dir": {"type": "string", "minLength": 1},
     "max_workers": {"type": "integer", "minimum": 1, "maximum": 32},
 
     "llm_provider_order": {
@@ -50,6 +49,6 @@
     "top_k": {"type": "integer", "minimum": 1, "default": 3},
     "search_timeout_sec": {"type": "integer", "minimum": 1, "default": 10}
   },
-  "required": ["host", "port", "data_dir", "plugin_dir", "max_workers"],
+  "required": ["host", "port", "data_dir", "max_workers"],
   "additionalProperties": false
 }

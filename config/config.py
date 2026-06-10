@@ -27,7 +27,6 @@ class AppConfig(BaseModel):
 
     # ---------- директории ----------
     data_dir: Path = Field(default=Path("data"))
-    plugin_dir: Path = Field(default=Path("plugins"))
 
     # ---------- LLM провайдеры (fallback цепочка) ----------
     llm_provider_order: List[str] = Field(
@@ -84,7 +83,7 @@ class AppConfig(BaseModel):
 
     # ---------- валидаторы ----------
 
-    @field_validator("data_dir", "plugin_dir", mode="before")
+    @field_validator("data_dir", mode="before")
     @classmethod
     def ensure_dir(cls, v):
         path = Path(v)
