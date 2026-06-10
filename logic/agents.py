@@ -36,6 +36,9 @@ class AgentConfig:
     # Температура LLM — главный рычаг различия «голосов» агентов:
     # Newser сухой и фактологичный, Iris собранная, Redmond живой.
     temperature: float = 0.5
+    # Потолок completion-токенов. Русский текст дорогой (~1 токен на 2-3 символа):
+    # дайджест Newser на 800 обрезался посреди ссылки.
+    max_tokens: int = 800
 
     def _all_triggers(self) -> List[str]:
         """@-триггеры + имена-алиасы с разделителями (запятая/пробел/двоеточие).
@@ -125,6 +128,7 @@ NEWSER = AgentConfig(
     executor="groq",
     output_format="html",  # ссылки кликабельные через <a href>
     temperature=0.2,
+    max_tokens=1300,  # дайджест: 4 секции × 2 пункта на русском не влезали в 800
     allowed_tools=["get_news_headlines", "web_search", "web_fetch", "get_current_time"],
 )
 
