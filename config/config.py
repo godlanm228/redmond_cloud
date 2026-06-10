@@ -3,13 +3,6 @@ from pathlib import Path
 from typing import List
 from pydantic import BaseModel, Field, field_validator, model_validator
 
-try:
-    import torch
-    _TORCH_AVAILABLE = True
-except ImportError:
-    torch = None
-    _TORCH_AVAILABLE = False
-
 
 class AppConfig(BaseModel):
     """Конфигурация приложения. Секреты подтягиваются из переменных окружения."""
@@ -51,9 +44,9 @@ class AppConfig(BaseModel):
     gemini_model: str = Field(default="gemini-2.0-flash")
 
     # ---------- ASR / TTS ----------
-    asr_engine: str = Field(default="whisper")
-    whisper_device: str = Field(default="", description="'cpu' | 'cuda' | '' (auto)")
-    whisper_model_size: str = Field(default="medium")
+    # Голосовые в TG транскрибируются через Groq Whisper API (free tier) —
+    # локальный Whisper на VM с 1 GB RAM невозможен.
+    groq_whisper_model: str = Field(default="whisper-large-v3-turbo")
 
     tts_engine: str = Field(default="edge-tts", description="'edge-tts' | 'pyttsx3' | 'console'")
     edge_tts_voice: str = Field(
@@ -89,17 +82,6 @@ class AppConfig(BaseModel):
         path = Path(v)
         path.mkdir(parents=True, exist_ok=True)
         return path
-
-    @field_validator("whisper_device", mode="before")
-    @classmethod
-    def validate_device(cls, v):
-        if not v:
-            if _TORCH_AVAILABLE and torch.cuda.is_available():
-                return "cuda"
-            return "cpu"
-        if v not in ("cpu", "cuda"):
-            raise ValueError(f"Device must be 'cpu' or 'cuda', got '{v}'")
-        return v
 
     @field_validator("log_level")
     @classmethod
