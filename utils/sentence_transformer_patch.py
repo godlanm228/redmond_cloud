@@ -78,7 +78,8 @@ def patch_huggingface_hub():
         return True
 
     except ImportError:
-        logger.warning("huggingface_hub не установлен")
+        # В cloud lite-mode huggingface намеренно отсутствует — это не проблема
+        logger.debug("huggingface_hub не установлен")
         return False
     except Exception as e:
         logger.error(f"✗ Не удалось применить патч: {e}")
