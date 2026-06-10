@@ -29,6 +29,12 @@ import requests
 
 logger = logging.getLogger(__name__)
 
+# Маркер делегирования: tool возвращает его вместо обычного результата,
+# tool-loop немедленно отдаёт его наверх, handler оркеструет handoff.
+# Telegram НЕ доставляет ботам сообщения других ботов — поэтому делегирование
+# только in-process, а @-меншен в чате — витрина для владельца.
+DELEGATION_MARKER = "\x00DELEGATE\x00"
+
 
 # ============================================================================
 # Tool schemas (формат OpenAI / Groq function calling)
@@ -137,6 +143,35 @@ TOOL_SCHEMAS = [
             "name": "get_current_time",
             "description": "Current date and time in owner's timezone (Europe/Berlin).",
             "parameters": {"type": "object", "properties": {}},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "delegate_research",
+            "description": (
+                "Hand off DEEP research to Newser (the search agent): multi-source "
+                "topics, news digests, fresh-data questions needing several searches. "
+                "Newser answers the owner directly — after this call you are DONE, "
+                "do not compose an answer yourself. Write the task self-contained, "
+                "in the owner's language: what to find + known context (place, dates, "
+                "owner's plans). NEVER use for chitchat, time, weather, single quick "
+                "lookups you can do yourself, or anything already answered."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "task": {
+                        "type": "string",
+                        "description": "Self-contained research task with context",
+                    },
+                    "region": {
+                        "type": "string",
+                        "description": "Optional region hint like 'de-de' for region-specific topics",
+                    },
+                },
+                "required": ["task"],
+            },
         },
     },
     {
@@ -383,6 +418,12 @@ def execute_tool(name: str, args: Dict[str, Any], rg=None) -> str:
         return _tool_web_fetch(args.get("url", ""))
     if name == "get_current_time":
         return _tool_get_current_time()
+    if name == "delegate_research":
+        payload = {
+            "task": str(args.get("task", "")).strip(),
+            "region": str(args.get("region", "")).strip(),
+        }
+        return DELEGATION_MARKER + json.dumps(payload, ensure_ascii=False)
     if name == "snooze_pings":
         from logic.coach_storage import set_snooze
         until = set_snooze(float(args.get("hours", 2)))
