@@ -426,6 +426,7 @@ class ResponseGenerator:
         successful_tool_calls: List[str] = []
 
         temperature = getattr(ctx.agent, "temperature", 0.5) if ctx.agent else 0.5
+        max_tokens = getattr(ctx.agent, "max_tokens", 800) if ctx.agent else 800
 
         # Tool-loop: максимум 5 итераций (модель → tools → модель → ...).
         # ПОСЛЕДНИЙ хоп — принудительный compose БЕЗ tools: вся нарезерченная
@@ -453,7 +454,8 @@ class ResponseGenerator:
             completion = None
             for model in model_chain:
                 completion = self._groq_chat(
-                    api_key, model, messages, tools=hop_tools, temperature=temperature,
+                    api_key, model, messages, tools=hop_tools,
+                    temperature=temperature, max_tokens=max_tokens,
                 )
                 if completion is not None:
                     if model != primary_model:
@@ -543,6 +545,7 @@ class ResponseGenerator:
         messages: list,
         tools: Optional[list],
         temperature: float = 0.5,
+        max_tokens: int = 800,
     ) -> Optional[dict]:
         """Низкоуровневый chat-completion с tools. Возвращает сырой JSON ответа или None.
         tools=None — финальный compose-вызов без tools (модель обязана дать текст)."""
@@ -553,7 +556,7 @@ class ResponseGenerator:
                     model=model,
                     messages=messages,
                     temperature=temperature,
-                    max_tokens=800,
+                    max_tokens=max_tokens,
                 )
                 if tools:
                     kwargs["tools"] = tools
@@ -566,7 +569,7 @@ class ResponseGenerator:
                 "model": model,
                 "messages": messages,
                 "temperature": temperature,
-                "max_tokens": 800,
+                "max_tokens": max_tokens,
             }
             if tools:
                 payload["tools"] = tools
