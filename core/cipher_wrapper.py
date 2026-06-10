@@ -51,6 +51,28 @@ def _set_lock(hours: float = 1.0) -> str:
     return until.strftime("%H:%M")
 
 
+def _parse_reset_hours(text: str) -> float:
+    """Часы до сброса лимита из сообщения CLI («resets 9:30pm (UTC)»).
+    Не распарсилось — дефолт 1ч (перепроверим раньше, чем недождёмся)."""
+    m = re.search(r"resets?\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)?", text, re.I)
+    if not m:
+        return 1.0
+    from datetime import datetime, timezone
+    h = int(m.group(1))
+    minute = int(m.group(2) or 0)
+    ampm = (m.group(3) or "").lower()
+    if ampm == "pm" and h != 12:
+        h += 12
+    if ampm == "am" and h == 12:
+        h = 0
+    now_utc = datetime.now(timezone.utc)
+    target = now_utc.replace(hour=h, minute=minute, second=0, microsecond=0)
+    if target <= now_utc:
+        target += timedelta(days=1)
+    hours = (target - now_utc).total_seconds() / 3600
+    return min(max(hours, 0.25), 12.0)
+
+
 async def run_cipher(task: str) -> str:
     """Выполнить задачу через Claude Code CLI. Возвращает текст для чата."""
     task = (task or "").strip()
@@ -88,9 +110,9 @@ async def run_cipher(task: str) -> str:
     combined = text or err_text
     logger.warning("Cipher failed (rc=%s): %s", proc.returncode, combined[:300])
 
-    if re.search(r"rate.?limit|usage limit|limit (will )?reset", combined, re.I):
-        until = _set_lock(1.0)
-        return f"Упёрся в лимит Pro — на КД до {until}."
+    if re.search(r"rate.?limit|usage limit|session limit|hit your .*limit|limit.{0,3}resets?", combined, re.I):
+        until = _set_lock(_parse_reset_hours(combined))
+        return f"Упёрся в лимит Pro (общий с десктопом Влада) — на КД до {until}."
     if re.search(r"log ?in|login|authenticat|credentials|setup-token", combined, re.I):
         return (
             "Я не авторизован на VM. Влад: `ssh` на сервер → команда `claude` → "
