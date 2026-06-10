@@ -154,13 +154,17 @@ def parse_shift_screenshot(image_b64: str, api_key: str) -> Tuple[List[Dict[str,
     return items, ""
 
 
-def ingest_shift_screenshot(image_b64: str, api_key: str) -> str:
-    """Полный путь: скрин → парс → сохранить → человекочитаемый ответ для чата."""
+def ingest_shift_screenshot(image_b64: str, api_key: str) -> Tuple[str, int]:
+    """Полный путь: скрин → парс → сохранить. Возвращает (ответ для чата,
+    сколько смен сохранено) — n>0 триггерит план недели от Iris."""
     items, err = parse_shift_screenshot(image_b64, api_key)
     if err:
-        return f"Скрин не разобрал ({err}). Кинь смены текстом — «чт 14:00-23:00, пт 18:00-00:00…»"
+        return (
+            f"Скрин не разобрал ({err}). Кинь смены текстом — «чт 14:00-23:00, пт 18:00-00:00…»",
+            0,
+        )
     if not items:
-        return "На скрине смен не увидел. Если они там есть — кинь текстом."
+        return "На скрине смен не увидел. Если они там есть — кинь текстом.", 0
 
     n = save_shifts(items)
     day_names = ["пн", "вт", "ср", "чт", "пт", "сб", "вс"]
@@ -173,5 +177,6 @@ def ingest_shift_screenshot(image_b64: str, api_key: str) -> str:
             continue
     return (
         f"Принял график, смен сохранено: {n}\n\n" + "\n".join(lines) +
-        "\n\nЕсли что-то распознал криво — поправь текстом."
+        "\n\nЕсли что-то распознал криво — поправь текстом.",
+        n,
     )

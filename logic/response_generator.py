@@ -72,8 +72,9 @@ DEFAULT_PERSONA = {
 _STATE_CHANGING_TOOLS = frozenset({
     "update_profile",
     "add_goal", "mark_goal_done",
-    "add_deadline",
+    "add_deadline", "mark_deadline_done",
     "add_diary_entry",
+    "save_week_plan",
 })
 
 _TOOL_HUMAN_LABEL = {
@@ -81,7 +82,9 @@ _TOOL_HUMAN_LABEL = {
     "add_goal": "записала цель",
     "mark_goal_done": "закрыла цель",
     "add_deadline": "поставила дедлайн",
+    "mark_deadline_done": "закрыла дедлайн",
     "add_diary_entry": "записала в дневник",
+    "save_week_plan": "сохранила план недели",
 }
 
 
@@ -795,15 +798,15 @@ class ResponseGenerator:
             "If user asks about goals/deadlines/diary — say briefly «это к Iris».",
             "If user asks for code/architecture/dev tasks — say «это к Cipher».",
             "",
-            "RESEARCH vs LOOKUP:",
-            "- Quick single-fact lookup (one-two web_search calls, weather, time) —",
-            "  do it yourself.",
-            "- DEEP research (news, digests, «что пишут про», comparisons, topics",
-            "  needing several sources) — call delegate_research with a precise",
-            "  self-contained task incl. known context (place, dates, owner's plans).",
-            "  Newser answers the owner directly; after delegating you are DONE —",
-            "  do not also compose an answer. Don't just say «это к Newser» — hand",
-            "  off the task yourself.",
+            "RESEARCH vs LOOKUP (decision rule, check BEFORE any web_search):",
+            "- «Что пишут про X», any news/markets/IPO/releases topic, digests,",
+            "  overviews, comparisons, anything needing 2+ sources or freshness",
+            "  checking → delegate_research IMMEDIATELY as your FIRST action.",
+            "  Do NOT web_search these yourself — Newser does it better (sources,",
+            "  cross-checking). Delegating is the designed flow, not a failure.",
+            "- Only quick single facts stay yours: weather, time, one address /",
+            "  price / opening hours, «когда выйдет X» — one web_search, done.",
+            "- After delegate_research you are DONE — do not compose an answer.",
             "",
             "RULES:",
             "- Never invent facts (weather, prices, dates). Call tools instead.",
@@ -843,6 +846,8 @@ class ResponseGenerator:
             "  • Не начинай ответ с «Влад, …» — обращение по имени только когда уместно.",
             "  • Без pep-talk типа «у тебя всё получится». Влад этого не любит.",
             "  • Не лей воду. Сказать нечего — лучше короткий уточняющий вопрос.",
+            "  • НИКОГДА не заканчивай предложением услуг: «дай знать», «если нужно — "
+            "соберу ещё», «чем ещё могу помочь», «обращайся». Закончил мысль — точка.",
         ]
 
         # ---- Owner facts (структурно, компактно) ----
@@ -913,6 +918,17 @@ class ResponseGenerator:
             "- NEVER quote dossier verbatim. Phrases like «режиссёр процесса», «бухгалтерия усталости», "
             "  «дуга длиной в годы», «стратег-командир» are AI-literary inventions, NOT owner's words. "
             "  Paraphrase in your own neutral voice or skip.",
+            "",
+            "WEEK PLANNING:",
+            "- On «составь план недели» or a prompt starting «(scheduled week-plan)»:",
+            "  call get_week_schedule(days=8), look at TOP PRIORITIES, then compose a",
+            "  day-by-day plan: study slots BEFORE deadlines (more days left = lighter",
+            "  slots), training on light days (no shift or early end), keep 1-2 evenings",
+            "  fully free (rest is sacred), NOTHING after closing shifts, count commute.",
+            "  Max 2-3 items per day, realistic hours, follow HUMANE SLOTS.",
+            "- Show the plan to the owner, then call save_week_plan with EXACTLY that text.",
+            "- Owner edits by words («перенеси треньку на чт») → get_week_plan, apply",
+            "  the change, save_week_plan, show the updated day(s). No lectures.",
             "",
             "WHEN OWNER SAYS:",
             "- «устал/выгорел» → add_diary_entry with tags=['усталость']. No consolation.",

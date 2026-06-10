@@ -203,6 +203,14 @@ async def _generate(
 
 _PLACEHOLDER_AFTER_SEC = 5.0
 
+# Персональные плейсхолдеры: «копаю» уместно Ньюсеру, но не Айрис —
+# её долгие ответы это обычно «посмотрю расписание/план», не рисёрч.
+_PLACEHOLDER_TEXTS = {
+    "Redmond": "🦞 Сейчас гляну…",
+    "Iris": "🎯 Сейчас посмотрю, минутку…",
+    "Newser": "📰 Копаю, минуту…",
+}
+
 
 async def _generate_with_placeholder(
     agent: AgentConfig,
@@ -228,7 +236,8 @@ async def _generate_with_placeholder(
     if bot is not None:
         try:
             placeholder = await bot.send_message(
-                chat_id=chat_id, text=f"{agent.emoji} Копаю, минуту…",
+                chat_id=chat_id,
+                text=_PLACEHOLDER_TEXTS.get(agent.name, f"{agent.emoji} Минутку…"),
             )
             logger.info("Placeholder posted (%s, msg %s)", agent.name, placeholder.message_id)
         except Exception:
@@ -341,10 +350,26 @@ async def redmond_photo_handler(update: Update, context: ContextTypes.DEFAULT_TY
     logger.info("Photo from owner (%d KB) — parsing as shift schedule", len(raw) // 1024)
     from logic.week_schedule import ingest_shift_screenshot
     async with coordinator.typing("Redmond", chat_id):
-        result_text = await asyncio.to_thread(
+        result_text, saved_n = await asyncio.to_thread(
             ingest_shift_screenshot, image_b64, dispatcher.config.groq_api_key,
         )
     await coordinator.respond_as("Redmond", chat_id, result_text, "🦞", "html")
+
+    # Смены загружены → Iris сразу составляет план недели (учёба под дедлайны,
+    # треньки в лёгкие дни, 1-2 защищённых вечера). Правится потом словами.
+    if saved_n > 0:
+        iris = agent_by_name("Iris")
+        if iris is not None:
+            plan_prompt = (
+                "(scheduled week-plan) Влад загрузил новый график смен. Составь "
+                "план недели по правилам WEEK PLANNING и сохрани его."
+            )
+            async with coordinator.typing(iris.name, chat_id):
+                plan = await _generate_with_placeholder(iris, plan_prompt, context, chat_id)
+            if plan.startswith(DELEGATION_MARKER):
+                await _run_delegation(iris, plan[len(DELEGATION_MARKER):], context, chat_id)
+            else:
+                await coordinator.respond_as(iris.name, chat_id, plan, iris.emoji, iris.output_format)
 
 
 # ---------- Redmond handler (с router) ----------
