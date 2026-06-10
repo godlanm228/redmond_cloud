@@ -110,6 +110,7 @@ IRIS = AgentConfig(
         "add_diary_entry", "read_diary",
         "add_deadline", "list_deadlines", "mark_deadline_done",
         "snooze_pings", "get_week_schedule",
+        "get_week_plan", "save_week_plan",
         "delegate_research",  # внешние факты для советов — через Newser, не гадать
     ],
 )

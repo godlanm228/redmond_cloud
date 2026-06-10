@@ -148,6 +148,31 @@ TOOL_SCHEMAS = [
     {
         "type": "function",
         "function": {
+            "name": "get_week_plan",
+            "description": "Read the current saved week plan text. Use before editing it.",
+            "parameters": {"type": "object", "properties": {}},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "save_week_plan",
+            "description": (
+                "Save the week plan AFTER composing or editing it. Pass the full "
+                "final plan text exactly as shown to the owner."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "text": {"type": "string", "description": "Full plan text"},
+                },
+                "required": ["text"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "delegate_research",
             "description": (
                 "Hand off DEEP research to Newser (the search agent): multi-source "
@@ -431,6 +456,19 @@ def execute_tool(name: str, args: Dict[str, Any], rg=None) -> str:
     if name == "get_week_schedule":
         from logic.week_schedule import format_week
         return format_week(int(args.get("days", 8)))
+    if name == "get_week_plan":
+        from logic.coach_storage import get_week_plan
+        plan = get_week_plan()
+        if not plan.get("text"):
+            return "План недели ещё не составлен."
+        return f"План недели (обновлён {plan.get('updated', '?')}):\n\n{plan['text']}"
+    if name == "save_week_plan":
+        from logic.coach_storage import save_week_plan
+        t = str(args.get("text", "")).strip()
+        if not t:
+            return "Пустой план не сохраняю."
+        save_week_plan(t)
+        return "План недели сохранён."
     if name == "read_dossier_section":
         return _tool_read_dossier_section(args.get("section", "core"))
     # Backward compat — старое имя tool, на случай если LLM где-то его помнит
