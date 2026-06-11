@@ -71,7 +71,7 @@ TOOL_SCHEMAS = [
         "function": {
             "name": "web_search",
             "description": (
-                "Web search via Google (primary) or DuckDuckGo (fallback). "
+                "Web search via Google grounding (primary) or DuckDuckGo (fallback). "
                 "Use for current events, news, prices, facts you don't know. "
                 "Returns titles + snippets + URLs. For region-specific topics "
                 "(transit, local services, local news) write the query in that "

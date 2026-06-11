@@ -1,21 +1,15 @@
 {
-  "host": "127.0.0.1",
-  "port": 8000,
   "data_dir": "data",
-  "max_workers": 4,
 
   "llm_provider_order": ["groq"],
-  "llm_endpoint": "http://localhost:8001",
-  "llm_model_path": "EleutherAI/gpt-neo-1.3B",
 
   "groq_model": "openai/gpt-oss-120b",
   "groq_fallback_model": "qwen/qwen3-32b",
   "groq_api_base": "https://api.groq.com",
 
-  "ollama_base_url": "http://localhost:11434",
-  "ollama_model": "qwen2.5:7b-instruct",
-
   "gemini_model": "gemini-2.5-flash",
+
+  "groq_whisper_model": "whisper-large-v3-turbo",
 
   "supergoals_file": "config/supergoals.json",
   "personality_profile": "config/personality_profile.json",
@@ -24,16 +18,7 @@
   "baseline_db_path": "data/memory.sqlite",
   "max_memory_records": 50000,
 
-  "google_search_daily_limit": 100,
-  "search_timeout_sec": 10,
-
-  "tts_engine": "edge-tts",
-  "edge_tts_voice": "en-US-BrianMultilingualNeural",
-  "edge_tts_rate": "+0%",
-  "groq_whisper_model": "whisper-large-v3-turbo",
   "log_level": "INFO",
-  "idle_timeout_sec": 300,
-
   "max_history": 6,
   "top_k": 3
 }
