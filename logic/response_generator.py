@@ -14,31 +14,11 @@ from config.config_loader import (
     load_personality_profile,
     save_owner_profile,
 )
-from logic.fact_extractor import FactExtractor
 from logic.intent_recognizer import Intent
 from utils.memory import MemoryStore
-from utils.searcher import GoogleSearchLimitExceeded, WebSearcher
+from utils.searcher import WebSearcher
 
 logger = logging.getLogger(__name__)
-
-try:
-    from utils.sentence_transformer_patch import patch_huggingface_hub
-    patch_huggingface_hub()
-except Exception as e:
-    logger.debug("sentence_transformer_patch не применён: %s", e)
-
-try:
-    import torch
-    from transformers import (
-        AutoModelForCausalLM,
-        AutoTokenizer,
-        StoppingCriteria,
-        StoppingCriteriaList,
-    )
-    TRANSFORMERS_AVAILABLE = True
-except ImportError:
-    TRANSFORMERS_AVAILABLE = False
-    torch = None
 
 try:
     from groq import Groq
@@ -62,9 +42,6 @@ DEFAULT_PERSONA = {
         "owner": "respectful",
     },
 }
-
-# JOKES перенесены в handlers/fun.py — единственный источник правды.
-# Импортируем оттуда для legacy fallback.
 
 # Таймаут одного Groq-вызова (сек). Без него SDK на 429/TPD спит десятками
 # секунд и виснет в потоке — пул потоков забивается, хаб встаёт.
@@ -198,29 +175,12 @@ class GenerationContext:
     force_tool: Optional[str] = None
 
 
-if TRANSFORMERS_AVAILABLE:
-    class _StopOnTokens(StoppingCriteria):
-        def __init__(self, stop_token_ids: List[List[int]]):
-            self.stop_token_ids = stop_token_ids
-
-        def __call__(self, input_ids, scores, **kwargs) -> bool:
-            for stop_ids in self.stop_token_ids:
-                if not stop_ids:
-                    continue
-                tail = input_ids[0][-len(stop_ids):]
-                if all(tail[i].item() == stop_ids[i] for i in range(len(stop_ids))):
-                    return True
-            return False
-else:
-    _StopOnTokens = None
-
-
 class ResponseGenerator:
     """
     RAG + multi-provider LLM генератор.
 
-    Провайдеры пробуются в порядке `config.llm_provider_order`:
-    groq → ollama → gemini → transformers (локальный fallback).
+    Провайдеры пробуются в порядке `config.llm_provider_order` (groq → gemini);
+    отдельно при исчерпании Groq TPD работает _compose_with_gemini.
     """
 
     def __init__(self, config=None):
@@ -238,18 +198,6 @@ class ResponseGenerator:
             logger.debug("Owner profile недоступен: %s", e)
             self.owner_profile = {}
 
-        # Автонаполнение фактов о владельце из диалога.
-        # ВРЕМЕННО ОТКЛЮЧЕНО: FactExtractor пишет в плоский known_facts,
-        # а в schema v2 факты структурированы (core/current/historical/principles).
-        # Замена — tool `update_profile(category, field, action, value)` в function-calling.
-        self.fact_extractor = None  # FactExtractor(self.config, self.owner_profile)
-
-        # Transformers fallback (нижний уровень)
-        self.model: Optional[Any] = None
-        self.tokenizer: Optional[Any] = None
-        self.device: str = "cpu"
-        self.stopping_criteria = None
-
         # Хранилище и поиск
         self.mem: Optional[MemoryStore] = None
         self.searcher: Optional[WebSearcher] = None
@@ -260,13 +208,10 @@ class ResponseGenerator:
         self.history_by_chat: Dict[int, List[Dict[str, str]]] = {}
         self.max_history = getattr(self.config, "max_history", 6)
         self.top_k = getattr(self.config, "top_k", 3)
-        # Prompt-cache (keyed by hash(user_text)) — глобальный, не зависит от chat
-        self._prompt_cache: Dict[int, Dict[str, Any]] = {}
         self.last_response: str = ""
 
         self._init_memory()
         self._init_searcher()
-        self._init_transformers_fallback()
 
         logger.info("ResponseGenerator готов")
 
@@ -289,46 +234,6 @@ class ResponseGenerator:
         except Exception as e:
             logger.warning("Поисковик не инициализирован: %s", e)
             self.searcher = None
-
-    def _init_transformers_fallback(self) -> None:
-        if "transformers" not in getattr(self.config, "llm_provider_order", []):
-            return
-        if not TRANSFORMERS_AVAILABLE:
-            return
-
-        try:
-            logger.info("Загрузка локального LLM: %s", self.config.llm_model_path)
-
-            cuda_ok = torch.cuda.is_available() and self.config.whisper_device == "cuda"
-            self.device = "cuda" if cuda_ok else "cpu"
-            dtype = torch.float16 if cuda_ok else torch.float32
-
-            self.tokenizer = AutoTokenizer.from_pretrained(
-                self.config.llm_model_path,
-                use_fast=True,
-                padding_side="left",
-            )
-            if self.tokenizer.pad_token is None:
-                self.tokenizer.pad_token = self.tokenizer.eos_token
-
-            self.model = AutoModelForCausalLM.from_pretrained(
-                self.config.llm_model_path,
-                torch_dtype=dtype,
-                device_map="auto" if cuda_ok else None,
-                low_cpu_mem_usage=True,
-                trust_remote_code=True,
-            )
-            self.model.eval()
-
-            stop_words = ["User:", "Human:", "Пользователь:", "\n\n"]
-            stop_token_ids = [self.tokenizer.encode(w, add_special_tokens=False) for w in stop_words]
-            self.stopping_criteria = StoppingCriteriaList([_StopOnTokens(stop_token_ids)])
-
-            logger.info("Локальный LLM загружен на %s", self.device)
-        except Exception as e:
-            logger.error("Не удалось загрузить локальный LLM: %s", e)
-            self.model = None
-            self.tokenizer = None
 
     # ---------- публичный API ----------
 
@@ -365,14 +270,7 @@ class ResponseGenerator:
         )
 
         try:
-            from handlers import run_handler
-            response = run_handler(intent.name, ctx)
-            if response:
-                self._save_interaction(user_text, response, chat_id)
-                self.last_response = response
-                return response
-
-            if intent.name in ("chat", "question", "search"):
+            if intent.name == "chat":
                 ctx = self._enhance_context(ctx)
 
             response = self._generate_with_providers(ctx)
@@ -426,12 +324,8 @@ class ResponseGenerator:
             try:
                 if provider == "groq":
                     response = self._generate_with_groq(ctx)
-                elif provider == "ollama":
-                    response = self._generate_with_ollama(self._build_prompt(ctx))
                 elif provider == "gemini":
                     response = self._generate_with_gemini(self._build_prompt(ctx))
-                elif provider == "transformers":
-                    response = self._generate_with_transformers(self._build_prompt(ctx))
                 else:
                     logger.warning("Unknown provider: %s", provider)
                     continue
@@ -733,17 +627,6 @@ class ResponseGenerator:
         except json.JSONDecodeError:
             return {}
 
-    def _generate_with_ollama(self, prompt: str) -> Optional[str]:
-        base = getattr(self.config, "ollama_base_url", "http://localhost:11434").rstrip("/")
-        model = getattr(self.config, "ollama_model", "qwen2.5:7b-instruct")
-        resp = requests.post(
-            f"{base}/api/generate",
-            json={"model": model, "prompt": prompt, "stream": False, "options": {"temperature": 0.7}},
-            timeout=60,
-        )
-        resp.raise_for_status()
-        return resp.json().get("response", "").strip()
-
     def _generate_with_gemini(self, prompt: str) -> Optional[str]:
         from utils import gemini
         api_key = getattr(self.config, "gemini_api_key", "") or gemini.api_key_from_env()
@@ -791,52 +674,6 @@ class ResponseGenerator:
         if text:
             logger.warning("Groq исчерпан — ответ сгенерирован Gemini-fallback'ом")
         return text or None
-
-    def _generate_with_transformers(self, prompt: str) -> Optional[str]:
-        if not self.model or not self.tokenizer:
-            return None
-
-        cache_key = hash(prompt)
-        cached = self._prompt_cache.get(cache_key)
-        if cached and (datetime.now() - cached["time"]).seconds < 300:
-            return cached["response"]
-
-        inputs = self.tokenizer(
-            prompt,
-            return_tensors="pt",
-            truncation=True,
-            max_length=1024,
-            padding=True,
-        ).to(self.device)
-
-        with torch.no_grad():
-            outputs = self.model.generate(
-                **inputs,
-                max_new_tokens=256,
-                min_new_tokens=20,
-                temperature=0.8,
-                top_p=0.9,
-                top_k=50,
-                do_sample=True,
-                repetition_penalty=1.2,
-                no_repeat_ngram_size=3,
-                stopping_criteria=self.stopping_criteria,
-                pad_token_id=self.tokenizer.pad_token_id,
-                eos_token_id=self.tokenizer.eos_token_id,
-            )
-
-        response = self.tokenizer.decode(
-            outputs[0][inputs["input_ids"].shape[1]:],
-            skip_special_tokens=True,
-        ).strip()
-
-        self._prompt_cache[cache_key] = {"response": response, "time": datetime.now()}
-        if len(self._prompt_cache) > 100:
-            self._prompt_cache.clear()
-
-        return response
-
-    # ---------- промпт ----------
 
     # ---------- построение промпта ----------
 
@@ -1248,7 +1085,7 @@ class ResponseGenerator:
 
     def _build_prompt(self, ctx: GenerationContext) -> str:
         """
-        Plain-prompt для провайдеров без chat-формата (Ollama/Gemini/Transformers).
+        Plain-prompt для провайдеров без chat-формата (Gemini).
         Склеивает system + user.
         """
         persona_name = self.persona.get("name", "Redmond")
@@ -1261,10 +1098,7 @@ class ResponseGenerator:
 
     def _generate_fallback(self, ctx: GenerationContext) -> str:
         intent_responses = {
-            "greeting": "Приветствую! Чем могу помочь?",
             "weather": "Без подключения к сервису погоды актуальную информацию дать не могу.",
-            "joke": "Без подключения к LLM шутки недоступны.",  # JOKES живёт в handlers/fun.py
-            "search": self._format_search_results(ctx.search_results),
             "chat": "Понял. Уточните, что именно вас интересует?",
         }
         return intent_responses.get(ctx.intent.name, "Обрабатываю ваш запрос. Уточните, пожалуйста.")
@@ -1285,17 +1119,6 @@ class ResponseGenerator:
         # 3+ пустых строк подряд → одна пустая
         text = re.sub(r"\n{3,}", "\n\n", text)
         return text.strip()
-
-    @staticmethod
-    def _format_search_results(results: List[Dict[str, str]]) -> str:
-        if not results:
-            return "По вашему запросу ничего не найдено."
-        lines = ["Результаты:"]
-        for i, r in enumerate(results[:3], 1):
-            lines.append(f"{i}. {r.get('title', '')}")
-            lines.append(f"   {r.get('snippet', '')}")
-            lines.append(f"   {r.get('url', '')}")
-        return "\n".join(lines)
 
     def note_to_history(self, chat_id: int, user_text: str, note: str) -> None:
         """Записать факт в историю чата без LLM-вызова. Нужно чтобы внешние
@@ -1323,10 +1146,6 @@ class ResponseGenerator:
         })
         if len(chat_history) > self.max_history * 2:
             self.history_by_chat[chat_id] = chat_history[-self.max_history:]
-
-        # Фоновое извлечение фактов о владельце — пока отключено (см. __init__)
-        if self.fact_extractor is not None:
-            self.fact_extractor.extract_async(user_text, response)
 
     @staticmethod
     def _error_response() -> str:
