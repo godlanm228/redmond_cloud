@@ -41,7 +41,7 @@ class AppConfig(BaseModel):
     ollama_model: str = Field(default="qwen2.5:7b-instruct")
 
     gemini_api_key: str = Field(default="", description="env: REDMOND_GEMINI_API_KEY")
-    gemini_model: str = Field(default="gemini-2.0-flash")
+    gemini_model: str = Field(default="gemini-2.5-flash")
 
     # ---------- ASR / TTS ----------
     # Голосовые в TG транскрибируются через Groq Whisper API (free tier) —

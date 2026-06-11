@@ -159,7 +159,9 @@ async def run_multi_bot(dispatcher: Dispatcher) -> None:
     if main_chat_raw:
         try:
             from core.scheduler import setup_scheduler
-            scheduler = setup_scheduler(dispatcher, coordinator, int(main_chat_raw))
+            scheduler = setup_scheduler(
+                dispatcher, coordinator, int(main_chat_raw), shared_router_states,
+            )
             scheduler.start()
             logger.info(
                 "Scheduler started: %s",

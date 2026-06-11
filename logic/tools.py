@@ -765,6 +765,23 @@ def _rank_results(results: list) -> list:
 def _tool_web_search(query: str, top_k: int, rg, region: str = "wt-wt") -> str:
     if not query or not query.strip():
         return "Пустой запрос."
+
+    # 1. Gemini Google-grounding — настоящий Google: модель сама ищет и отдаёт
+    # фактуру с источниками. CSE мёртв (403 на уровне аккаунта), DDG шумный.
+    from utils.gemini import grounded_search
+    grounded = grounded_search(query)
+    if grounded:
+        answer, sources = grounded
+        lines = ["Источник поиска: google (Gemini grounding)", f"Запрос: {query}", "", answer]
+        if sources:
+            lines += ["", "Источники:"]
+            for i, (title, url) in enumerate(sources[:5], 1):
+                lines.append(f"[{i}] {title}")
+                lines.append(f"    URL: {url}")
+        return "\n".join(lines)
+    logger.warning("Gemini grounding недоступен — fallback на CSE/DDG цепочку")
+
+    # 2. Fallback: старая цепочка (CSE → DDG/Brave/Yandex)
     if rg is None or rg.searcher is None:
         return "Поиск недоступен."
     try:
@@ -894,19 +911,27 @@ def _fetch_feed_items(name: str, url: str, n: int) -> List[Tuple[str, str, str]]
         return []
 
 
-def _headlines_for_category(category: str, limit: int) -> List[str]:
-    """Строки «• title (date)\\n  URL: …» для категории, с пометкой источника."""
+def collect_headlines(category: str, limit: int) -> List[Tuple[str, str, str, str]]:
+    """Структурные заголовки категории: (title, url, date, source_name).
+    Общий сборщик для tool-формата и кодового дайджеста (logic/digest.py)."""
     feeds = _RSS_FEEDS.get(category) or []
-    out: List[str] = []
+    out: List[Tuple[str, str, str, str]] = []
     for name, url in feeds:
         if len(out) >= limit:
             break
         for title, link, date in _fetch_feed_items(name, url, limit - len(out)):
-            date_part = f" ({date})" if date else ""
-            out.append(f"• {title}{date_part} — {name}\n  URL: {link}")
+            out.append((title, link, date, name))
             if len(out) >= limit:
                 break
     return out
+
+
+def _headlines_for_category(category: str, limit: int) -> List[str]:
+    """Строки «• title (date)\\n  URL: …» для категории, с пометкой источника."""
+    return [
+        f"• {title}{f' ({date})' if date else ''} — {name}\n  URL: {link}"
+        for title, link, date, name in collect_headlines(category, limit)
+    ]
 
 
 def _digest_all() -> str:
@@ -924,7 +949,7 @@ def _digest_all() -> str:
         return "RSS-ленты недоступны. Используй web_search."
     return (
         "Дайджест по секциям (источники доверенные). Формат ответа: жирный заголовок "
-        "секции, пункты с ссылками, в конце предложи спросить секцию подробнее.\n\n"
+        "секции, пункты со ссылками. БЕЗ служебных концовок и предложений услуг.\n\n"
         + "\n\n".join(blocks)
     )
 
