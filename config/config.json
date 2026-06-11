@@ -15,7 +15,7 @@
   "ollama_base_url": "http://localhost:11434",
   "ollama_model": "qwen2.5:7b-instruct",
 
-  "gemini_model": "gemini-2.0-flash",
+  "gemini_model": "gemini-2.5-flash",
 
   "supergoals_file": "config/supergoals.json",
   "personality_profile": "config/personality_profile.json",

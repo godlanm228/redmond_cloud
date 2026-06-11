@@ -557,10 +557,14 @@ class ResponseGenerator:
             if completion is None:
                 logger.warning("All Groq models failed in chain: %s", model_chain)
                 # Все модели исчерпали лимит — не зависаем и не отдаём generic.
-                # Если что-то уже записали (tools) — резюмируем, иначе честный ответ.
+                # Если что-то уже записали (tools) — резюмируем. Иначе пробуем
+                # Gemini-compose (без tools), и только потом честный отказ.
                 if _is_rate_limit_error(getattr(self, "_last_groq_error", "")):
                     if successful_tool_calls:
                         return _summarize_actions(successful_tool_calls)
+                    fallback = self._compose_with_gemini(messages, ctx)
+                    if fallback:
+                        return fallback
                     return (
                         "Упёрся в дневной лимит Groq (бесплатный тариф, сброс в полночь "
                         "по UTC). Чуть позже отвечу нормально."
@@ -741,23 +745,52 @@ class ResponseGenerator:
         return resp.json().get("response", "").strip()
 
     def _generate_with_gemini(self, prompt: str) -> Optional[str]:
-        api_key = getattr(self.config, "gemini_api_key", "")
+        from utils import gemini
+        api_key = getattr(self.config, "gemini_api_key", "") or gemini.api_key_from_env()
+        if not api_key:
+            return None
+        model = getattr(self.config, "gemini_model", "") or gemini.DEFAULT_MODEL
+        return gemini.generate_text(
+            prompt, model=model, temperature=0.7, max_tokens=512, api_key=api_key,
+        ) or None
+
+    def _compose_with_gemini(self, messages: list, ctx: GenerationContext) -> Optional[str]:
+        """Аварийный compose при исчерпании Groq TPD: беседа этой генерации
+        (вкл. уже собранные tool-результаты) сплющивается в plain-prompt для
+        Gemini. Без tools — хуже рисёрч, но живой ответ вместо «жди полуночи»."""
+        from utils import gemini
+        api_key = getattr(self.config, "gemini_api_key", "") or gemini.api_key_from_env()
         if not api_key:
             return None
 
-        model = getattr(self.config, "gemini_model", "gemini-2.0-flash")
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}"
-        resp = requests.post(
-            url,
-            json={
-                "contents": [{"parts": [{"text": prompt}]}],
-                "generationConfig": {"temperature": 0.7, "maxOutputTokens": 512},
-            },
-            timeout=30,
+        flat: List[str] = []
+        for m in messages:
+            role = m.get("role", "")
+            content = (m.get("content") or "").strip()
+            if not content:
+                continue
+            if role == "tool":
+                flat.append(f"[Tool result]\n{content}")
+            elif role == "user":
+                flat.append(f"[User]\n{content}")
+            elif role == "assistant":
+                flat.append(f"[You said]\n{content}")
+            else:
+                flat.append(content)
+        flat.append(
+            "Compose your final answer to the user now, in the user's language, "
+            "following your FORMAT rules. You have no tools available."
         )
-        resp.raise_for_status()
-        data = resp.json()
-        return data["candidates"][0]["content"]["parts"][0]["text"].strip()
+
+        text = gemini.generate_text(
+            "\n\n".join(flat),
+            temperature=getattr(ctx.agent, "temperature", 0.5) if ctx.agent else 0.5,
+            max_tokens=getattr(ctx.agent, "max_tokens", 800) if ctx.agent else 800,
+            api_key=api_key,
+        )
+        if text:
+            logger.warning("Groq исчерпан — ответ сгенерирован Gemini-fallback'ом")
+        return text or None
 
     def _generate_with_transformers(self, prompt: str) -> Optional[str]:
         if not self.model or not self.tokenizer:
@@ -1152,8 +1185,8 @@ class ResponseGenerator:
             "ROLE: one high-quality pass per request.",
             "- Generic news / daily digest («что нового», «что по новостям») →",
             "  get_news_headlines(category='all'). ONE call. Output format: **bold section",
-            "  name** (Мир / Экономика и рынки / Tech / Спорт), 2 bullets each with links,",
-            "  one line at the end: predlozhi sprosit' sektsiyu podrobnee.",
+            "  name** (Мир / Экономика и рынки / Tech / Спорт), 2 bullets each with links.",
+            "  NO service lines like «спросите секцию подробнее» — end after the last bullet.",
             "- Specific area («что по крипте», «что в спорте») → get_news_headlines with that",
             "  category (crypto/sport/finance/tech/ai/gamedev/world), more items.",
             "- Crypto PRICES / market state → get_crypto_market (live Binance numbers,",
