@@ -197,13 +197,10 @@ TOOL_SCHEMAS = [
         "function": {
             "name": "delegate_research",
             "description": (
-                "Hand off DEEP research to Newser (the search agent): multi-source "
-                "topics, news digests, fresh-data questions needing several searches. "
-                "Newser answers the owner directly — after this call you are DONE, "
-                "do not compose an answer yourself. Write the task self-contained, "
-                "in the owner's language: what to find + known context (place, dates, "
-                "owner's plans). NEVER use for chitchat, time, weather, single quick "
-                "lookups you can do yourself, or anything already answered."
+                "Hand off DEEP multi-source research to Newser. He answers the owner "
+                "directly — after this call you are DONE, no own answer. Task must be "
+                "self-contained, in owner's language (what to find + context). NEVER "
+                "for chitchat, time, weather, single quick lookups, or already answered."
             ),
             "parameters": {
                 "type": "object",
@@ -214,16 +211,15 @@ TOOL_SCHEMAS = [
                     },
                     "region": {
                         "type": "string",
-                        "description": "Optional region hint like 'de-de' for region-specific topics",
+                        "description": "Region hint like 'de-de' for region-specific topics",
                     },
                     "mode": {
                         "type": "string",
                         "enum": ["handoff", "collect"],
                         "description": (
-                            "handoff (default): Newser answers the owner, you are done. "
-                            "collect: you get the research back and post ONLY your own "
-                            "conclusion/advice on top — use when facts feed your advice "
-                            "(plans), owner asks to double-check, or stakes are high."
+                            "handoff (default): Newser answers, you are done. collect: "
+                            "research comes back, you post ONLY your conclusion on top "
+                            "(facts feed your advice, double-check, high stakes)."
                         ),
                     },
                 },
@@ -261,11 +257,9 @@ TOOL_SCHEMAS = [
         "function": {
             "name": "read_dossier_section",
             "description": (
-                "Read a section of AI-generated owner dossier. "
-                "Sections: 'core' (name, projects, portfolio — DEFAULT), "
-                "'strengths', 'thinking' (cognition style), 'directives' (AI recommendations), "
-                "'all' (whole file — avoid unless needed). "
-                "Do NOT quote verbatim — dossier is AI interpretation, not owner's words."
+                "Read a section of the AI-generated owner dossier (core=DEFAULT, "
+                "strengths, thinking, directives, all=avoid). Never quote verbatim — "
+                "it is AI interpretation, not owner's words."
             ),
             "parameters": {
                 "type": "object",
@@ -444,9 +438,8 @@ TOOL_SCHEMAS = [
         "function": {
             "name": "update_profile",
             "description": (
-                "Update config/owner_profile.json — add/remove/change a fact about owner. "
-                "Use when learning a stable new fact (new job, closed project, new principle). "
-                "Do NOT use for transient states (tired/busy now)."
+                "Add/remove/change a STABLE fact about owner in his profile (new job, "
+                "closed project, principle). NOT for transient states (tired/busy now)."
             ),
             "parameters": {
                 "type": "object",
@@ -454,11 +447,10 @@ TOOL_SCHEMAS = [
                     "category": {
                         "type": "string",
                         "enum": ["current", "historical", "principles"],
-                        "description": "current = current state, historical = past, principles = values",
                     },
                     "field": {
                         "type": "string",
-                        "description": "Field name inside category (e.g. 'active_projects', 'city')",
+                        "description": "Field inside category (e.g. 'active_projects', 'city')",
                     },
                     "action": {
                         "type": "string",

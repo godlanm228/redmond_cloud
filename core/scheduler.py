@@ -26,6 +26,8 @@ from apscheduler.events import EVENT_JOB_ERROR, EVENT_JOB_EXECUTED, EVENT_JOB_MI
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 
+from dataclasses import replace
+
 from core.coordinator import Coordinator
 from core.dispatcher import Dispatcher
 from logic.agents import IRIS, NEWSER, AgentConfig
@@ -35,6 +37,13 @@ logger = logging.getLogger(__name__)
 
 
 _JOB_TIMEOUT_SEC = 200.0
+
+# Scheduled-джобам полный набор Iris-tools не нужен: 16 схем ≈ 2000 токенов
+# пересылаются в КАЖДОМ Groq-запросе. Режем до минимума задачи.
+# ВАЖНО: пустой allowed_tools=[] нельзя — он falsy и означает «все tools» (см. RG).
+IRIS_EVENING = replace(IRIS, allowed_tools=["read_diary", "list_goals"])
+IRIS_TICKER = replace(IRIS, allowed_tools=["add_diary_entry", "snooze_pings"])
+IRIS_DEADLINES = replace(IRIS, allowed_tools=["list_deadlines", "mark_deadline_done"])
 
 
 def _set_sticky(router_states: Optional[dict], chat_id: int, agent_name: str, text: str = "") -> None:
@@ -149,7 +158,7 @@ async def morning_deadlines(
         f"(scheduled, утро) Дедлайны, требующие внимания: {listing}. "
         "Напомни Владу о них коротко и по делу — что горит сегодня/завтра, что просрочено."
     )
-    await _generate_and_send(dispatcher, coordinator, chat_id, IRIS, prompt, router_states)
+    await _generate_and_send(dispatcher, coordinator, chat_id, IRIS_DEADLINES, prompt, router_states)
 
 
 async def day_ticker(
@@ -173,7 +182,7 @@ async def day_ticker(
     mark_ping(ping_id)
     logger.info("Day ticker: ping «%s»", ping_id)
     prompt = f"(scheduled, пинг дня) {context_text} В твоём стиле, коротко."
-    await _generate_and_send(dispatcher, coordinator, chat_id, IRIS, prompt, router_states)
+    await _generate_and_send(dispatcher, coordinator, chat_id, IRIS_TICKER, prompt, router_states)
 
 
 async def evening_summary(
@@ -197,7 +206,7 @@ async def evening_summary(
         "записям, не pep-talk. Пустой день — одна строка без морали. "
         "Если есть активная цель про сон — закончи напоминанием про неё, в своём стиле."
     )
-    await _generate_and_send(dispatcher, coordinator, chat_id, IRIS, prompt, router_states)
+    await _generate_and_send(dispatcher, coordinator, chat_id, IRIS_EVENING, prompt, router_states)
 
 
 # ---------- сборка ----------
