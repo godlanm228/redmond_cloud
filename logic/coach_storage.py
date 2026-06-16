@@ -157,12 +157,19 @@ def mark_deadline_done(deadline_id: int) -> Optional[Dict[str, Any]]:
 # Diary
 # ============================================================================
 
-def add_diary_entry(text: str, tags: Optional[List[str]] = None) -> Dict[str, Any]:
+def add_diary_entry(text: str, tags: Optional[List[str]] = None) -> Optional[Dict[str, Any]]:
+    """Запись в дневник. Возвращает None если писать нечего (пустышка) или это
+    точный дубль последней записи — анти-шум (Iris логировала мета/повторы)."""
+    text = (text or "").strip()
+    if len(text) < 3:
+        return None
     diary = _load_json("diary.json", [])
+    if diary and str(diary[-1].get("text", "")).strip().lower() == text.lower():
+        return diary[-1]
     entry = {
         "id": _next_id(diary),
         "timestamp": now_local().isoformat(timespec="minutes"),
-        "text": text.strip(),
+        "text": text,
         "tags": tags or [],
     }
     diary.append(entry)
@@ -175,6 +182,18 @@ def read_diary(last_n: int = 10, tag: Optional[str] = None) -> List[Dict[str, An
     if tag:
         diary = [d for d in diary if tag in (d.get("tags") or [])]
     return diary[-last_n:]
+
+
+def last_entry_per_tag(tags: List[str]) -> Dict[str, Dict[str, Any]]:
+    """Самая свежая запись дневника на каждый из тегов (любой давности).
+    Чтобы Iris не отвечала «нет записей» о спорте/еде, когда они есть —
+    последнее по теме инжектится в её STATE-блок."""
+    out: Dict[str, Dict[str, Any]] = {}
+    for e in _load_json("diary.json", []):
+        for t in (e.get("tags") or []):
+            if t in tags:
+                out[t] = e
+    return out
 
 
 # ============================================================================
@@ -259,6 +278,20 @@ def save_day_state(state: Dict[str, Any]) -> None:
     _save_json("day_state.json", state)
 
 
+def mark_owner_seen() -> None:
+    """Влад написал в HUB сегодня — фиксируем «на связи» (per-day, day_state
+    сбрасывается на новой дате). Питает cold-start тикера: пока не на связи и
+    день идёт → Iris инициирует сама. Пишем только первый раз за день."""
+    state = get_day_state()
+    if not state.get("last_seen"):
+        state["last_seen"] = now_local().strftime("%H:%M")
+        save_day_state(state)
+
+
+def owner_seen_today() -> bool:
+    return bool(get_day_state().get("last_seen"))
+
+
 def mark_ping(ping_id: str) -> None:
     state = get_day_state()
     state["pings"][ping_id] = now_local().strftime("%H:%M")
@@ -284,3 +317,18 @@ def today_tags() -> set:
         if str(e.get("timestamp", "")).startswith(today):
             tags.update(e.get("tags") or [])
     return tags
+
+
+# ============================================================================
+# Radar — одноразовый ранний пинг по дедлайну (кросс-день, чтобы не нудеть)
+# ============================================================================
+
+def radar_pinged(deadline_id: Any) -> bool:
+    """Уже делали ранний «радар»-пинг по этому дедлайну? Persistent (radar.json)."""
+    return str(deadline_id) in _load_json("radar.json", {})
+
+
+def mark_radar(deadline_id: Any) -> None:
+    data = _load_json("radar.json", {})
+    data[str(deadline_id)] = now_local().strftime("%Y-%m-%d")
+    _save_json("radar.json", data)

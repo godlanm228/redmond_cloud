@@ -17,6 +17,7 @@ from config.config_loader import (
 from logic.intent_recognizer import Intent
 from utils.memory import MemoryStore
 from utils.searcher import WebSearcher
+from utils.time import now_local
 
 logger = logging.getLogger(__name__)
 
@@ -52,6 +53,29 @@ def _is_rate_limit_error(err: str) -> bool:
     """429 / исчерпание лимита Groq (в т.ч. дневной TPD)."""
     low = (err or "").lower()
     return "rate_limit" in low or "429" in low or "tokens per day" in low or "tpd" in low
+
+
+def _is_oversize_error(err: str) -> bool:
+    """413 / промпт больше лимита модели. Лечится НЕ ожиданием, а уходом на
+    модель с большим контекстом (Gemini). qwen TPM 6000 всегда 413'ит большие
+    промпты — для них Groq-цепочка мертва, нужен Gemini-compose."""
+    low = (err or "").lower()
+    return ("413" in low or "request too large" in low
+            or "request_too_large" in low or "reduce the length" in low
+            or "reduce your message" in low)
+
+
+_DAY_NAMES_RU = [
+    "понедельник", "вторник", "среда", "четверг", "пятница", "суббота", "воскресенье",
+]
+
+
+def _now_str() -> str:
+    """Авторитетное berlin-время С ДНЁМ НЕДЕЛИ для 'Current time' в промптах.
+    Раньше бралось ctx.timestamp.strftime() = naive UTC без дня недели → модель
+    галлюцинировала день («пн» вместо «пт»). Теперь now_local() + явный день."""
+    n = now_local()
+    return f"{_DAY_NAMES_RU[n.weekday()]}, {n.strftime('%Y-%m-%d %H:%M')} (Europe/Berlin)"
 
 
 # Tools которые меняют состояние — для safety-net когда LLM не выдаёт
@@ -149,6 +173,39 @@ def _summarize_actions(tool_names: List[str]) -> str:
         label = _TOOL_HUMAN_LABEL.get(name, name)
         parts.append(f"{label}" + (f" ×{n}" if n > 1 else ""))
     return "Готово: " + ", ".join(parts) + "."
+
+
+def _repair_tool_args(raw: str, fn_name: str) -> Dict[str, Any]:
+    """Восстановить args из битого tool-JSON, чтобы state-changing tool не
+    выполнился молча с пустыми args (теряя план/запись). 1) внешний {...};
+    2) для tools с одним доминирующим строковым параметром — весь raw как он."""
+    import json as _json
+    raw = (raw or "").strip()
+    if not raw:
+        return {}
+    start, end = raw.find("{"), raw.rfind("}")
+    if start != -1 and end > start:
+        try:
+            return _json.loads(raw[start:end + 1])
+        except _json.JSONDecodeError:
+            pass
+    dominant = {"save_week_plan": "text", "add_diary_entry": "text"}.get(fn_name)
+    return {dominant: raw} if dominant else {}
+
+
+_TOOL_FAILURE_MARKERS = (
+    "не сохраня", "не передал", "не найден", "пуст", "ошибка",
+    "не доступ", "неизвестн", "не хватает",
+)
+
+
+def _tool_result_failed(result: Any) -> bool:
+    """tool-результат сигналит отказ? Чтобы не репортить ложное «Готово: …»,
+    когда state-changing tool на самом деле ничего не сделал."""
+    if not isinstance(result, str):
+        return False
+    low = result.lower()
+    return any(m in low for m in _TOOL_FAILURE_MARKERS)
 
 
 @dataclass
@@ -453,16 +510,20 @@ class ResponseGenerator:
                 # Все модели исчерпали лимит — не зависаем и не отдаём generic.
                 # Если что-то уже записали (tools) — резюмируем. Иначе пробуем
                 # Gemini-compose (без tools), и только потом честный отказ.
-                if _is_rate_limit_error(getattr(self, "_last_groq_error", "")):
+                last_err = getattr(self, "_last_groq_error", "")
+                if _is_rate_limit_error(last_err) or _is_oversize_error(last_err):
                     if successful_tool_calls:
                         return _summarize_actions(successful_tool_calls)
+                    # Gemini-compose: огромный контекст, бесплатно — единственный
+                    # рабочий путь и при TPD/429, и при 413 (промпт > qwen TPM 6000).
                     fallback = self._compose_with_gemini(messages, ctx)
                     if fallback:
                         return fallback
-                    return (
-                        "Упёрся в дневной лимит Groq (бесплатный тариф, сброс в полночь "
-                        "по UTC). Чуть позже отвечу нормально."
-                    )
+                    if _is_rate_limit_error(last_err):
+                        return (
+                            "Упёрся в дневной лимит Groq (бесплатный тариф, сброс в полночь "
+                            "по UTC). Чуть позже отвечу нормально."
+                        )
                 return None
 
             choice = completion["choices"][0]
@@ -503,7 +564,9 @@ class ResponseGenerator:
                 try:
                     fn_args = _json.loads(fn.get("arguments") or "{}")
                 except _json.JSONDecodeError:
-                    fn_args = {}
+                    # Битый JSON (prose/незакрытые кавычки) — не выполнять tool с
+                    # пустыми args молча: пробуем восстановить (иначе теряем план/запись).
+                    fn_args = _repair_tool_args(fn.get("arguments") or "", fn_name)
 
                 # Cache dossier: если ту же секцию уже отдавали — возвращаем
                 # короткий маркер. Экономия ~1500-3000 токенов на повторном вызове.
@@ -544,8 +607,9 @@ class ResponseGenerator:
                     "name": fn_name,
                     "content": result,
                 })
-                # Учитываем только tools которые меняют состояние (для safety net)
-                if fn_name in _STATE_CHANGING_TOOLS:
+                # Учитываем только tools которые меняют состояние (для safety net),
+                # и только если результат НЕ сигналит отказ — иначе ложное «Готово».
+                if fn_name in _STATE_CHANGING_TOOLS and not _tool_result_failed(result):
                     successful_tool_calls.append(fn_name)
 
         logger.warning("Groq tool-loop hit limit (%d hops)", max_hops)
@@ -741,7 +805,7 @@ class ResponseGenerator:
           • CORE INSTRUCTIONS на английском (экономия токенов)
           • VOICE / STYLE на русском (сохранение голоса)
         """
-        now_str = ctx.timestamp.strftime("%Y-%m-%d %H:%M:%S %Z").strip()
+        now_str = _now_str()
         owner_facts = self._compact_owner_facts()
         comm_prefs = self._compact_comm_prefs()
 
@@ -831,7 +895,7 @@ class ResponseGenerator:
         """
         Iris — личный коуч/трекер. Промпт v2 (CORE англ + VOICE рус).
         """
-        now_str = ctx.timestamp.strftime("%Y-%m-%d %H:%M:%S").strip()
+        now_str = _now_str()
         owner_facts = self._compact_owner_facts()
 
         # ---- CORE (English, токен-диета 2026-06-11: правила те же, проза короче) ----
@@ -845,20 +909,40 @@ class ResponseGenerator:
             "ROLE: goals, deadlines, diary, week plan, discipline (tools below).",
             "Out of your zone: weather/general facts → «это к Redmond»; code → «это к Cipher».",
             "",
-            "DAY & PRIORITIES:",
-            "- DAY CONTEXT and TOP PRIORITIES blocks below are computed from REAL data — treat as truth.",
-            "- Day plans start from NOW — never schedule hours that already passed.",
-            "- Owner names a concrete plan for today («в 21 бильярд») → add_diary_entry",
-            "  tags=['план','отдых'] with the time; respect it — committed rest is not negotiable.",
-            "- Activity conflicts with a deadline due ≤3 days or today's study slot → push back",
-            "  ONCE, short and concrete («Сегодня слот учёбы, тест в пт в 8:00. Кодинг — вечером?»),",
-            "  naming the deadline and date. One pushback per topic per day. He decides;",
-            "  if he insists — accept without guilt-trip, log the trade-off to diary.",
-            "- Nothing urgent (>3 days, no slot conflict) → short ack, no nagging.",
-            "- Owner says a deadline is passed («сдал тест») → mark_deadline_done + one short congrats.",
-            "- HUMANE SLOTS: never right after a closing shift, not during meals, not past 22:30;",
-            "  rest days (CS/Dota/friends) are sacred. Day genuinely full → say so honestly,",
-            "  pick the next realistic day. Plans serve the owner, not the other way around.",
+            "HOW YOU THINK (most important):",
+            "- The STATE block below is computed from real data — your ground truth. Read it",
+            "  BEFORE answering: now+weekday, today's diary, last meal/training/study, deadlines,",
+            "  today's shift/classes. Reason FROM it; never guess about his day.",
+            "- The recent dialogue is in your context. NEVER re-ask what he just told you and",
+            "  NEVER contradict it. If he says he already ate / trained / is at uni — he did;",
+            "  update your view, don't argue with the schedule.",
+            "- You are a sharp coach reasoning about a real person, NOT a keyword script. React to",
+            "  what he ACTUALLY said; reflect the specific. Never a generic «записала»/«поняла»",
+            "  that ignores the content.",
+            "",
+            "TRUTH & RECORDING:",
+            "- NEVER say something is not recorded / never happened unless the STATE block shows",
+            "  it or you called read_diary (use tag= for спорт/питание/учёба/работа/сон). If you",
+            "  did not read, you do not know — read first, then answer.",
+            "- Say «записала …» ONLY after a write tool actually succeeded, and say WHAT in a few",
+            "  words. Logged nothing → don't claim you did. No reflexive «записала».",
+            "- add_diary_entry = REAL events/states/decisions only, with a tag: поел→[питание],",
+            "  трен/зал/пробежка→[спорт], учёба/тест→[учёба], работа/смена→[работа], устал→[усталость],",
+            "  не спал→[сон,усталость], план отдыха («в 21 бильярд»)→[план,отдых] with time. A done",
+            "  goal → mark_goal_done. NEVER log meta (that he messaged you, thanks, your own actions).",
+            "  Tags are for the tool call only — never print «[тег]» in your reply.",
+            "",
+            "DEADLINES & PLANNING:",
+            "- Day plans start from NOW — never schedule hours already passed.",
+            "- Activity clashes with a deadline ≤3 days or today's study slot → push back ONCE,",
+            "  short and concrete, naming the deadline+date. He decides; if he insists, accept",
+            "  without guilt and log the trade-off. Nothing urgent → short ack, no nagging.",
+            "- HUMANE SLOTS are DEFAULTS, not laws: normally no study right after a closing shift,",
+            "  not during meals, not past 22:30; rest days are sacred. BUT defaults YIELD to reality:",
+            "  a ⚠ CRUNCH flag in STATE (high-stakes deadline within ~12h, no earlier slot) means the",
+            "  late evening IS the real slot — help plan it concretely (what to cover, when to stop),",
+            "  do NOT refuse or lecture about sleep. Plans serve the owner, not the reverse.",
+            "- Owner says a deadline passed («сдал») → mark_deadline_done + one short congrats.",
             "",
             "WEEK PLAN (on «составь план недели» / prompt starting «(scheduled week-plan)»):",
             "- get_week_schedule(days=8) + TOP PRIORITIES → day-by-day plan: study slots BEFORE",
@@ -868,22 +952,16 @@ class ResponseGenerator:
             "- Edits by words («перенеси треньку на чт») → get_week_plan, apply, save, show",
             "  the updated day(s). No lectures.",
             "",
-            "REACTIONS — «→ tags» means: call add_diary_entry with those tags. Tags are",
-            "for the TOOL CALL only, NEVER print [тег] in your reply text:",
-            "- устал/выгорел → tags ['усталость']; no consolation.",
-            "- не спал/не выспался → tags ['сон','усталость']; if it is night NOW — tell him firmly to go to bed (his sleep goal).",
-            "- поел/завтрак/обед/ужин → tags ['питание']; one short ack, no diet lectures.",
-            "- тренировка/зал/пробежка → tags ['спорт']; short ack, no pep-talk.",
-            "- поработал над X → tags ['работа'] with what exactly.",
-            "- «сделал X» → mark_goal_done if X was a goal, else tags ['достижение'].",
-            "- «сегодня без трени» → tags ['спорт'] with reason; slot closes, no nagging. Same for skipped meals/study.",
-            "- «не могу поесть» → tags ['питание'] + one practical fast option (курица, тунец, протеин), no lecture.",
-            "- going out to play/rest («иду в бильярд», «кино с друзьями») → tags ['план','отдых'] + ONE warm",
-            "  line («Хорошей игры 🎱») — situational warmth tied to a real moment is wanted;",
-            "  the banned pep-talk is EMPTY cheering («у тебя всё получится»).",
+            "COMMON SITUATIONS (react like a human, don't lecture):",
+            "- meal/training/sleep/study/work reported → log with the right tag + ONE short ack;",
+            "  no diet talk, no pep-talk. «без трени сегодня»/«не успел поесть» → log it, the slot",
+            "  closes, no nagging.",
+            "- can't eat properly → ONE practical fast option (курица/тунец/протеин), no lecture.",
+            "- going out to rest («иду в бильярд», «кино») → [план,отдых] + ONE warm line",
+            "  («Хорошей игры 🎱»); empty cheering («у тебя всё получится») stays banned.",
             "- «забей/не получается» → ask «что блокирует?» once, no pressure.",
             "- «отстань/не сейчас/занят» → snooze_pings (default 2h), one line «ок, до HH:MM молчу».",
-            "- asks to change/remove his profile fact → update_profile.",
+            "- asks to change/remove a profile fact → update_profile.",
             "",
             "RULES:",
             "- Never invent numbers/dates/facts. External facts for advice (prices, schedules,",
@@ -939,8 +1017,10 @@ class ResponseGenerator:
         prio_block: List[str] = []
         try:
             from logic.priorities import build_day_context, build_priorities_block
-            for block in (build_priorities_block(), build_day_context()):
-                if block:
+            state_parts = [b for b in (build_day_context(), build_priorities_block()) if b]
+            if state_parts:
+                prio_block = ["", "=== STATE (real data — your ground truth, read before answering) ==="]
+                for block in state_parts:
                     prio_block += ["", block]
         except Exception as e:
             logger.warning("Priorities/day-context block failed: %s", e)
@@ -961,7 +1041,7 @@ class ResponseGenerator:
           • Если не нашёл — честно сказать, не выдумывать
           • Не лезет в зоны других агентов (планы → Iris, болтовня → Redmond)
         """
-        now_str = ctx.timestamp.strftime("%Y-%m-%d %H:%M:%S").strip()
+        now_str = _now_str()
 
         # ---- CORE (English) ----
         core = [

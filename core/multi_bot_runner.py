@@ -173,9 +173,19 @@ async def run_multi_bot(dispatcher: Dispatcher) -> None:
     else:
         logger.warning("MAIN_CHAT_ID not set — scheduler disabled")
 
-    # 7. Держим живыми до cancel
+    # 7. Держим живыми до сигнала. systemd шлёт SIGTERM (НЕ SIGINT) — без
+    # обработчика дефолтный SIGTERM убивает процесс мимо finally: апдейты не
+    # подтверждаются Telegram'у и сообщения за окно рестарта теряются.
+    import signal as _signal
+    stop_event = asyncio.Event()
+    loop = asyncio.get_running_loop()
+    for _sig in (_signal.SIGTERM, _signal.SIGINT):
+        try:
+            loop.add_signal_handler(_sig, stop_event.set)
+        except (NotImplementedError, AttributeError):
+            pass  # Windows/окружения без поддержки — оставляем дефолт
     try:
-        await asyncio.Event().wait()
+        await stop_event.wait()
     except (KeyboardInterrupt, asyncio.CancelledError):
         logger.info("Shutdown signal received")
     finally:

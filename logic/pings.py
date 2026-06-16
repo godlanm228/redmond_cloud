@@ -3,7 +3,10 @@
 дёргается только когда решение «пинговать» уже принято (экономия токенов).
 
 Анти-спам гарантии (в коде, не на совести LLM):
-  • тишина пока Влад не проснулся (presence), при snooze, ночью (тикер 10–23);
+  • тишина при snooze и ночью (тикер 10–23); активити-пинги (еда/спорт/учёба) —
+    только после того как Влад на связи сегодня;
+  • cold-start (исключение): если день идёт, а Влада не слышно — Iris инициирует
+    САМА один раз (мягкое «как ты, какие планы»), можно молча проигнорить;
   • один пинг на слот в день, максимум MAX_PINGS_PER_DAY, пауза ≥ MIN_GAP_MIN;
   • слот закрыт записью в дневнике с нужным тегом → пинга нет
     («поел» → питание; «сегодня без зала» → спорт; и т.д.).
@@ -16,7 +19,7 @@ from datetime import datetime, timedelta
 from typing import Optional, Tuple
 
 from logic import coach_storage
-from logic.priorities import crunch_deadline
+from logic.priorities import crunch_deadline, radar_deadline
 from logic.week_schedule import (
     HOME_STUDY_WEEKDAYS,
     STUDY_TIMETABLE,
@@ -47,9 +50,7 @@ def decide_ping() -> Optional[Tuple[str, str]]:
     now = now_local()
     state = coach_storage.get_day_state()
 
-    # --- глобальные предохранители ---
-    if not coach_storage.woke_today():
-        return None
+    # --- глобальные предохранители (действуют и для cold-start, и для активити) ---
     snooze = state.get("snooze_until")
     if snooze:
         try:
@@ -65,9 +66,38 @@ def decide_ping() -> Optional[Tuple[str, str]]:
         if (now - last) < timedelta(minutes=MIN_GAP_MIN):
             return None
 
-    tags = coach_storage.today_tags()
+    # Во время лекции (и ~полчаса до) не пингуем — Влад на паре, пинг бесит.
+    for _start, _end, _what in STUDY_TIMETABLE.get(now.weekday(), []):
+        s = _parse_hm(_start, now)
+        e = _parse_hm(_end, now)
+        if s and e and (s - timedelta(minutes=30)) <= now <= e:
+            return None
+
     shift = get_shift(now.date())
     shift_start = _parse_hm(shift["start"], now) if shift else None
+
+    # --- 0. ХОЛОДНЫЙ СТАРТ: Влад сегодня не на связи и записей за день нет, но
+    #        день идёт — Iris инициирует САМА, не дожидаясь первого сообщения.
+    #        Один раз, мягко, можно проигнорить. Единственный пинг, не требующий,
+    #        чтобы Влад уже написал (остальные — после того как он на связи). ---
+    if (
+        not coach_storage.owner_seen_today()
+        and "checkin" not in pings
+        and now.hour >= 12
+        and (shift_start is None or now < shift_start - timedelta(minutes=40))
+    ):
+        return ("checkin", (
+            "Влад сегодня ещё не на связи, записей за день нет. Поздоровайся тепло, "
+            "по-человечески спроси как он и какие планы на день — без давления, без "
+            "списка дел. Не ответит — это нормально, не повторяй и не пили."
+        ))
+
+    # Активити-пинги (еда/спорт/учёба/дедлайны) — только когда Влад на связи:
+    # пинговать про еду пока он молчит/спит бессмысленно.
+    if not coach_storage.owner_seen_today():
+        return None
+
+    tags = coach_storage.today_tags()
 
     # --- 1. Еда перед сменой: окно [старт-3ч, старт-40мин], выход ~за 20 мин ---
     if (
@@ -147,6 +177,23 @@ def decide_ping() -> Optional[Tuple[str, str]]:
         return ("study", (
             f"{wed_note}Записей про учёбу/работу за день нет. Спроси коротко: что сегодня по учёбе, "
             f"какой план? Одно сообщение."
+        ))
+
+    # --- 6. Радар: дедлайн через 4-7 дней, ещё не предупреждали (одноразово, мягко) ---
+    rad = radar_deadline()
+    if (
+        rad is not None
+        and "radar" not in pings
+        and not ({"учёба", "учеба"} & tags)
+        and now.hour >= 11
+        and (shift_start is None or now < shift_start - timedelta(hours=2))
+    ):
+        coach_storage.mark_radar(rad["id"])
+        left = (rad["_due"] - now.date()).days
+        return ("radar", (
+            f"На радаре дедлайн «{rad['title']}» — через {left} дн ({rad['due']}). "
+            f"Ещё не горит, но спроси мягко: начал ли, нужен ли слот в плане недели. "
+            f"Один раз, без давления."
         ))
 
     return None
