@@ -130,6 +130,13 @@ async def _gate(
             logger.debug("Outside-chat repeat (silent): chat_id=%s", chat.id)
         return False
 
+    # Влад на связи в HUB сегодня — фиксируем (питает cold-start тикера Iris).
+    try:
+        from logic.coach_storage import mark_owner_seen
+        mark_owner_seen()
+    except Exception:
+        logger.debug("mark_owner_seen failed", exc_info=True)
+
     return True
 
 

@@ -1,7 +1,7 @@
 {
   "data_dir": "data",
 
-  "llm_provider_order": ["groq"],
+  "llm_provider_order": ["groq", "gemini"],
 
   "groq_model": "openai/gpt-oss-120b",
   "groq_fallback_model": "qwen/qwen3-32b",

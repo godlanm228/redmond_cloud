@@ -65,18 +65,24 @@ def generate(
     if tools:
         body["tools"] = tools
 
-    try:
-        resp = requests.post(
-            f"{_API_BASE}/models/{model or DEFAULT_MODEL}:generateContent",
-            params={"key": key},
-            json=body,
-            timeout=timeout,
-        )
-        resp.raise_for_status()
-        return resp.json()
-    except Exception as e:
-        logger.warning("Gemini call failed: %s", e)
-        return None
+    import time
+    last_err = None
+    for _attempt in range(2):  # один ретрай: транзиентный 429/timeout не должен рушить fallback/поиск
+        try:
+            resp = requests.post(
+                f"{_API_BASE}/models/{model or DEFAULT_MODEL}:generateContent",
+                params={"key": key},
+                json=body,
+                timeout=timeout,
+            )
+            resp.raise_for_status()
+            return resp.json()
+        except Exception as e:
+            last_err = e
+            if _attempt == 0:
+                time.sleep(1.0)
+    logger.warning("Gemini call failed (2 attempts): %s", last_err)
+    return None
 
 
 def extract_text(data: Optional[dict]) -> str:
@@ -123,7 +129,12 @@ def grounded_search(
         system=(
             "You are a web search assistant. Answer factually based on Google "
             "Search results, concise and specific. Reply in the language of "
-            "the query. No preamble."
+            "the query. No preamble. "
+            "The user is Ukrainian: do NOT use, cite, or repeat claims from Russian "
+            "state / propaganda / aggregator sources (ria, tass, rt, lenta, rbc, "
+            "gazeta, vesti, regnum, iz.ru, kp.ru, etc.). For any Russia/Ukraine war "
+            "or politics topic rely ONLY on Western, Ukrainian or neutral international "
+            "sources."
         ),
         tools=[{"google_search": {}}],
         temperature=0.2,

@@ -52,6 +52,29 @@ def crunch_deadline(days: int = 3) -> Optional[Dict[str, Any]]:
     return None
 
 
+def crunch_tonight() -> Optional[Dict[str, Any]]:
+    """HIGH-дедлайн сегодня/завтра. Инжектится в промпт Iris как флаг, что
+    поздний вечер перестаёт быть запретным: если других окон нет, учёба ночью
+    НОРМАЛЬНА. Снимает жёсткость 22:30 ровно тогда, когда коучинг важнее всего."""
+    today = now_local().date()
+    for d in top_priorities():
+        if d.get("importance") == "high" and d["_due"] <= today + timedelta(days=1):
+            return d
+    return None
+
+
+def radar_deadline(lo: int = 4, hi: int = 7) -> Optional[Dict[str, Any]]:
+    """Pending-дедлайн в окне [lo,hi] дней, про который ещё НЕ предупреждали
+    проактивно — раннее мягкое «на радаре, начал?». Importance не важен: средний
+    экзамен (матан) должен всплыть заранее, а не только за 3 дня (crunch)."""
+    today = now_local().date()
+    for d in _pending_deadlines():
+        left = (d["_due"] - today).days
+        if lo <= left <= hi and not coach_storage.radar_pinged(d.get("id")):
+            return d
+    return None
+
+
 def build_day_context() -> str:
     """DAY CONTEXT для Iris: когда проснулся, что было за день (дневник),
     что завтра. Лечит класс проблем «план в прошлое»: модель видит реальный
@@ -74,6 +97,20 @@ def build_day_context() -> str:
             tags = ",".join(e.get("tags") or [])
             text = (e.get("text") or "").replace("\n", " ")[:60]
             lines.append(f"    {t} [{tags}] {text}")
+
+    recent = coach_storage.last_entry_per_tag(["спорт", "питание", "учёба", "учеба", "сон"])
+    if "учеба" in recent and "учёба" not in recent:
+        recent["учёба"] = recent.pop("учеба")
+    recent_lines = []
+    for tag in ("спорт", "питание", "учёба", "сон"):
+        e = recent.get(tag)
+        if e:
+            d = str(e.get("timestamp", ""))[:10]
+            txt = (e.get("text") or "").replace("\n", " ")[:50]
+            recent_lines.append(f"    {tag}: {d} — {txt}")
+    if recent_lines:
+        lines.append("  Недавнее (последняя запись по теме — не говори «нет записей» вслепую):")
+        lines += recent_lines
 
     shift = get_shift(now.date() + timedelta(days=1))
     if shift:
@@ -104,6 +141,15 @@ def build_priorities_block() -> str:
             lines.append(
                 f"  {i}. {when} — {d['title']} [{d.get('importance', 'medium')}] — {tail}"
             )
+
+    crunch = crunch_tonight()
+    if crunch:
+        when_c = "сегодня" if crunch["_due"] == today else "завтра"
+        lines.append(
+            f"⚠ CRUNCH: «{crunch['title']}» — дедлайн {when_c}. Если раньше окон сегодня "
+            f"нет, поздний вечер — НОРМАЛЬНЫЙ слот для подготовки: не запрещай его и не "
+            f"читай нотаций про сон, помоги спланировать (что успеть, когда стоп)."
+        )
 
     day_parts: List[str] = []
     shift = get_shift(today)

@@ -83,7 +83,7 @@ TOOL_SCHEMAS = [
                     "query": {"type": "string", "description": "Search query"},
                     "top_k": {"type": "integer", "description": "Results count 1-5", "default": 3},
                     "region": {
-                        "type": "string",
+                        "type": ["string", "null"],
                         "description": (
                             "Region hint like 'de-de', 'ru-ru', 'us-en'. "
                             "Use the topic's region (German transit → 'de-de'). "
@@ -210,7 +210,7 @@ TOOL_SCHEMAS = [
                         "description": "Self-contained research task with context",
                     },
                     "region": {
-                        "type": "string",
+                        "type": ["string", "null"],
                         "description": "Region hint like 'de-de' for region-specific topics",
                     },
                     "mode": {
@@ -245,8 +245,8 @@ TOOL_SCHEMAS = [
                 "properties": {
                     "observation": {"type": "string", "description": "What the owner said/revealed, concise"},
                     "kind": {"type": "string", "enum": ["commitment", "state", "pattern", "info"]},
-                    "due": {"type": "string", "description": "YYYY-MM-DD if the commitment has a date"},
-                    "title": {"type": "string", "description": "Short deadline title (for commitment with due)"},
+                    "due": {"type": ["string", "null"], "description": "YYYY-MM-DD if the commitment has a date (omit or null otherwise)"},
+                    "title": {"type": ["string", "null"], "description": "Short deadline title for a dated commitment (omit or null otherwise)"},
                 },
                 "required": ["observation", "kind"],
             },
@@ -282,8 +282,8 @@ TOOL_SCHEMAS = [
                 "type": "object",
                 "properties": {
                     "title": {"type": "string", "description": "Goal in one phrase"},
-                    "why": {"type": "string", "description": "Why owner needs it"},
-                    "target_date": {"type": "string", "description": "Deadline YYYY-MM-DD"},
+                    "why": {"type": ["string", "null"], "description": "Why owner needs it"},
+                    "target_date": {"type": ["string", "null"], "description": "Deadline YYYY-MM-DD"},
                 },
                 "required": ["title"],
             },
@@ -315,7 +315,7 @@ TOOL_SCHEMAS = [
                 "type": "object",
                 "properties": {
                     "goal_id": {"type": "integer"},
-                    "note": {"type": "string", "description": "Outcome note"},
+                    "note": {"type": ["string", "null"], "description": "Outcome note"},
                 },
                 "required": ["goal_id"],
             },
@@ -369,8 +369,10 @@ TOOL_SCHEMAS = [
         "function": {
             "name": "add_diary_entry",
             "description": (
-                "Add a diary entry. Use to fix: important decisions, insights, "
-                "emotional moments. Auto-tag if useful."
+                "Log a REAL event/state/decision of the owner (meal, training, sleep, "
+                "study, mood, commitment) with a tag. NEVER log meta — that he messaged "
+                "you, acknowledgements, your own actions, or content-free reactions. "
+                "If nothing real happened, do not call this."
             ),
             "parameters": {
                 "type": "object",
@@ -395,7 +397,7 @@ TOOL_SCHEMAS = [
                 "type": "object",
                 "properties": {
                     "last_n": {"type": "integer", "description": "How many recent entries", "default": 10},
-                    "tag": {"type": "string", "description": "Filter by tag"},
+                    "tag": {"type": ["string", "null"], "description": "Filter by tag"},
                 },
             },
         },
@@ -628,6 +630,8 @@ def _tool_add_diary_entry(args: Dict[str, Any]) -> str:
         text=args.get("text", ""),
         tags=args.get("tags") or [],
     )
+    if not e or not e.get("id"):
+        return "Пустая/служебная заметка — в дневник не пишу."
     return f"Запись #{e['id']} в дневник добавлена ({len(e.get('tags') or [])} тегов)."
 
 
@@ -717,6 +721,23 @@ _TIER_C_DOMAINS = (
     "vesti.ru", "ng.ru", "ng-life.ru", "pikabu.ru",
 )
 
+# Российские гос/пропаганда источники — для украинца-владельца ОТРЕЗАЕМ полностью
+# (не просто вниз), особенно по войне/политике. Матчим по подстроке домена.
+_RU_BLOCK_DOMAINS = (
+    "ria.ru", "tass.ru", "rt.com", "lenta.ru", "gazeta.ru", "vesti.ru",
+    "rbc.ru", "ren.tv", "1tv.ru", "vz.ru", "kp.ru", "iz.ru", "tsargrad",
+    "rg.ru", "aif.ru", "mk.ru", "regnum", "rian.ru", "ria.com", "smotrim.ru",
+    "gov.ru", "mil.ru",
+)
+
+
+def _is_ru_blocked(text: str) -> bool:
+    """Источник из RU-пропаганда/гос blocklist? Проверяем и по URL, и по
+    title (у Gemini-grounding реальный URL спрятан за redirect, домен виден
+    только в title)."""
+    s = (text or "").lower()
+    return any(d in s for d in _RU_BLOCK_DOMAINS)
+
 
 def _domain_of(url: str) -> str:
     """Вернуть netloc в нижнем регистре, без www."""
@@ -749,6 +770,7 @@ def _rank_results(results: list) -> list:
     Сортировка search-результатов по tier (0 наверх, 2 вниз) с сохранением
     исходного порядка внутри tier (stable sort).
     """
+    results = [r for r in results if not _is_ru_blocked(r.get("url", ""))]
     indexed = list(enumerate(results))
     indexed.sort(key=lambda pair: (_domain_tier(pair[1].get("url", "")), pair[0]))
     return [r for _, r in indexed]
@@ -764,6 +786,9 @@ def _tool_web_search(query: str, top_k: int, rg, region: str = "wt-wt") -> str:
     grounded = grounded_search(query)
     if grounded:
         answer, sources = grounded
+        # Отрезаем RU-пропаганда источники (украинец-владелец). URL у grounding —
+        # redirect, поэтому матчим и по title, и по url.
+        sources = [(t, u) for (t, u) in sources if not _is_ru_blocked(t) and not _is_ru_blocked(u)]
         lines = ["Источник поиска: google (Gemini grounding)", f"Запрос: {query}", "", answer]
         if sources:
             lines += ["", "Источники:"]

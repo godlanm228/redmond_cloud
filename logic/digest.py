@@ -47,8 +47,13 @@ def _translate_titles(titles: List[str]) -> Optional[List[str]]:
         "в том же порядке, без пояснений.\n\n"
         + json.dumps(titles, ensure_ascii=False)
     )
-    raw = generate_text(prompt, temperature=0.1, max_tokens=1200)
+    raw = ""
+    for _attempt in range(2):  # один ретрай: перевод морозился транзиентно (15-16.06 ушёл англ.)
+        raw = generate_text(prompt, temperature=0.1, max_tokens=1200)
+        if raw:
+            break
     if not raw:
+        logger.warning("Digest: Gemini не ответил на перевод (2 попытки) — заголовки в оригинале")
         return None
     m = re.search(r"\[.*\]", raw, re.DOTALL)
     if not m:
@@ -96,8 +101,10 @@ def build_digest() -> str:
         logger.warning("Digest: перевод недоступен — заголовки в оригинале")
 
     now = now_local()
+    # БЕЗ ведущего 📰: эмодзи добавляет Coordinator.respond_as (NEWSER.emoji).
+    # Вшитый сюда давал двойной «📰 📰» в дайджесте каждое утро.
     header = (
-        f"📰 **Утренний дайджест — "
+        f"**Утренний дайджест — "
         f"{_WEEKDAYS[now.weekday()]}, {now.day} {_MONTHS_GEN[now.month - 1]}**"
     )
     blocks = [header]
