@@ -1240,7 +1240,7 @@ def _tool_update_profile(args: Dict[str, Any], rg) -> str:
         try:
             parsed_value = json.loads(value)
         except json.JSONDecodeError:
-            pass
+            pass  # не JSON — оставляем как строку (намеренный fallback, не ошибка)
 
     target = profile[category]
 
@@ -1274,6 +1274,6 @@ def _tool_update_profile(args: Dict[str, Any], rg) -> str:
         try:
             rg.owner_profile = profile
         except Exception:
-            pass
+            logger.debug("owner_profile in-memory sync failed", exc_info=True)
 
     return f"OK: {category}.{field} {action} {value[:80]}"
