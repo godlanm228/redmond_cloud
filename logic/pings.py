@@ -99,6 +99,20 @@ def decide_ping() -> Optional[Tuple[str, str]]:
 
     tags = coach_storage.today_tags()
 
+    # --- 0b. Утреннее приветствие: ~15 мин после пробуждения, один раз за день.
+    #         Триггер — первое сообщение дня (реакция на дайджест и т.п.). Сводку
+    #         дня (смена/лекции/дедлайны) Iris берёт из STATE-блока промпта. ---
+    wake = coach_storage.wake_time_today()
+    if wake and "greeting" not in pings:
+        ws = _parse_hm(wake, now)
+        if ws is not None and now >= ws + timedelta(minutes=15):
+            return ("greeting", (
+                f"Влад проснулся недавно (в {wake}) и на связи. Поздоровайся тепло и "
+                f"коротко, по-человечески, дай сводку дня из STATE (смена/лекции/горящие "
+                f"дедлайны если есть) и один лёгкий вопрос про план. Без списка на "
+                f"полэкрана, без давления."
+            ))
+
     # --- 1. Еда перед сменой: окно [старт-3ч, старт-40мин], выход ~за 20 мин ---
     if (
         shift_start is not None
