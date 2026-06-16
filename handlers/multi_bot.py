@@ -110,7 +110,7 @@ async def _gate(
         if entry:
             logger.info("Wake detected: %s", entry["text"])
     except Exception:
-        logger.debug("wake detection failed", exc_info=True)
+        logger.warning("wake detection failed", exc_info=True)
 
     main_chat = _main_chat_id()
     if main_chat is not None and chat.id != main_chat:
@@ -135,7 +135,7 @@ async def _gate(
         from logic.coach_storage import mark_owner_seen
         mark_owner_seen()
     except Exception:
-        logger.debug("mark_owner_seen failed", exc_info=True)
+        logger.warning("mark_owner_seen failed", exc_info=True)
 
     return True
 
@@ -380,7 +380,7 @@ async def redmond_photo_handler(update: Update, context: ContextTypes.DEFAULT_TY
                 chat_id, "(прислал фото)", f"На фото: {vdesc}",
             )
         except Exception:
-            logger.debug("note_to_history failed", exc_info=True)
+            logger.warning("note_to_history failed", exc_info=True)
 
     if result.get("error") and not result.get("description"):
         await coordinator.respond_as(
