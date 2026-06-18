@@ -109,6 +109,7 @@ IRIS = AgentConfig(
         "get_current_time", "read_dossier_section", "update_profile",
         "add_goal", "list_goals", "mark_goal_done",
         "add_diary_entry", "read_diary",
+        "log_meal", "get_pantry", "update_pantry",  # Фаза 4 — рацион/запас
         "add_deadline", "list_deadlines", "mark_deadline_done",
         "snooze_pings", "get_week_schedule",
         "get_week_plan", "save_week_plan",

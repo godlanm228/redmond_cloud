@@ -157,9 +157,17 @@ def mark_deadline_done(deadline_id: int) -> Optional[Dict[str, Any]]:
 # Diary
 # ============================================================================
 
-def add_diary_entry(text: str, tags: Optional[List[str]] = None) -> Optional[Dict[str, Any]]:
+def add_diary_entry(
+    text: str,
+    tags: Optional[List[str]] = None,
+    data: Optional[Dict[str, Any]] = None,
+) -> Optional[Dict[str, Any]]:
     """Запись в дневник. Возвращает None если писать нечего (пустышка) или это
-    точный дубль последней записи — анти-шум (Iris логировала мета/повторы)."""
+    точный дубль последней записи — анти-шум (Iris логировала мета/повторы).
+
+    data — опциональная структурная нагрузка (напр. еда: dish/kcal/protein/place).
+    Хранится в самой записи, чтобы аналитический слой (Этап 3) агрегировал тренды
+    без отдельного meals.json. Тег [питание] при этом сохраняется для today_tags()."""
     text = (text or "").strip()
     if len(text) < 3:
         return None
@@ -172,6 +180,8 @@ def add_diary_entry(text: str, tags: Optional[List[str]] = None) -> Optional[Dic
         "text": text,
         "tags": tags or [],
     }
+    if data:
+        entry["data"] = data
     diary.append(entry)
     _save_json("diary.json", diary)
     return entry
@@ -194,6 +204,51 @@ def last_entry_per_tag(tags: List[str]) -> Dict[str, Dict[str, Any]]:
             if t in tags:
                 out[t] = e
     return out
+
+
+# ============================================================================
+# Pantry — запас продуктов (инкрементальный, НЕ снапшот-перезапись и НЕ граммы).
+# Items = строки. Обновляется при покупке/готовке. updated → мягкая ресинхронизация.
+# ============================================================================
+
+def _norm_item(s: Any) -> str:
+    return " ".join(str(s).lower().split())
+
+
+def get_pantry() -> Dict[str, Any]:
+    return _load_json("pantry.json", {"items": [], "updated": None})
+
+
+def pantry_update(add: Optional[List[str]] = None,
+                  remove: Optional[List[str]] = None) -> Dict[str, Any]:
+    """Инкрементально: добавить купленное / убрать потраченное. Дедуп по
+    нормализованному имени, порядок добавления сохраняется."""
+    data = get_pantry()
+    items: List[str] = list(data.get("items") or [])
+    have = {_norm_item(i) for i in items}
+    for it in (add or []):
+        it = str(it).strip()
+        if it and _norm_item(it) not in have:
+            items.append(it)
+            have.add(_norm_item(it))
+    if remove:
+        rm = {_norm_item(r) for r in remove}
+        items = [i for i in items if _norm_item(i) not in rm]
+    data = {"items": items, "updated": now_local().strftime("%Y-%m-%d")}
+    _save_json("pantry.json", data)
+    return data
+
+
+def pantry_age_days() -> Optional[int]:
+    """Сколько дней назад обновляли запас (для мягкой ресинхронизации). None — пусто."""
+    upd = get_pantry().get("updated")
+    if not upd:
+        return None
+    try:
+        d = datetime.strptime(upd, "%Y-%m-%d").date()
+        return (now_local().date() - d).days
+    except ValueError:
+        return None
 
 
 # ============================================================================

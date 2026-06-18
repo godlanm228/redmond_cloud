@@ -414,20 +414,48 @@ async def redmond_photo_handler(update: Update, context: ContextTypes.DEFAULT_TY
                     await coordinator.respond_as(iris.name, chat_id, plan, iris.emoji, iris.output_format)
         return
 
-    # 2. Еда → Iris фиксирует питание + короткая реакция (рацион, без лекций)
+    # 2. Еда → Iris. meal: фиксирует рацион (log_meal с оценками vision) + реакция.
+    #    groceries/receipt: пополняем запас детерминированно в коде + тёплое подтверждение.
     if ptype == "food":
         iris = agent_by_name("Iris")
-        desc = result.get("description") or "тарелка с едой"
-        if iris is not None:
+        if iris is None:
+            return
+        food_kind = result.get("food_kind") or "meal"
+        items = result.get("items") or []
+
+        if food_kind in ("groceries", "receipt") and items:
+            # Запас обновляем кодом (надёжно), Iris только реагирует — не гоняем её
+            # повторно писать инструментом то, что уже записано.
+            from logic.coach_storage import pantry_update
+            data = await asyncio.to_thread(pantry_update, items, None)
+            n = len(data.get("items") or [])
             prompt = (
-                f"(фото еды) Влад прислал фото своей еды: «{desc}». "
-                "Запиши в дневник (add_diary_entry tags=['питание']) что он поел, и "
-                "дай короткую тёплую реакцию в своём стиле — без лекций о диете."
+                f"(фото продуктов) Влад пополнил запас: {', '.join(items)}. "
+                f"Я уже добавила это в его запас продуктов (сейчас {n} позиций) — НЕ вызывай "
+                "инструменты повторно для записи. Подтверди тёпло и коротко, можешь предложить "
+                "ОДНУ идею что приготовить из этого. Без лекций."
             )
-            async with coordinator.typing(iris.name, chat_id):
-                resp = await _generate_with_status(iris, prompt, context, chat_id)
-            if not resp.startswith(DELEGATION_MARKER):
-                await coordinator.respond_as(iris.name, chat_id, resp, iris.emoji, iris.output_format)
+        else:
+            desc = result.get("dish") or result.get("description") or "тарелка с едой"
+            kcal_lo, kcal_hi = result.get("kcal_low"), result.get("kcal_high")
+            prot = result.get("protein_g")
+            est = []
+            if kcal_lo or kcal_hi:
+                est.append(f"{kcal_lo or kcal_hi}–{kcal_hi or kcal_lo} ккал")
+            if prot:
+                est.append(f"~{prot} г белка")
+            est_line = (" Оценка по фото (честный диапазон, можешь поправить): "
+                        + ", ".join(est) + ".") if est else ""
+            prompt = (
+                f"(фото еды) Влад прислал фото еды: «{desc}».{est_line} "
+                "Запиши через log_meal (dish + эти оценки; place определи по STATE: смена "
+                "сейчас → 'работа', иначе 'дом'). Дай короткую тёплую реакцию — без лекций о диете."
+            )
+
+        async with coordinator.typing(iris.name, chat_id):
+            resp = await _generate_with_status(iris, prompt, context, chat_id)
+        if not resp.startswith(DELEGATION_MARKER):
+            await coordinator.respond_as(iris.name, chat_id, resp, iris.emoji, iris.output_format)
         return
 
     # 3. Что угодно ещё → Redmond описывает, что видит (без вранья «не вижу картинок»)
