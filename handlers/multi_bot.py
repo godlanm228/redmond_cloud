@@ -456,11 +456,14 @@ async def redmond_photo_handler(update: Update, context: ContextTypes.DEFAULT_TY
             from logic.coach_storage import pantry_update
             data = await asyncio.to_thread(pantry_update, items, None)
             n = len(data.get("items") or [])
+            barcode = result.get("barcode") or ""
+            bc_hint = f" Штрихкод: {barcode}." if barcode else ""
             prompt = (
-                f"(фото продуктов) Влад пополнил запас: {', '.join(items)}. "
-                f"Я уже добавила это в его запас продуктов (сейчас {n} позиций) — НЕ вызывай "
-                "инструменты повторно для записи. Подтверди тёпло и коротко, можешь предложить "
-                "ОДНУ идею что приготовить из этого. Без лекций."
+                f"(фото продуктов) Влад пополнил запас: {', '.join(items)}.{bc_hint} "
+                f"Я уже добавила это в его запас продуктов (сейчас {n} позиций) — в запас "
+                "повторно НЕ добавляй. Можешь вызвать lookup_food (штрихкод или название) для "
+                "точной нутриции, затем тёпло и коротко подтвердить + ОДНУ идею что приготовить. "
+                "Без лекций."
             )
         else:
             desc = result.get("dish") or result.get("description") or "тарелка с едой"

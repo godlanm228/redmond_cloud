@@ -538,6 +538,25 @@ TOOL_SCHEMAS = [
     {
         "type": "function",
         "function": {
+            "name": "lookup_food",
+            "description": (
+                "Look up EXACT nutrition of a PACKAGED/store product in OpenFoodFacts "
+                "(free DB) by barcode or name — per 100g. Use BEFORE logging numbers for "
+                "packaged food, instead of guessing. Returns 'not found' if absent — then "
+                "estimate honestly. Home-cooked-from-scratch food → just estimate, skip this."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "barcode": {"type": ["string", "null"], "description": "EAN/barcode digits if known"},
+                    "name": {"type": ["string", "null"], "description": "Product name (fallback if no barcode)"},
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "ask_iris",
             "description": (
                 "Hand the owner's request to Iris (the coach) and let HER answer him. "
@@ -648,6 +667,8 @@ def execute_tool(name: str, args: Dict[str, Any], rg=None) -> str:
         return _tool_get_pantry()
     if name == "update_pantry":
         return _tool_update_pantry(args)
+    if name == "lookup_food":
+        return _tool_lookup_food(args)
 
     return f"Неизвестный tool: {name}"
 
@@ -830,6 +851,28 @@ def _tool_get_pantry() -> str:
     if age is not None and age >= 5:
         head += f", {age} дн. назад — уточни, ещё актуально"
     return head + "):\n" + ", ".join(items)
+
+
+def _tool_lookup_food(args: Dict[str, Any]) -> str:
+    from utils import openfoodfacts
+    barcode = str(args.get("barcode") or "").strip()
+    name = str(args.get("name") or "").strip()
+    if not barcode and not name:
+        return "Нужен штрихкод или название продукта."
+    res = openfoodfacts.lookup(barcode=barcode, name=name)
+    if not res:
+        return f"«{name or barcode}» в OpenFoodFacts не найдено — дай честную оценку."
+    title = res["name"] or name or "продукт"
+    if res.get("brands"):
+        title += f" ({res['brands']})"
+    facts = []
+    if res.get("kcal_100g") is not None:
+        facts.append(f"~{res['kcal_100g']} ккал/100г")
+    if res.get("protein_100g") is not None:
+        facts.append(f"~{res['protein_100g']} г белка/100г")
+    if res.get("quantity"):
+        facts.append(f"упаковка {res['quantity']}")
+    return f"OpenFoodFacts: {title}" + (" — " + ", ".join(facts) if facts else " (нутриция не указана)")
 
 
 def _tool_update_pantry(args: Dict[str, Any]) -> str:
