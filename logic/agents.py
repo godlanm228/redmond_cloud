@@ -31,6 +31,7 @@ class AgentConfig:
     bot_username: str = ""         # TG @username бота (без @)
     executor: str = "groq"         # "groq" | "cipher_subprocess"
     allowed_tools: Optional[List[str]] = None  # None = все доступные
+    provider_order: Optional[List[str]] = None  # None = глобальный llm_provider_order
     name_aliases: List[str] = field(default_factory=list)  # имена без @: ["айрис", "iris"]
     output_format: str = "plain"   # "plain" | "html" — определяет parse_mode в Coordinator
     # Температура LLM — главный рычаг различия «голосов» агентов:
@@ -115,6 +116,9 @@ IRIS = AgentConfig(
         "get_week_plan", "save_week_plan",
         "delegate_research",  # внешние факты для советов — через Newser, не гадать
     ],
+    # Gemini primary (TPM 1M — снимает Groq TPM 8K стену на тяжёлом промпте Iris),
+    # Groq — fallback по RPD (бесплатный лимит Gemini 1500 запросов/день).
+    provider_order=["gemini", "groq"],
 )
 
 NEWSER = AgentConfig(
