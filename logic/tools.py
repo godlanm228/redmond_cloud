@@ -517,6 +517,25 @@ TOOL_SCHEMAS = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "ask_iris",
+            "description": (
+                "Hand the owner's request to Iris (the coach) and let HER answer him. "
+                "Use for anything in her zone — food/eating/cooking/groceries/pantry, "
+                "diary, goals, deadlines, training, schedule & study tracking, mood. "
+                "Do NOT handle these yourself. After calling this you are DONE."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "request": {"type": "string", "description": "The owner's request, self-contained, in his language"},
+                },
+                "required": ["request"],
+            },
+        },
+    },
 ]
 
 
@@ -551,7 +570,11 @@ def execute_tool(name: str, args: Dict[str, Any], rg=None) -> str:
             "task": str(args.get("task", "")).strip(),
             "region": str(args.get("region", "")).strip(),
             "mode": str(args.get("mode", "") or "handoff").strip().lower(),
+            "target": "Newser",
         }
+        return DELEGATION_MARKER + json.dumps(payload, ensure_ascii=False)
+    if name == "ask_iris":
+        payload = {"task": str(args.get("request", "")).strip(), "target": "Iris"}
         return DELEGATION_MARKER + json.dumps(payload, ensure_ascii=False)
     if name == "handoff_to_iris":
         return _tool_handoff_to_iris(args)
