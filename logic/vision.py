@@ -22,7 +22,7 @@ import json
 import logging
 import os
 import re
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 import requests
 
@@ -37,19 +37,35 @@ _PROMPT = """Look at the image and return ONLY a JSON object — no other text.
 Classify "type":
 - "shift_schedule": screenshot of a shift-planning / calendar app. Entries titled
   "Bar" with times like "16:00 – 23:00"; days marked "Keine Ereignisse".
-- "food": a meal, plate, dish, groceries, or fridge contents.
+- "food": a meal/plate/dish, OR groceries / fridge contents / a store receipt.
+  Set "food_kind": "meal" (cooked food to eat) | "groceries" (products, fridge,
+  shopping) | "receipt" (a store receipt).
+  meal -> "dish" (Russian, what is on the plate) + HONEST estimates "kcal_low"/"kcal_high"
+  (a TIGHT range ~15%, null if truly unsure) and "protein_g" (approx grams, null if unsure);
+  portions from a photo are rough — give ranges, never fake precision.
+  groceries/receipt -> "items": product names (Russian, short; on a receipt read the line
+  items, skip prices and totals).
 - "other": anything else (people, places, screenshots that are not schedules, etc).
 
 JSON shape:
 {{"type": "shift_schedule|food|other",
+  "food_kind": "meal|groceries|receipt",
   "shifts": [{{"date":"YYYY-MM-DD","start":"HH:MM","end":"HH:MM"}}],
+  "dish": "<for food_kind=meal>",
+  "kcal_low": null, "kcal_high": null, "protein_g": null,
+  "items": ["<for food_kind=groceries/receipt>"],
   "description": "<concise Russian description of what is shown; for food list the
-   dishes/items on the plate; for other describe the scene in one-two sentences>"}}
+   dishes/items; for other describe the scene in one-two sentences>"}}
 
 shift_schedule rules: if a day has both a planned and a checkmarked actual entry,
 use the PLANNED one; skip "Keine Ereignisse" days; German dates like
 "Sonntag, 14. Juni"; current year {year}, current month {month}; end "00:00" = midnight.
 If the image is NOT a schedule, "shifts" MUST be []."""
+
+
+def _as_int(v: Any) -> Optional[int]:
+    """Безопасный каст оценок vision (kcal/protein) в int; None при мусоре/null."""
+    return int(v) if isinstance(v, (int, float)) and not isinstance(v, bool) else None
 
 
 def _call_gemini_vision(prompt: str, image_b64: str) -> str:
@@ -125,6 +141,13 @@ def analyze_image(image_b64: str, api_key: str) -> Dict[str, Any]:
         "type": str(data.get("type", "other")).strip().lower(),
         "shifts": data.get("shifts") if isinstance(data.get("shifts"), list) else [],
         "description": str(data.get("description", "")).strip(),
+        "food_kind": str(data.get("food_kind", "")).strip().lower(),
+        "dish": str(data.get("dish", "")).strip(),
+        "items": [str(x).strip() for x in data.get("items") if str(x).strip()]
+                 if isinstance(data.get("items"), list) else [],
+        "kcal_low": _as_int(data.get("kcal_low")),
+        "kcal_high": _as_int(data.get("kcal_high")),
+        "protein_g": _as_int(data.get("protein_g")),
         "error": "",
     }
     if result["type"] not in ("shift_schedule", "food", "other"):

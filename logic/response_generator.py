@@ -85,6 +85,7 @@ _STATE_CHANGING_TOOLS = frozenset({
     "add_goal", "mark_goal_done",
     "add_deadline", "mark_deadline_done",
     "add_diary_entry",
+    "log_meal", "update_pantry",
     "save_week_plan",
     "handoff_to_iris",
 })
@@ -96,6 +97,8 @@ _TOOL_HUMAN_LABEL = {
     "add_deadline": "поставила дедлайн",
     "mark_deadline_done": "закрыла дедлайн",
     "add_diary_entry": "записала в дневник",
+    "log_meal": "записала еду",
+    "update_pantry": "обновила запас",
     "save_week_plan": "сохранила план недели",
     "handoff_to_iris": "передал Айрис",
 }
@@ -123,10 +126,11 @@ def _tool_status_label(name: str, args: Dict[str, Any]) -> Optional[str]:
         return "работаю с планом недели…"
     if name in ("read_dossier_section", "read_dossier"):
         return "сверяюсь с досье…"
-    if name in ("list_goals", "list_deadlines", "read_diary"):
+    if name in ("list_goals", "list_deadlines", "read_diary", "get_pantry"):
         return "смотрю записи…"
     if name in ("add_goal", "mark_goal_done", "add_deadline",
-                "mark_deadline_done", "add_diary_entry", "update_profile"):
+                "mark_deadline_done", "add_diary_entry", "update_profile",
+                "log_meal", "update_pantry"):
         return "записываю…"
     return None  # delegate_research (виден меншеном), get_current_time, snooze
 
@@ -956,12 +960,25 @@ class ResponseGenerator:
             "- meal/training/sleep/study/work reported → log with the right tag + ONE short ack;",
             "  no diet talk, no pep-talk. «без трени сегодня»/«не успел поесть» → log it, the slot",
             "  closes, no nagging.",
-            "- can't eat properly → ONE practical fast option (курица/тунец/протеин), no lecture.",
+            "- can't eat / no time → ONE quick option, no lecture. This is a FAST FALLBACK,",
+            "  not your default — normal food advice goes through FOOD & PANTRY below.",
             "- going out to rest («иду в бильярд», «кино») → [план,отдых] + ONE warm line",
             "  («Хорошей игры 🎱»); empty cheering («у тебя всё получится») stays banned.",
             "- «забей/не получается» → ask «что блокирует?» once, no pressure.",
             "- «отстань/не сейчас/занят» → snooze_pings (default 2h), one line «ок, до HH:MM молчу».",
             "- asks to change/remove a profile fact → update_profile.",
+            "",
+            "FOOD & PANTRY (рацион — твоя зона):",
+            "- «что приготовить / что поесть / что есть из продуктов» → get_pantry FIRST.",
+            "  Empty or flagged stale → ask what he's got now, then update_pantry. Suggest 2-3",
+            "  DIFFERENT options from the stock — varied, NOT only protein; mind the time (утро =",
+            "  кофе + лёгкий завтрак; on a shift he eats at work). Don't repeat what he ate the",
+            "  last days (read_diary tag=питание).",
+            "- He ate something (text or food photo) → log_meal with HONEST estimates: dish, a",
+            "  tight kcal range, protein; place from STATE (shift now → работа, else дом). Photo",
+            "  meals arrive pre-estimated — pass those numbers. Never fake precision.",
+            "- He bought / cooked / ran out → update_pantry(add/remove). Keep stock roughly in",
+            "  sync, but NEVER nag him to inventory; mild resync only when the list looks stale.",
             "",
             "RULES:",
             "- Never invent numbers/dates/facts. External facts for advice (prices, schedules,",

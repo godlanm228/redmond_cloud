@@ -405,6 +405,56 @@ TOOL_SCHEMAS = [
     {
         "type": "function",
         "function": {
+            "name": "log_meal",
+            "description": (
+                "Log a meal the owner ate, with HONEST estimates. Use on «поел…», a food "
+                "photo, or when he describes what he ate. Estimates are rough — give tight "
+                "ranges (~±15%), never fake precision; use null when you truly can't tell."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "dish": {"type": "string", "description": "What he ate, short Russian («курица с рисом и овощами»)"},
+                    "kcal_low": {"type": ["integer", "null"], "description": "Lower calorie estimate"},
+                    "kcal_high": {"type": ["integer", "null"], "description": "Upper calorie estimate (keep the range tight)"},
+                    "protein_g": {"type": ["integer", "null"], "description": "Approx protein grams"},
+                    "place": {"type": ["string", "null"], "description": "Where eaten: дом / работа / вне"},
+                },
+                "required": ["dish"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_pantry",
+            "description": (
+                "Read the owner's current food stock (pantry). Call BEFORE suggesting what to "
+                "cook. If empty or flagged stale, ask him what he's got, then update_pantry."
+            ),
+            "parameters": {"type": "object", "properties": {}},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "update_pantry",
+            "description": (
+                "Incrementally update food stock: add what he bought, remove what he cooked / "
+                "ran out of. Items are plain product names (Russian). Not a full snapshot."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "add": {"type": "array", "items": {"type": "string"}, "description": "Products to add"},
+                    "remove": {"type": "array", "items": {"type": "string"}, "description": "Products to remove"},
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "snooze_pings",
             "description": (
                 "Silence proactive pings (meal/training/study reminders). Call when owner "
@@ -549,6 +599,12 @@ def execute_tool(name: str, args: Dict[str, Any], rg=None) -> str:
         return _tool_add_diary_entry(args)
     if name == "read_diary":
         return _tool_read_diary(args)
+    if name == "log_meal":
+        return _tool_log_meal(args)
+    if name == "get_pantry":
+        return _tool_get_pantry()
+    if name == "update_pantry":
+        return _tool_update_pantry(args)
 
     return f"Неизвестный tool: {name}"
 
@@ -649,6 +705,80 @@ def _tool_read_diary(args: Dict[str, Any]) -> str:
         tag_part = f" [{tags}]" if tags else ""
         lines.append(f"  {e['timestamp']}{tag_part}: {e['text'][:200]}")
     return "\n".join(lines)
+
+
+_PLACE_ALIASES = {"home": "дом", "work": "работа", "out": "вне"}
+
+
+def _tool_log_meal(args: Dict[str, Any]) -> str:
+    """Запись приёма пищи в рацион: дневник тег [питание] + структурный data
+    (dish/kcal/protein/place) для аналитики Этапа 3. Оценки честные — диапазоны."""
+    from logic import coach_storage
+    dish = str(args.get("dish", "")).strip()
+    if not dish:
+        return "Что именно поел — не указано, в рацион не пишу."
+
+    lo, hi = args.get("kcal_low"), args.get("kcal_high")
+    kcal: Optional[List[int]] = None
+    if lo is not None or hi is not None:
+        lo = int(lo) if lo is not None else int(hi)
+        hi = int(hi) if hi is not None else int(lo)
+        kcal = [min(lo, hi), max(lo, hi)]
+
+    protein = args.get("protein_g")
+    protein = int(protein) if protein is not None else None
+
+    place = str(args.get("place") or "").strip().lower()
+    place = _PLACE_ALIASES.get(place, place)
+
+    data: Dict[str, Any] = {"dish": dish}
+    if kcal:
+        data["kcal"] = kcal
+    if protein is not None:
+        data["protein_g"] = protein
+    if place:
+        data["place"] = place
+
+    summary = dish + (f" ({place})" if place else "")
+    e = coach_storage.add_diary_entry(f"Поел: {summary}", tags=["питание"], data=data)
+    if not e or not e.get("id"):
+        return "Дубль/пусто — в рацион не пишу."
+
+    est = []
+    if kcal:
+        est.append(f"~{kcal[0]}–{kcal[1]} ккал")
+    if protein is not None:
+        est.append(f"~{protein} г белка")
+    tail = (" · " + ", ".join(est)) if est else ""
+    return f"Записал в рацион: {summary}{tail}."
+
+
+def _tool_get_pantry() -> str:
+    from logic import coach_storage
+    data = coach_storage.get_pantry()
+    items = data.get("items") or []
+    if not items:
+        return "Запас пуст — спроси у Влада, что есть из продуктов."
+    head = f"Запас (обновлён {data.get('updated', '?')}"
+    age = coach_storage.pantry_age_days()
+    if age is not None and age >= 5:
+        head += f", {age} дн. назад — уточни, ещё актуально"
+    return head + "):\n" + ", ".join(items)
+
+
+def _tool_update_pantry(args: Dict[str, Any]) -> str:
+    from logic import coach_storage
+    add = args.get("add") or []
+    remove = args.get("remove") or []
+    if isinstance(add, str):
+        add = [add]
+    if isinstance(remove, str):
+        remove = [remove]
+    if not add and not remove:
+        return "Нечего обновлять в запасе."
+    data = coach_storage.pantry_update(add=add, remove=remove)
+    items = data.get("items") or []
+    return f"Запас обновлён ({len(items)} поз.): " + (", ".join(items) if items else "пусто")
 
 
 def _tool_get_weather(city: str) -> str:
