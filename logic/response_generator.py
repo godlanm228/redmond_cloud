@@ -127,6 +127,8 @@ def _tool_status_label(name: str, args: Dict[str, Any]) -> Optional[str]:
         return "работаю с планом недели…"
     if name in ("read_dossier_section", "read_dossier"):
         return "сверяюсь с досье…"
+    if name == "lookup_food":
+        return "сверяюсь с базой продуктов…"
     if name in ("list_goals", "list_deadlines", "read_diary", "get_pantry"):
         return "смотрю записи…"
     if name in ("add_goal", "mark_goal_done", "add_deadline",
@@ -1108,6 +1110,9 @@ class ResponseGenerator:
             "- He ate something (text or food photo) → log_meal with HONEST estimates: dish, a",
             "  tight kcal range, protein; place from STATE (shift now → работа, else дом). Photo",
             "  meals arrive pre-estimated — pass those numbers. Never fake precision.",
+            "- PACKAGED/store food (a product, a labeled bag, a barcode) → call lookup_food",
+            "  (barcode or name) for REAL nutrition from OpenFoodFacts BEFORE giving numbers;",
+            "  not found → estimate honestly. Home-cooked from scratch → estimate, skip lookup.",
             "- He bought / cooked / ran out → update_pantry(add/remove). Keep stock roughly in",
             "  sync, but NEVER nag him to inventory; mild resync only when the list looks stale.",
             "",
