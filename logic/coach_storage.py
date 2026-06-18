@@ -194,6 +194,18 @@ def read_diary(last_n: int = 10, tag: Optional[str] = None) -> List[Dict[str, An
     return diary[-last_n:]
 
 
+def delete_diary_entries(ids: List[int]) -> List[int]:
+    """Удалить записи дневника по id. Возвращает РЕАЛЬНО удалённые id
+    (чтобы Iris отчитывалась только о фактически снесённом, а не врала)."""
+    id_set = {int(i) for i in ids}
+    diary = _load_json("diary.json", [])
+    removed = [e["id"] for e in diary if e.get("id") in id_set]
+    if removed:
+        diary = [e for e in diary if e.get("id") not in id_set]
+        _save_json("diary.json", diary)
+    return removed
+
+
 def last_entry_per_tag(tags: List[str]) -> Dict[str, Dict[str, Any]]:
     """Самая свежая запись дневника на каждый из тегов (любой давности).
     Чтобы Iris не отвечала «нет записей» о спорте/еде, когда они есть —

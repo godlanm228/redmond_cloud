@@ -405,6 +405,24 @@ TOOL_SCHEMAS = [
     {
         "type": "function",
         "function": {
+            "name": "delete_diary_entry",
+            "description": (
+                "Delete one or more diary entries by id (e.g. a wrong meal). Find ids "
+                "via read_diary (shown as #N). To FIX an entry: delete it, then log the "
+                "correct one. NEVER claim a deletion without calling this."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "entry_ids": {"type": "array", "items": {"type": "integer"}, "description": "Diary entry ids to delete"},
+                },
+                "required": ["entry_ids"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "log_meal",
             "description": (
                 "Log a meal the owner ate, with HONEST estimates. Use on «поел…», a food "
@@ -622,6 +640,8 @@ def execute_tool(name: str, args: Dict[str, Any], rg=None) -> str:
         return _tool_add_diary_entry(args)
     if name == "read_diary":
         return _tool_read_diary(args)
+    if name == "delete_diary_entry":
+        return _tool_delete_diary_entry(args)
     if name == "log_meal":
         return _tool_log_meal(args)
     if name == "get_pantry":
@@ -726,8 +746,31 @@ def _tool_read_diary(args: Dict[str, Any]) -> str:
     for e in entries:
         tags = ", ".join(e.get("tags") or [])
         tag_part = f" [{tags}]" if tags else ""
-        lines.append(f"  {e['timestamp']}{tag_part}: {e['text'][:200]}")
+        lines.append(f"  #{e.get('id', '?')} {e['timestamp']}{tag_part}: {e['text'][:200]}")
     return "\n".join(lines)
+
+
+def _tool_delete_diary_entry(args: Dict[str, Any]) -> str:
+    from logic import coach_storage
+    raw = args.get("entry_ids")
+    if raw is None:
+        raw = args.get("entry_id")
+    if isinstance(raw, bool):
+        ids = []
+    elif isinstance(raw, (int, float)):
+        ids = [int(raw)]
+    elif isinstance(raw, str):
+        ids = [int(p) for p in raw.replace("#", " ").replace(",", " ").split() if p.isdigit()]
+    elif isinstance(raw, list):
+        ids = [int(x) for x in raw if str(x).strip().lstrip("#").isdigit()]
+    else:
+        ids = []
+    if not ids:
+        return "Не указано какие записи удалять (нужны id из read_diary)."
+    removed = coach_storage.delete_diary_entries(ids)
+    if not removed:
+        return f"Записи {ids} не найдены — нечего удалять."
+    return "Удалила записи: " + ", ".join(f"#{r}" for r in removed) + "."
 
 
 _PLACE_ALIASES = {"home": "дом", "work": "работа", "out": "вне"}

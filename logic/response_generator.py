@@ -84,7 +84,7 @@ _STATE_CHANGING_TOOLS = frozenset({
     "update_profile",
     "add_goal", "mark_goal_done",
     "add_deadline", "mark_deadline_done",
-    "add_diary_entry",
+    "add_diary_entry", "delete_diary_entry",
     "log_meal", "update_pantry",
     "save_week_plan",
     "handoff_to_iris",
@@ -97,6 +97,7 @@ _TOOL_HUMAN_LABEL = {
     "add_deadline": "поставила дедлайн",
     "mark_deadline_done": "закрыла дедлайн",
     "add_diary_entry": "записала в дневник",
+    "delete_diary_entry": "удалила запись",
     "log_meal": "записала еду",
     "update_pantry": "обновила запас",
     "save_week_plan": "сохранила план недели",
@@ -130,7 +131,7 @@ def _tool_status_label(name: str, args: Dict[str, Any]) -> Optional[str]:
         return "смотрю записи…"
     if name in ("add_goal", "mark_goal_done", "add_deadline",
                 "mark_deadline_done", "add_diary_entry", "update_profile",
-                "log_meal", "update_pantry"):
+                "log_meal", "update_pantry", "delete_diary_entry"):
         return "записываю…"
     return None  # delegate_research (виден меншеном), get_current_time, snooze
 
@@ -1062,6 +1063,9 @@ class ResponseGenerator:
             "  не спал→[сон,усталость], план отдыха («в 21 бильярд»)→[план,отдых] with time. A done",
             "  goal → mark_goal_done. NEVER log meta (that he messaged you, thanks, your own actions).",
             "  Tags are for the tool call only — never print «[тег]» in your reply.",
+            "- DELETE/FIX a logged entry: read_diary (ids show as #N) → delete_diary_entry",
+            "  (entry_ids=[…]). Fix a wrong meal = delete it, then log_meal the right one.",
+            "  NEVER say «удалила/исправила» unless delete_diary_entry actually succeeded.",
             "",
             "DEADLINES & PLANNING:",
             "- Day plans start from NOW — never schedule hours already passed.",
