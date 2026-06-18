@@ -286,6 +286,33 @@ async def _run_delegation(
         logger.warning("Delegation with empty task from %s — ignored", delegator.name)
         return
 
+    # Target Iris (Redmond передал коуч/еду в её зону) — отвечает владельцу она.
+    if str(payload.get("target") or "Newser").strip() == "Iris":
+        iris = agent_by_name("Iris")
+        if iris is None:
+            logger.error("Delegation to Iris failed: not registered")
+            return
+        logger.info("DELEGATE [%s → Iris]: %s", delegator.name, task[:120])
+        await coordinator.respond_as(
+            delegator.name, chat_id,
+            f"Это к Айрис — @{iris.bot_username}.", delegator.emoji, "plain",
+        )
+        envelope = (
+            f"(передано от {delegator.name} — это запрос владельца в твоей зоне, "
+            f"ответь ему сама)\n{task}"
+        )
+        async with coordinator.typing(iris.name, chat_id):
+            response = await _generate_with_status(iris, envelope, context, chat_id)
+        if response.startswith(DELEGATION_MARKER):
+            # Iris делегировала дальше (напр. факт у Newser) — один уровень вглубь.
+            await _run_delegation(iris, response[len(DELEGATION_MARKER):], context, chat_id)
+            return
+        state: RouterState = router_states.setdefault(chat_id, RouterState())
+        state.add("assistant", response, iris.name)
+        state.last_agent_name = iris.name
+        await coordinator.respond_as(iris.name, chat_id, response, iris.emoji, iris.output_format)
+        return
+
     logger.info("DELEGATE [%s → Newser, %s]: %s", delegator.name, mode, task[:120])
 
     # Витрина: кто кому что передал. Ты видишь таск и можешь поправить.
@@ -456,6 +483,10 @@ async def redmond_photo_handler(update: Update, context: ContextTypes.DEFAULT_TY
             resp = await _generate_with_status(iris, prompt, context, chat_id)
         if not resp.startswith(DELEGATION_MARKER):
             await coordinator.respond_as(iris.name, chat_id, resp, iris.emoji, iris.output_format)
+        # Sticky → Iris: текстовый follow-up после фото-еды держим за ней.
+        st: RouterState = context.application.bot_data["router_states"].setdefault(chat_id, RouterState())
+        st.add("assistant", resp, iris.name)
+        st.last_agent_name = iris.name
         return
 
     # 3. Что угодно ещё → Redmond описывает, что видит (без вранья «не вижу картинок»)
