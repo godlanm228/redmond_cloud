@@ -387,3 +387,28 @@ def mark_radar(deadline_id: Any) -> None:
     data = _load_json("radar.json", {})
     data[str(deadline_id)] = now_local().strftime("%Y-%m-%d")
     _save_json("radar.json", data)
+
+
+# ============================================================================
+# Gemini RPD-гард — счётчик запросов за день (free-tier 1500/проект; пул общий
+# с vision/поиском/дайджестом/Iris-петлёй). Авто-сброс на новой дате.
+# ============================================================================
+
+_GEMINI_RPD_WARN = (1200, 1450)  # пороги для одноразового warning в лог
+
+
+def gemini_bump() -> int:
+    data = _load_json("gemini_usage.json", {})
+    today = now_local().strftime("%Y-%m-%d")
+    if data.get("date") != today:
+        data = {"date": today, "count": 0}
+    data["count"] = int(data.get("count", 0)) + 1
+    _save_json("gemini_usage.json", data)
+    if data["count"] in _GEMINI_RPD_WARN:
+        logger.warning("Gemini RPD: %d запросов сегодня (free-tier лимит ~1500)", data["count"])
+    return data["count"]
+
+
+def gemini_count_today() -> int:
+    data = _load_json("gemini_usage.json", {})
+    return int(data.get("count", 0)) if data.get("date") == now_local().strftime("%Y-%m-%d") else 0

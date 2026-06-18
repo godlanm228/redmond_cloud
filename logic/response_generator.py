@@ -378,15 +378,19 @@ class ResponseGenerator:
     # ---------- провайдеры LLM ----------
 
     def _generate_with_providers(self, ctx: GenerationContext) -> str:
-        """Перебирает провайдеров. Groq получает chat-формат + tools, остальные — plain prompt."""
-        providers = getattr(self.config, "llm_provider_order", ["transformers"])
+        """Перебирает провайдеров (оба с function calling). Порядок — per-agent
+        (ctx.agent.provider_order), иначе глобальный llm_provider_order. Iris =
+        ['gemini','groq']: Gemini primary (TPM 1M), Groq — страховка по RPD."""
+        providers = getattr(ctx.agent, "provider_order", None) if ctx.agent else None
+        if not providers:
+            providers = getattr(self.config, "llm_provider_order", ["transformers"])
 
         for provider in providers:
             try:
                 if provider == "groq":
                     response = self._generate_with_groq(ctx)
                 elif provider == "gemini":
-                    response = self._generate_with_gemini(self._build_prompt(ctx))
+                    response = self._generate_with_gemini_tools(ctx)
                 else:
                     logger.warning("Unknown provider: %s", provider)
                     continue
@@ -695,15 +699,134 @@ class ResponseGenerator:
         except json.JSONDecodeError:
             return {}
 
-    def _generate_with_gemini(self, prompt: str) -> Optional[str]:
+    def _generate_with_gemini_tools(self, ctx: GenerationContext) -> Optional[str]:
+        """Gemini function-calling петля — аналог Groq-пути, но через Gemini
+        (TPM 1M против Groq 8K). Primary для Iris.
+
+        Возвращает:
+          • текст / DELEGATION_MARKER / summary действий — успех (наверх, не на Groq);
+          • '' — Gemini не дал ответа БЕЗ совершённых записей → провайдер-петля
+            падает на Groq. Если state-changing tool уже отработал — НЕ возвращаем ''
+            (Groq переисполнил бы и продублировал записи), отдаём summary.
+        """
         from utils import gemini
+        from logic.tools import TOOL_SCHEMAS, execute_tool, DELEGATION_MARKER
+
         api_key = getattr(self.config, "gemini_api_key", "") or gemini.api_key_from_env()
         if not api_key:
-            return None
+            return ""
         model = getattr(self.config, "gemini_model", "") or gemini.DEFAULT_MODEL
-        return gemini.generate_text(
-            prompt, model=model, temperature=0.7, max_tokens=512, api_key=api_key,
-        ) or None
+
+        # Фильтрация tools по агенту (как в Groq-пути)
+        allowed = getattr(ctx.agent, "allowed_tools", None) if ctx.agent else None
+        if allowed:
+            allowed_set = set(allowed)
+            tools_for_agent = [t for t in TOOL_SCHEMAS if t["function"]["name"] in allowed_set]
+        else:
+            tools_for_agent = TOOL_SCHEMAS
+        if ctx.force_tool:
+            forced = [t for t in tools_for_agent if t["function"]["name"] == ctx.force_tool]
+            if forced:
+                tools_for_agent = forced
+        gemini_tools = gemini.tool_schemas_to_gemini(tools_for_agent)
+
+        system = self._build_system_prompt(ctx)
+        contents: List[Dict[str, Any]] = [
+            {"role": "user", "parts": [{"text": self._build_user_message(ctx)}]}
+        ]
+        temperature = getattr(ctx.agent, "temperature", 0.5) if ctx.agent else 0.5
+        max_tokens = getattr(ctx.agent, "max_tokens", 800) if ctx.agent else 800
+
+        dossier_returned: set = set()
+        successful_tool_calls: List[str] = []
+
+        max_hops = 5
+        for hop in range(max_hops):
+            final_hop = hop == max_hops - 1
+            hop_tools = None if final_hop else gemini_tools
+            tool_config = None
+            if final_hop:
+                contents.append({"role": "user", "parts": [{"text": (
+                    "Tool budget is exhausted — do NOT call more tools. Compose your final "
+                    "answer NOW from the data above, in the user's language, per your FORMAT rules."
+                )}]})
+            elif ctx.force_tool and hop == 0:
+                tool_config = {"functionCallingConfig": {
+                    "mode": "ANY", "allowedFunctionNames": [ctx.force_tool],
+                }}
+
+            data = gemini.generate_contents(
+                contents, system=system, tools=hop_tools, tool_config=tool_config,
+                temperature=temperature, max_tokens=max_tokens, model=model, api_key=api_key,
+            )
+            if data is None:
+                # Gemini не ответил (RPD/RPM/timeout). Уже что-то записали → summary
+                # (не на Groq — переисполнит); иначе '' → провайдер-петля даст Groq.
+                return _summarize_actions(successful_tool_calls) if successful_tool_calls else ""
+
+            calls = gemini.extract_function_calls(data)
+            if not calls:
+                text = gemini.extract_text(data)
+                if text:
+                    return text
+                if successful_tool_calls:
+                    return _summarize_actions(successful_tool_calls)
+                return ""
+
+            # Модель просит tools: сжимаем уже отработанные functionResponse (как Groq),
+            # затем добавляем model-ход с вызовами и user-ход с результатами.
+            for c in contents:
+                for p in c.get("parts", []):
+                    fr = p.get("functionResponse")
+                    if fr and isinstance(fr.get("response"), dict) \
+                            and isinstance(fr["response"].get("result"), str):
+                        fr["response"]["result"] = _compress_tool_content(fr["response"]["result"])
+
+            contents.append({"role": "model", "parts": [
+                {"functionCall": dict(
+                    {"name": c["name"], "args": c["args"]},
+                    **({"id": c["id"]} if c["id"] else {}),
+                )}
+                for c in calls
+            ]})
+
+            response_parts: List[Dict[str, Any]] = []
+            for c in calls:
+                fn_name, fn_args = c["name"], c["args"]
+                if ctx.status_cb:
+                    status = _tool_status_label(fn_name, fn_args)
+                    if status:
+                        try:
+                            ctx.status_cb(status)
+                        except Exception:
+                            logger.debug("status_cb failed", exc_info=True)
+
+                if fn_name in ("read_dossier_section", "read_dossier"):
+                    section = str(fn_args.get("section")
+                                  or ("all" if fn_name == "read_dossier" else "core")).lower()
+                    if section in dossier_returned:
+                        result = (f"(Dossier section '{section}' was already returned earlier "
+                                  f"in this conversation. Do not request it again.)")
+                    else:
+                        dossier_returned.add(section)
+                        result = execute_tool(fn_name, fn_args, rg=self)
+                else:
+                    result = execute_tool(fn_name, fn_args, rg=self)
+
+                # Делегирование: ход агента окончен, маркер наверх до handler'а.
+                if isinstance(result, str) and result.startswith(DELEGATION_MARKER):
+                    return result
+
+                response_parts.append({"functionResponse": dict(
+                    {"name": fn_name, "response": {"result": result}},
+                    **({"id": c["id"]} if c["id"] else {}),
+                )})
+                if fn_name in _STATE_CHANGING_TOOLS and not _tool_result_failed(result):
+                    successful_tool_calls.append(fn_name)
+
+            contents.append({"role": "user", "parts": response_parts})
+
+        return _summarize_actions(successful_tool_calls) if successful_tool_calls else ""
 
     def _compose_with_gemini(self, messages: list, ctx: GenerationContext) -> Optional[str]:
         """Аварийный compose при исчерпании Groq TPD: беседа этой генерации
@@ -1179,19 +1302,6 @@ class ResponseGenerator:
 
         parts.append(ctx.user_text)
         return "\n".join(parts)
-
-    def _build_prompt(self, ctx: GenerationContext) -> str:
-        """
-        Plain-prompt для провайдеров без chat-формата (Gemini).
-        Склеивает system + user.
-        """
-        persona_name = self.persona.get("name", "Redmond")
-        return (
-            self._build_system_prompt(ctx)
-            + "\n\n"
-            + self._build_user_message(ctx)
-            + f"\n\n{persona_name}:"
-        )
 
     def _generate_fallback(self, ctx: GenerationContext) -> str:
         # Сюда попадаем ТОЛЬКО когда все провайдеры реально не дали ответ — это
