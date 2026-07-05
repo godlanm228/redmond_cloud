@@ -132,10 +132,10 @@ def _tool_status_label(name: str, args: Dict[str, Any]) -> Optional[str]:
     if name in ("list_goals", "list_deadlines", "read_diary", "get_pantry"):
         return "смотрю записи…"
     if name in ("add_goal", "mark_goal_done", "add_deadline",
-                "mark_deadline_done", "add_diary_entry", "update_profile",
-                "log_meal", "update_pantry", "delete_diary_entry"):
+                "mark_deadline_done", "postpone_deadline", "add_diary_entry",
+                "update_profile", "log_meal", "update_pantry", "delete_diary_entry"):
         return "записываю…"
-    return None  # delegate_research (виден меншеном), get_current_time, snooze
+    return None  # delegate_research (виден меншеном), get_current_time, mute
 
 
 def _clip(s: str, n: int = 300) -> str:
@@ -310,10 +310,15 @@ class ResponseGenerator:
         chat_id: int = 0,
         status_cb=None,
         force_tool: Optional[str] = None,
+        include_history: bool = True,
     ) -> str:
         """
         Stateless по entry-point — все per-chat данные ходят через chat_id.
         chat_id=0 — fallback для legacy/тестов без TG.
+        include_history=False — для scheduled-джоб: их промпт самодостаточен,
+        а история чата туда только протаскивает мусор (свежий дайджест Newser →
+        Iris в 09:03 пересказывала «новости» вместо дедлайнов). Ответ джобы в
+        историю по-прежнему пишется (_save_interaction) — «продолжи» работает.
         """
         from logic.agents import default_agent
         if agent is None:
@@ -326,7 +331,7 @@ class ResponseGenerator:
             intent=intent,
             user_text=user_text,
             user_role=user_role,
-            history=chat_history[-self.max_history:],
+            history=chat_history[-self.max_history:] if include_history else [],
             rg=self,
             agent=agent,
             status_cb=status_cb,
@@ -531,9 +536,11 @@ class ResponseGenerator:
                     if fallback:
                         return fallback
                     if _is_rate_limit_error(last_err):
+                        # Формулировка без рода: строку шлют и Iris (она), и
+                        # Redmond/Newser (он) — «Упёрся…» от Айрис резало глаз.
                         return (
-                            "Упёрся в дневной лимит Groq (бесплатный тариф, сброс в полночь "
-                            "по UTC). Чуть позже отвечу нормально."
+                            "Дневной лимит Groq исчерпан (бесплатный тариф, сброс в "
+                            "полночь по UTC). Чуть позже смогу ответить нормально."
                         )
                 return None
 
@@ -990,6 +997,9 @@ class ResponseGenerator:
             "  on how you work) with NO new question — reply ONE short line. NO tools.",
             "- NEVER re-answer a question that you or another agent already answered in",
             "  this chat. Add details only if the owner explicitly asks for more.",
+            "- NEVER claim another agent's message as yours: schedules/plans come from Iris,",
+            "  the digest/news from Newser. If the owner complains about a message you did",
+            "  not send — say plainly whose it was, don't apologize for it as your own.",
             "",
             "TOOL CONTEXT FORMAT (in user message):",
             "- [Web search — source: google] reliable.",
@@ -1079,7 +1089,12 @@ class ResponseGenerator:
             "  a ⚠ CRUNCH flag in STATE (high-stakes deadline within ~12h, no earlier slot) means the",
             "  late evening IS the real slot — help plan it concretely (what to cover, when to stop),",
             "  do NOT refuse or lecture about sleep. Plans serve the owner, not the reverse.",
-            "- Owner says a deadline passed («сдал») → mark_deadline_done + one short congrats.",
+            "- Owner says a deadline passed («сдал») or asks to close one → mark_deadline_done.",
+            "  The tool result LISTS remaining pending deadlines — if one of them is the same",
+            "  task (duplicate / stale copy), close it too; never report «всё чисто» while a",
+            "  pending duplicate keeps nagging him every morning.",
+            "- POSTPONE («перенесём на неделю», «сдвинь на пт») → postpone_deadline(id, new_due).",
+            "  NEVER add_deadline for a postponement — that creates a duplicate.",
             "",
             "WEEK PLAN (on «составь план недели» / prompt starting «(scheduled week-plan)»):",
             "- get_week_schedule(days=8) + TOP PRIORITIES → day-by-day plan: study slots BEFORE",
@@ -1098,7 +1113,9 @@ class ResponseGenerator:
             "- going out to rest («иду в бильярд», «кино») → [план,отдых] + ONE warm line",
             "  («Хорошей игры 🎱»); empty cheering («у тебя всё получится») stays banned.",
             "- «забей/не получается» → ask «что блокирует?» once, no pressure.",
-            "- «отстань/не сейчас/занят» → snooze_pings (default 2h), one line «ок, до HH:MM молчу».",
+            "- «отстань/не сейчас/занят» → mute_notifications (hours=2). «не пиши сегодня/стоп»",
+            "  → mode='today'. «вообще не пиши» → mode='forever'. «пиши/можешь писать» →",
+            "  mode='off'. One short ack line, честно назови срок из tool-результата.",
             "- asks to change/remove a profile fact → update_profile.",
             "",
             "FOOD & PANTRY (рацион — твоя зона):",
@@ -1234,6 +1251,9 @@ class ResponseGenerator:
             "- NEVER invent numbers, dates, events. Only what's in search results.",
             "- If owner's message is just a reaction/comment/thanks with no new question —",
             "  one short line, NO tools, never repeat the previous answer.",
+            "- The 09:00 morning digest IS yours (scheduled job). Never deny sending it.",
+            "  If owner is annoyed by it — tell him «стоп» or /mute silences all proactive",
+            "  messages; don't invent excuses like «шлю только по запросу».",
             "- If nothing found — say plainly «не нашёл инфу про X», no fluff.",
             "- If sources conflict — flag it explicitly.",
             "- Investment / «на чём заработать» questions: summarize what sources say",

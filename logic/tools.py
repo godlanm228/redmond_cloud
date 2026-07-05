@@ -473,16 +473,42 @@ TOOL_SCHEMAS = [
     {
         "type": "function",
         "function": {
-            "name": "snooze_pings",
+            "name": "mute_notifications",
             "description": (
-                "Silence proactive pings (meal/training/study reminders). Call when owner "
-                "says «отстань», «не сейчас», «занят», «потом». Default 2 hours."
+                "Silence ALL proactive bot messages (digest, deadline reminders, pings, "
+                "evening summary). Replies to owner's OWN messages keep working. "
+                "«отстань/не сейчас/занят» → hours=2; «не пиши сегодня/стоп» → "
+                "mode='today'; «вообще не пиши/отключись» → mode='forever'; "
+                "«пиши/можешь писать» → mode='off' (resume)."
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "hours": {"type": "number", "description": "Hours of silence, 0.5-12. Default 2."},
+                    "mode": {
+                        "type": ["string", "null"],
+                        "description": "today (till end of day) / forever / off (resume). Omit if using hours.",
+                    },
+                    "hours": {"type": "number", "description": "Hours of silence, 0.5-168."},
                 },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "postpone_deadline",
+            "description": (
+                "Move an EXISTING deadline to a new date («перенесём на неделю», «сдвинь "
+                "на пятницу»). ALWAYS use this for postponements — add_deadline would "
+                "create a duplicate and both would nag the owner."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "deadline_id": {"type": "integer", "description": "Id from list_deadlines"},
+                    "new_due": {"type": "string", "description": "New date YYYY-MM-DD"},
+                },
+                "required": ["deadline_id", "new_due"],
             },
         },
     },
@@ -615,10 +641,19 @@ def execute_tool(name: str, args: Dict[str, Any], rg=None) -> str:
         return DELEGATION_MARKER + json.dumps(payload, ensure_ascii=False)
     if name == "handoff_to_iris":
         return _tool_handoff_to_iris(args)
-    if name == "snooze_pings":
-        from logic.coach_storage import set_snooze
-        until = set_snooze(float(args.get("hours", 2)))
-        return f"Пинги выключены до {until}."
+    if name in ("mute_notifications", "snooze_pings"):  # snooze_pings — старое имя (compat)
+        from logic.coach_storage import muted_now, set_mute, unmute
+        mode = str(args.get("mode") or "").strip().lower()
+        if mode == "off":
+            if not muted_now():
+                return "Тишина и не была включена — всё работает."
+            unmute()
+            return "Тишина снята — проактивные сообщения снова включены."
+        hours = float(args.get("hours") or 0)
+        if not mode and not hours:
+            hours = 2.0  # голое «отстань» = как старый snooze
+        desc = set_mute(mode=mode or "hours", hours=hours)
+        return f"Все проактивные сообщения выключены {desc}."
     if name == "get_week_schedule":
         from logic.week_schedule import format_week
         return format_week(int(args.get("days", 8)))
@@ -653,6 +688,8 @@ def execute_tool(name: str, args: Dict[str, Any], rg=None) -> str:
         return _tool_add_deadline(args)
     if name == "mark_deadline_done":
         return _tool_mark_deadline_done(args)
+    if name == "postpone_deadline":
+        return _tool_postpone_deadline(args)
     if name == "list_deadlines":
         return _tool_list_deadlines(args)
     if name == "add_diary_entry":
@@ -726,7 +763,29 @@ def _tool_mark_deadline_done(args: Dict[str, Any]) -> str:
     d = coach_storage.mark_deadline_done(did)
     if not d:
         return f"Дедлайн #{did} не найден."
-    return f"Дедлайн #{did} «{d['title']}» закрыт."
+    # Оставшиеся pending — в результат: иначе Iris закрывает один из дублей
+    # и рапортует «всё чисто», а второй продолжает долбить по утрам.
+    rest = [x for x in coach_storage.list_deadlines() if x.get("status") == "pending"]
+    msg = f"Дедлайн #{did} «{d['title']}» закрыт."
+    if rest:
+        listing = "; ".join(f"#{x['id']} «{x['title']}» → {x['due']}" for x in rest)
+        msg += (f" ВНИМАНИЕ, ещё открыты: {listing}. Если что-то из этого — тот же "
+                f"дедлайн (дубль/устаревший перенос), закрой и его.")
+    return msg
+
+
+def _tool_postpone_deadline(args: Dict[str, Any]) -> str:
+    from logic import coach_storage
+    did = int(args.get("deadline_id", 0))
+    new_due = str(args.get("new_due", "")).strip()
+    try:
+        datetime.strptime(new_due, "%Y-%m-%d")
+    except ValueError:
+        return f"Дата «{new_due}» не в формате YYYY-MM-DD — перенос не сделан."
+    d = coach_storage.update_deadline(did, due=new_due)
+    if not d:
+        return f"Дедлайн #{did} не найден."
+    return f"Дедлайн #{did} «{d['title']}» перенесён → {new_due}."
 
 
 def _tool_list_deadlines(args: Dict[str, Any]) -> str:

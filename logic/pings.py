@@ -3,7 +3,8 @@
 дёргается только когда решение «пинговать» уже принято (экономия токенов).
 
 Анти-спам гарантии (в коде, не на совести LLM):
-  • тишина при snooze и ночью (тикер 10–23); активити-пинги (еда/спорт/учёба) —
+  • тишина при mute («стоп»/mute_notifications) и ночью (тикер 10–23);
+    активити-пинги (еда/спорт/учёба) —
     только после того как Влад на связи сегодня;
   • cold-start (исключение): если день идёт, а Влада не слышно — Iris инициирует
     САМА один раз (мягкое «как ты, какие планы»), можно молча проигнорить;
@@ -51,13 +52,8 @@ def decide_ping() -> Optional[Tuple[str, str]]:
     state = coach_storage.get_day_state()
 
     # --- глобальные предохранители (действуют и для cold-start, и для активити) ---
-    snooze = state.get("snooze_until")
-    if snooze:
-        try:
-            if now < datetime.fromisoformat(snooze):
-                return None
-        except ValueError:
-            pass
+    if coach_storage.muted_now():  # «стоп» от Влада — полная тишина
+        return None
     pings = state.get("pings", {})
     if len(pings) >= MAX_PINGS_PER_DAY:
         return None

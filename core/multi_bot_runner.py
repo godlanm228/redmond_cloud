@@ -95,6 +95,10 @@ def _build_app(
     if agent.name == "Redmond":
         app.add_handler(CommandHandler("ping", cmd_ping))
         app.add_handler(CommandHandler("whoami", cmd_whoami))
+        # /mute [N|forever] и /unmute — тишина всех проактивных сообщений
+        from handlers.multi_bot import cmd_mute, cmd_unmute
+        app.add_handler(CommandHandler("mute", cmd_mute))
+        app.add_handler(CommandHandler("unmute", cmd_unmute))
         app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, redmond_handler))
         # Скрин графика смен от Влада → vision-парсинг (только Redmond, чтобы 4 бота
         # не обрабатывали одно фото параллельно)

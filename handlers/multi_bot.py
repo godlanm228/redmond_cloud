@@ -140,6 +140,54 @@ async def _gate(
     return True
 
 
+# ---------- mute: стоп-слово кодом, не LLM (надёжность — «Ацтань тудей»
+# LLM однажды прочитал как просьбу построить план дня) ----------
+
+# Точное совпадение всего сообщения (после нормализации пунктуации/регистра).
+_MUTE_WORDS = {"стоп", "stop", "не пиши", "не пиши сегодня", "не пиши мне", "тишина"}
+_UNMUTE_WORDS = {"пиши", "говори", "отмена тишины"}
+
+
+def _mute_command_response(text: str) -> Optional[str]:
+    """Стоп-слово/анмьют точным матчем. Возвращает готовый ответ или None
+    (обычное сообщение — идёт в LLM). «пиши» снимает mute только если он
+    активен, иначе это обычное слово."""
+    from logic.coach_storage import muted_now, set_mute, unmute
+    norm = " ".join(
+        text.lower().replace(",", " ").replace(".", " ").replace("!", " ").split()
+    )
+    if norm in _MUTE_WORDS:
+        desc = set_mute("today")
+        return f"🔇 Принято: тишина {desc}. Вернуть — «пиши» или /unmute."
+    if norm in _UNMUTE_WORDS and muted_now():
+        unmute()
+        return "🔊 Тишина снята, снова на связи."
+    return None
+
+
+async def cmd_mute(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/mute — тишина до конца дня; /mute N — на N часов; /mute forever — насовсем."""
+    if not await _gate(update, context):
+        return
+    from logic.coach_storage import set_mute
+    arg = (context.args[0].lower() if context.args else "")
+    if arg == "forever":
+        desc = set_mute("forever")
+    elif arg.replace(".", "", 1).isdigit():
+        desc = set_mute("hours", hours=float(arg))
+    else:
+        desc = set_mute("today")
+    await update.message.reply_text(f"🔇 Принято: тишина {desc}. Вернуть — /unmute.")
+
+
+async def cmd_unmute(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await _gate(update, context):
+        return
+    from logic.coach_storage import unmute
+    unmute()
+    await update.message.reply_text("🔊 Тишина снята, снова на связи.")
+
+
 # ---------- генерация ответа (общий код) ----------
 
 async def _generate(
@@ -536,6 +584,15 @@ async def _route_and_respond(
     else:
         clean_text = text
         agent, needs_research = route(text, state, groq_api_key=groq_key)
+
+    # Стоп-слово — до LLM и мимо истории: «стоп» должен сработать всегда,
+    # даже когда модели лежат или заняты.
+    mute_reply = _mute_command_response(clean_text)
+    if mute_reply is not None:
+        logger.info("Mute command from owner: %s", clean_text[:40])
+        await coordinator.respond_as(agent.name, chat_id, mute_reply, agent.emoji, "plain")
+        return
+
     state.add("user", clean_text, agent.name)
 
     logger.info(
@@ -692,6 +749,13 @@ async def slim_agent_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
         agent.name,
         clean_text[:120],
     )
+
+    # Стоп-слово с меншеном («Айрис, стоп») — тоже кодом, до LLM.
+    mute_reply = _mute_command_response(clean_text)
+    if mute_reply is not None:
+        logger.info("Mute command from owner (slim): %s", clean_text[:40])
+        await coordinator.respond_as(agent.name, chat_id, mute_reply, agent.emoji, "plain")
+        return
 
     async with coordinator.typing(agent.name, chat_id):
         response = await _generate_with_status(agent, clean_text, context, chat_id)
