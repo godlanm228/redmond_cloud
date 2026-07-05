@@ -53,9 +53,11 @@ def _post_generate(key: str, body: Dict[str, Any], model: str, timeout: float) -
     last_err = None
     for _attempt in range(2):
         try:
+            # Ключ в заголовке, НЕ в query-параметре: requests включает полный URL
+            # в текст исключения, и ?key=… месяцами светился в v2.log плейнтекстом.
             resp = requests.post(
                 f"{_API_BASE}/models/{model or DEFAULT_MODEL}:generateContent",
-                params={"key": key},
+                headers={"x-goog-api-key": key},
                 json=body,
                 timeout=timeout,
             )

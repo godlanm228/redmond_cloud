@@ -14,7 +14,7 @@ from __future__ import annotations
 import json
 import logging
 import os
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -148,6 +148,29 @@ def mark_deadline_done(deadline_id: int) -> Optional[Dict[str, Any]]:
         if d.get("id") == deadline_id:
             d["status"] = "done"
             d["closed"] = now_local().strftime("%Y-%m-%d")
+            _save_json("deadlines.json", deadlines)
+            return d
+    return None
+
+
+def update_deadline(
+    deadline_id: int,
+    due: Optional[str] = None,
+    title: Optional[str] = None,
+    importance: Optional[str] = None,
+) -> Optional[Dict[str, Any]]:
+    """Правка существующего дедлайна (перенос даты и т.п.). «Перенесём на неделю»
+    = ЭТО, а не add_deadline: новый рядом со старым pending = дубль, и Iris
+    долбит по обоим (кейс #3/#4/#5 «Матан», июль 2026)."""
+    deadlines = _load_json("deadlines.json", [])
+    for d in deadlines:
+        if d.get("id") == deadline_id:
+            if due:
+                d["due"] = due
+            if title:
+                d["title"] = title.strip()
+            if importance:
+                d["importance"] = importance
             _save_json("deadlines.json", deadlines)
             return d
     return None
@@ -333,11 +356,12 @@ def wake_time_today() -> Optional[str]:
 # ============================================================================
 
 def get_day_state() -> Dict[str, Any]:
-    """State за сегодня: какие пинги отправлены, snooze. Авто-сброс на новой дате."""
+    """State за сегодня: какие пинги отправлены. Авто-сброс на новой дате.
+    (Тишина-по-запросу живёт отдельно в mute.json — она кросс-день.)"""
     state = _load_json("day_state.json", {})
     today = now_local().strftime("%Y-%m-%d")
     if state.get("date") != today:
-        state = {"date": today, "pings": {}, "snooze_until": None}
+        state = {"date": today, "pings": {}}
     return state
 
 
@@ -365,15 +389,48 @@ def mark_ping(ping_id: str) -> None:
     save_day_state(state)
 
 
-def set_snooze(hours: float) -> str:
-    """Тишина пингов до (сейчас + hours). Возвращает «HH:MM» до которого молчим."""
-    from datetime import timedelta
-    hours = max(0.5, min(hours, 12.0))
-    until = now_local() + timedelta(hours=hours)
-    state = get_day_state()
-    state["snooze_until"] = until.isoformat(timespec="minutes")
-    save_day_state(state)
-    return until.strftime("%H:%M")
+# ============================================================================
+# Mute — «стоп» от Влада: полная тишина ВСЕХ проактивных сообщений (дайджест,
+# дедлайны, вечерний итог, пинги тикера). Ответы на его собственные сообщения
+# не блокируются. Кросс-день (mute.json), в отличие от per-day day_state.
+# ============================================================================
+
+def set_mute(mode: str = "today", hours: float = 0) -> str:
+    """Выключить проактивные сообщения. mode: 'today' (до конца дня, дефолт) /
+    'forever' (пока явно не снимут) / часы через hours>0.
+    Возвращает человекочитаемое «до когда» для подтверждения."""
+    now = now_local()
+    if mode == "forever":
+        _save_json("mute.json", {"until": "forever",
+                                 "set": now.isoformat(timespec="minutes")})
+        return "пока не скажешь «пиши»"
+    if mode != "today" and hours and hours > 0:
+        until = now + timedelta(hours=max(0.5, min(float(hours), 168.0)))
+        _save_json("mute.json", {"until": until.isoformat(timespec="minutes")})
+        return ("до " + until.strftime("%H:%M")
+                if until.date() == now.date()
+                else "до " + until.strftime("%H:%M %d.%m"))
+    until = now.replace(hour=23, minute=59, second=59, microsecond=0)
+    _save_json("mute.json", {"until": until.isoformat(timespec="minutes")})
+    return "до конца дня"
+
+
+def unmute() -> None:
+    _save_json("mute.json", {})
+
+
+def muted_now() -> bool:
+    data = _load_json("mute.json", {})
+    until = data.get("until")
+    if not until:
+        return False
+    if until == "forever":
+        return True
+    try:
+        # Пишем сюда только aware-ISO из now_local() — сравнение корректно.
+        return now_local() < datetime.fromisoformat(until)
+    except (ValueError, TypeError):
+        return False
 
 
 def today_tags() -> set:
@@ -384,6 +441,16 @@ def today_tags() -> set:
         if str(e.get("timestamp", "")).startswith(today):
             tags.update(e.get("tags") or [])
     return tags
+
+
+def entries_today() -> int:
+    """Сколько записей дневника за сегодня. Вечерний итог при 0 записей и
+    отсутствовавшем Владе молчит — не спамит «день получился спокойный»."""
+    today = now_local().strftime("%Y-%m-%d")
+    return sum(
+        1 for e in _load_json("diary.json", [])
+        if str(e.get("timestamp", "")).startswith(today)
+    )
 
 
 # ============================================================================

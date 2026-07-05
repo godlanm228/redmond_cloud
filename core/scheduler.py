@@ -42,8 +42,19 @@ _JOB_TIMEOUT_SEC = 200.0
 # пересылаются в КАЖДОМ Groq-запросе. Режем до минимума задачи.
 # ВАЖНО: пустой allowed_tools=[] нельзя — он falsy и означает «все tools» (см. RG).
 IRIS_EVENING = replace(IRIS, allowed_tools=["read_diary", "list_goals"])
-IRIS_TICKER = replace(IRIS, allowed_tools=["add_diary_entry", "snooze_pings"])
-IRIS_DEADLINES = replace(IRIS, allowed_tools=["list_deadlines", "mark_deadline_done"])
+IRIS_TICKER = replace(IRIS, allowed_tools=["add_diary_entry", "mute_notifications"])
+IRIS_DEADLINES = replace(IRIS, allowed_tools=["list_deadlines", "mark_deadline_done",
+                                              "postpone_deadline"])
+
+
+def _muted(job_id: str) -> bool:
+    """«Стоп» от Влада — все проактивные джобы молчат (mute снимается /unmute
+    или истекает сам). Ответы на его собственные сообщения не блокируются."""
+    from logic.coach_storage import muted_now
+    if muted_now():
+        logger.info("Scheduled job %s skipped: mute активен", job_id)
+        return True
+    return False
 
 
 def _set_sticky(router_states: Optional[dict], chat_id: int, agent_name: str, text: str = "") -> None:
@@ -75,6 +86,10 @@ async def _generate_and_send(
                 asyncio.to_thread(
                     dispatcher.response_generator.generate,
                     intent, prompt, "owner", agent, chat_id,
+                    # БЕЗ истории чата: после рестарта 01.07 единственной репликой
+                    # в history был дайджест Newser — Iris в 09:03 мимикрировала
+                    # под него и слала «новости» с галлюцинациями вместо дедлайнов.
+                    include_history=False,
                 ),
                 timeout=_JOB_TIMEOUT_SEC,
             )
@@ -101,6 +116,8 @@ async def morning_digest(
     """Дайджест собирает код из RSS (ноль Groq-токенов, не обрезается),
     Gemini только переводит заголовки. LLM-путь — аварийный fallback,
     если RSS-ленты целиком недоступны."""
+    if _muted("morning_digest"):
+        return
     from logic.digest import build_digest
     try:
         digest = await asyncio.wait_for(asyncio.to_thread(build_digest), timeout=_JOB_TIMEOUT_SEC)
@@ -149,6 +166,8 @@ async def morning_deadlines(
     chat_id: int,
     router_states: Optional[dict] = None,
 ) -> None:
+    if _muted("morning_deadlines"):
+        return
     attention = _deadlines_needing_attention()
     if not attention:
         logger.info("Morning deadlines: nothing urgent, staying silent")
@@ -156,7 +175,8 @@ async def morning_deadlines(
     listing = "; ".join(f"#{d['id']} «{d['title']}» → {d['due']}" for d in attention)
     prompt = (
         f"(scheduled, утро) Дедлайны, требующие внимания: {listing}. "
-        "Напомни Владу о них коротко и по делу — что горит сегодня/завтра, что просрочено."
+        "Напомни Владу о них коротко и по делу — что горит сегодня/завтра, что просрочено. "
+        "ТОЛЬКО дедлайны — никаких новостей и постороннего."
     )
     await _generate_and_send(dispatcher, coordinator, chat_id, IRIS_DEADLINES, prompt, router_states)
 
@@ -191,6 +211,14 @@ async def evening_summary(
     chat_id: int,
     router_states: Optional[dict] = None,
 ) -> None:
+    if _muted("evening_summary"):
+        return
+    # Пустой день И Влад не появлялся → молчим. Ежевечернее «записей нет, день
+    # получился спокойный» в отсутствие Влада — спам без информации (25.06–04.07).
+    from logic.coach_storage import entries_today, owner_seen_today
+    if not owner_seen_today() and entries_today() == 0:
+        logger.info("Evening summary: пустой день, Влад не появлялся — молчу")
+        return
     today = now_local().strftime("%Y-%m-%d")
     prompt = (
         f"(scheduled, 22:30, вечерний итог) Сегодня {today}. Прочитай дневник (read_diary, "
