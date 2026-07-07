@@ -86,7 +86,7 @@ _STATE_CHANGING_TOOLS = frozenset({
     "add_deadline", "mark_deadline_done",
     "add_diary_entry", "delete_diary_entry",
     "log_meal", "update_pantry",
-    "save_week_plan",
+    "save_week_plan", "save_work_shift", "set_work_shift_status",
     "handoff_to_iris",
 })
 
@@ -101,6 +101,8 @@ _TOOL_HUMAN_LABEL = {
     "log_meal": "записала еду",
     "update_pantry": "обновила запас",
     "save_week_plan": "сохранила план недели",
+    "save_work_shift": "записала смену",
+    "set_work_shift_status": "обновила смену",
     "handoff_to_iris": "передал Айрис",
 }
 
@@ -123,6 +125,10 @@ def _tool_status_label(name: str, args: Dict[str, Any]) -> Optional[str]:
         return "смотрю погоду…"
     if name == "get_week_schedule":
         return "смотрю расписание…"
+    if name == "save_work_shift":
+        return "записываю смену…"
+    if name == "set_work_shift_status":
+        return "обновляю смену…"
     if name in ("get_week_plan", "save_week_plan"):
         return "работаю с планом недели…"
     if name in ("read_dossier_section", "read_dossier"):
@@ -133,7 +139,8 @@ def _tool_status_label(name: str, args: Dict[str, Any]) -> Optional[str]:
         return "смотрю записи…"
     if name in ("add_goal", "mark_goal_done", "add_deadline",
                 "mark_deadline_done", "postpone_deadline", "add_diary_entry",
-                "update_profile", "log_meal", "update_pantry", "delete_diary_entry"):
+                "update_profile", "log_meal", "update_pantry", "delete_diary_entry",
+                "save_work_shift", "set_work_shift_status"):
         return "записываю…"
     return None  # delegate_research (виден меншеном), get_current_time, mute
 
@@ -1075,6 +1082,14 @@ class ResponseGenerator:
             "  не спал→[сон,усталость], план отдыха («в 21 бильярд»)→[план,отдых] with time. A done",
             "  goal → mark_goal_done. NEVER log meta (that he messaged you, thanks, your own actions).",
             "  Tags are for the tool call only — never print «[тег]» in your reply.",
+            "- Work shift with explicit hours («сегодня смена 17-23», «да, с 17 до 23») →",
+            "  save_work_shift(date if known, start, end). This updates the schedule used by pings.",
+            "  If he only says «на работе/еду на работу» without hours, use add_diary_entry [работа].",
+            "- Work shift confirmation/cancel without changed hours («в силе», «не иду»,",
+            "  «отменили», «под вопросом») → set_work_shift_status. If he says he goes later",
+            "  and gives new hours, use save_work_shift with the new start/end instead.",
+            "- Around 00:00–04:30, completed-day reports often refer to the previous calendar",
+            "  day. Use current time + wording; don't blindly store them as the new day.",
             "- DELETE/FIX a logged entry: read_diary (ids show as #N) → delete_diary_entry",
             "  (entry_ids=[…]). Fix a wrong meal = delete it, then log_meal the right one.",
             "  NEVER say «удалила/исправила» unless delete_diary_entry actually succeeded.",

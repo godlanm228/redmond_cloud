@@ -113,7 +113,7 @@ IRIS = AgentConfig(
         "add_diary_entry", "read_diary", "delete_diary_entry",
         "log_meal", "get_pantry", "update_pantry", "lookup_food",  # Фаза 4 — рацион/запас
         "add_deadline", "list_deadlines", "mark_deadline_done", "postpone_deadline",
-        "mute_notifications", "get_week_schedule",
+        "mute_notifications", "get_week_schedule", "save_work_shift", "set_work_shift_status",
         "get_week_plan", "save_week_plan",
         "delegate_research",  # внешние факты для советов — через Newser, не гадать
     ],

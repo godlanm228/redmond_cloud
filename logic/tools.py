@@ -532,6 +532,58 @@ TOOL_SCHEMAS = [
     {
         "type": "function",
         "function": {
+            "name": "save_work_shift",
+            "description": (
+                "Save or correct one work shift in the owner's schedule from a text "
+                "message. Use when owner says he has/has had a shift with explicit "
+                "hours, e.g. «сегодня смена 17-23», «да, с 17 до 23». If date is "
+                "omitted, use today's date in Europe/Berlin. Do not use when owner "
+                "only says «на работе» without hours — log diary instead."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "date": {
+                        "type": ["string", "null"],
+                        "description": "Shift date YYYY-MM-DD. Omit/null for today.",
+                    },
+                    "start": {"type": "string", "description": "Start time HH:MM, e.g. 17:00"},
+                    "end": {"type": "string", "description": "End time HH:MM, e.g. 23:00"},
+                },
+                "required": ["start", "end"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "set_work_shift_status",
+            "description": (
+                "Confirm or cancel an existing work shift, or mark it uncertain. Use for "
+                "messages like «смена в силе», «сегодня не иду», «возможно позже». If "
+                "date is omitted, use today's date in Europe/Berlin. For changed hours "
+                "use save_work_shift instead."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "date": {
+                        "type": ["string", "null"],
+                        "description": "Shift date YYYY-MM-DD. Omit/null for today.",
+                    },
+                    "status": {
+                        "type": "string",
+                        "enum": ["confirmed", "cancelled", "uncertain"],
+                    },
+                    "note": {"type": ["string", "null"], "description": "Short reason/context"},
+                },
+                "required": ["status"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "update_profile",
             "description": (
                 "Add/remove/change a STABLE fact about owner in his profile (new job, "
@@ -657,6 +709,10 @@ def execute_tool(name: str, args: Dict[str, Any], rg=None) -> str:
     if name == "get_week_schedule":
         from logic.week_schedule import format_week
         return format_week(int(args.get("days", 8)))
+    if name == "save_work_shift":
+        return _tool_save_work_shift(args)
+    if name == "set_work_shift_status":
+        return _tool_set_work_shift_status(args)
     if name == "get_week_plan":
         from logic.coach_storage import get_week_plan
         plan = get_week_plan()
@@ -828,6 +884,106 @@ def _tool_read_diary(args: Dict[str, Any]) -> str:
         tag_part = f" [{tags}]" if tags else ""
         lines.append(f"  #{e.get('id', '?')} {e['timestamp']}{tag_part}: {e['text'][:200]}")
     return "\n".join(lines)
+
+
+def _norm_hm(raw: Any) -> Optional[str]:
+    """Normalize 17 / 17:00 / 17.30 values to HH:MM."""
+    s = str(raw or "").strip().lower()
+    if not s:
+        return None
+    s = s.replace(".", ":").replace(",", ":")
+    m = re.match(r"^(\d{1,2})(?::(\d{1,2}))?$", s)
+    if not m:
+        return None
+    h = int(m.group(1))
+    minute = int(m.group(2) or 0)
+    if not (0 <= h <= 23 and 0 <= minute <= 59):
+        return None
+    return f"{h:02d}:{minute:02d}"
+
+
+def _tool_save_work_shift(args: Dict[str, Any]) -> str:
+    from logic import coach_storage
+    from logic.week_schedule import save_shifts
+    from utils.time import now_local
+
+    shift_date = str(args.get("date") or "").strip() or now_local().strftime("%Y-%m-%d")
+    try:
+        datetime.strptime(shift_date, "%Y-%m-%d")
+    except ValueError:
+        return f"Дата смены «{shift_date}» не в формате YYYY-MM-DD — смену не сохранила."
+
+    start = _norm_hm(args.get("start"))
+    end = _norm_hm(args.get("end"))
+    if not start or not end:
+        return "Нужны часы смены в формате HH:MM — смену не сохранила."
+
+    n = save_shifts([{
+        "date": shift_date,
+        "start": start,
+        "end": end,
+        "status": "confirmed",
+        "source": "text",
+        "confidence": "high",
+    }])
+    if not n:
+        return "Смену не сохранила — не хватило даты или времени."
+
+    # Дневниковый факт нужен вечернему итогу, shifts.json — будущим пингам.
+    coach_storage.add_diary_entry(
+        f"Смена {shift_date} с {start} до {end}",
+        tags=["работа"],
+        data={"date": shift_date, "start": start, "end": end},
+    )
+    return f"Смена сохранена в расписание: {shift_date} {start}–{end}."
+
+
+def _tool_set_work_shift_status(args: Dict[str, Any]) -> str:
+    from logic import coach_storage
+    from logic.week_schedule import get_shift_record, save_shifts
+    from utils.time import now_local
+
+    shift_date = str(args.get("date") or "").strip() or now_local().strftime("%Y-%m-%d")
+    try:
+        dt = datetime.strptime(shift_date, "%Y-%m-%d").date()
+    except ValueError:
+        return f"Дата смены «{shift_date}» не в формате YYYY-MM-DD — статус не изменила."
+
+    status = str(args.get("status") or "").strip().lower()
+    if status not in {"confirmed", "cancelled", "uncertain"}:
+        return "Статус смены должен быть confirmed/cancelled/uncertain."
+
+    current = get_shift_record(dt) or {}
+    item: Dict[str, Any] = {
+        "date": shift_date,
+        "status": status,
+        "source": "text",
+        "confidence": "high" if status in {"confirmed", "cancelled"} else "medium",
+        "note": str(args.get("note") or "").strip(),
+    }
+    if current.get("start"):
+        item["start"] = current["start"]
+    if current.get("end"):
+        item["end"] = current["end"]
+
+    n = save_shifts([item])
+    if not n:
+        return "Не нашла смену с часами на эту дату. Если часы известны — сохрани через save_work_shift."
+
+    if status == "confirmed":
+        text = f"Смена {shift_date} подтверждена"
+        reply = f"Смена {shift_date} подтверждена."
+    elif status == "cancelled":
+        text = f"Смена {shift_date} отменена"
+        reply = f"Смена {shift_date} помечена как отменённая."
+    else:
+        text = f"Смена {shift_date} под вопросом"
+        reply = f"Смена {shift_date} помечена как под вопросом."
+    if item["note"]:
+        text += f": {item['note']}"
+
+    coach_storage.add_diary_entry(text, tags=["работа"], data={"date": shift_date, "status": status})
+    return reply
 
 
 def _tool_delete_diary_entry(args: Dict[str, Any]) -> str:
