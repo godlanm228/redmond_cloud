@@ -16,16 +16,15 @@
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timedelta
+from datetime import timedelta
 from typing import Optional, Tuple
 
 from logic import coach_storage
 from logic.priorities import crunch_deadline, radar_deadline
+from logic.situation_engine import build_day_situation, parse_hm
 from logic.week_schedule import (
     HOME_STUDY_WEEKDAYS,
-    STUDY_TIMETABLE,
     WORK_COMMUTE_MIN,
-    get_shift,
 )
 from utils.time import now_local
 
@@ -35,49 +34,28 @@ MAX_PINGS_PER_DAY = 5
 MIN_GAP_MIN = 90
 
 
-def _parse_hm(s: str, base: datetime) -> Optional[datetime]:
-    try:
-        h, m = map(int, s.split(":"))
-        return base.replace(hour=h, minute=m, second=0, microsecond=0)
-    except (ValueError, AttributeError):
-        return None
-
-
 def decide_ping() -> Optional[Tuple[str, str]]:
     """
     Возвращает (ping_id, контекст для Iris-промпта) или None.
     Вызывающий обязан сразу mark_ping(ping_id) — защита от дублей.
     """
     now = now_local()
-    state = coach_storage.get_day_state()
+    situation = build_day_situation(now)
+    pings = situation.pings
 
     # --- глобальные предохранители (действуют и для cold-start, и для активити) ---
-    if coach_storage.muted_now():  # «стоп» от Влада — полная тишина
+    if not situation.proactive_allowed(MAX_PINGS_PER_DAY, MIN_GAP_MIN):
         return None
-    pings = state.get("pings", {})
-    if len(pings) >= MAX_PINGS_PER_DAY:
-        return None
-    if pings:
-        last = max(_parse_hm(t, now) or now for t in pings.values())
-        if (now - last) < timedelta(minutes=MIN_GAP_MIN):
-            return None
 
-    # Во время лекции (и ~полчаса до) не пингуем — Влад на паре, пинг бесит.
-    for _start, _end, _what in STUDY_TIMETABLE.get(now.weekday(), []):
-        s = _parse_hm(_start, now)
-        e = _parse_hm(_end, now)
-        if s and e and (s - timedelta(minutes=30)) <= now <= e:
-            return None
-
-    shift = get_shift(now.date())
-    shift_start = _parse_hm(shift["start"], now) if shift else None
+    shift = situation.shift.active_record
+    shift_start = situation.shift.start_at
 
     # --- 0. ХОЛОДНЫЙ СТАРТ: Влад сегодня не на связи и записей за день нет, но
     #        день идёт — Iris инициирует САМА, не дожидаясь первого сообщения.
     #        Один раз, мягко, можно проигнорить. Единственный пинг, не требующий,
     #        чтобы Влад уже написал (остальные — после того как он на связи). ---
     if (
-        not coach_storage.owner_seen_today()
+        not situation.owner_seen
         and "checkin" not in pings
         and now.hour >= 12
         and (shift_start is None or now < shift_start - timedelta(minutes=40))
@@ -90,17 +68,18 @@ def decide_ping() -> Optional[Tuple[str, str]]:
 
     # Активити-пинги (еда/спорт/учёба/дедлайны) — только когда Влад на связи:
     # пинговать про еду пока он молчит/спит бессмысленно.
-    if not coach_storage.owner_seen_today():
+    if not situation.owner_seen:
         return None
 
-    tags = coach_storage.today_tags()
+    tags = situation.tags
+    has_work_today = situation.has_work_today
 
     # --- 0b. Утреннее приветствие: ~15 мин после пробуждения, один раз за день.
     #         Триггер — первое сообщение дня (реакция на дайджест и т.п.). Сводку
     #         дня (смена/лекции/дедлайны) Iris берёт из STATE-блока промпта. ---
-    wake = coach_storage.wake_time_today()
+    wake = situation.wake_time
     if wake and "greeting" not in pings:
-        ws = _parse_hm(wake, now)
+        ws = parse_hm(wake, now)
         if ws is not None and now >= ws + timedelta(minutes=15):
             return ("greeting", (
                 f"Влад проснулся недавно (в {wake}) и на связи. Поздоровайся тепло и "
@@ -108,6 +87,20 @@ def decide_ping() -> Optional[Tuple[str, str]]:
                 f"дедлайны если есть) и один лёгкий вопрос про план. Без списка на "
                 f"полэкрана, без давления."
             ))
+
+    # --- 0c. Смена есть, но запись старая/неуверенная: один аккуратный чек.
+    # Не каждый день: confirmed/high-confidence text shifts молчат; спрашиваем
+    # только legacy/uncertain/stale записи и только если Влад уже на связи.
+    if (
+        situation.shift.needs_confirmation(now)
+        and "shift_confirm" not in pings
+        and not has_work_today
+    ):
+        return ("shift_confirm", (
+            f"По расписанию сегодня смена {shift['start']}–{shift['end']}. "
+            "Аккуратно спроси, всё ли в силе или график поменялся. Одно сообщение, "
+            "без давления и без дополнительных советов."
+        ))
 
     # --- 1. Еда перед сменой: окно [старт-3ч, старт-40мин], выход ~за 20 мин ---
     if (
@@ -159,8 +152,8 @@ def decide_ping() -> Optional[Tuple[str, str]]:
         ))
 
     # --- 4. Тренировка ---
-    if "спорт" not in tags and "training" not in pings:
-        if shift_start is None and now.hour >= 17:
+    if "спорт" not in tags and "training" not in pings and not has_work_today:
+        if shift_start is None and 17 <= now.hour < 21:
             return ("training", (
                 "Сегодня смены нет. Записей о спорте нет. Спроси коротко: тренька сегодня будет? "
                 "Без давления — если скажет нет, принять и не пилить."

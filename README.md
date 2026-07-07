@@ -31,22 +31,21 @@ Hub process (один Python, на Oracle Cloud Free VM)
 ## Деплой на Oracle VM
 
 ```bash
-# Залить код
-scp -i oracle-key.key -r ./* ubuntu@VM_IP:~/redmond-hub/app/
+# Обновить код на VM
+ssh -i oracle-key.key ubuntu@VM_IP "cd ~/redmond-hub && git pull"
 
 # .env (см. .env.example)
-ssh ubuntu@VM_IP "nano ~/redmond-hub/.env"
+ssh -i oracle-key.key ubuntu@VM_IP "nano ~/redmond-hub/.env"
 
-# Запуск
-ssh ubuntu@VM_IP \
-  "cd ~/redmond-hub && set -a && . .env && set +a && \
-   nohup ./venv/bin/python app/cloud_main_v2.py > /tmp/v2.log 2>&1 & disown"
+# Рестарт systemd-сервиса
+ssh -i oracle-key.key ubuntu@VM_IP "sudo systemctl restart redmond-hub"
 
 # Логи
-ssh ubuntu@VM_IP "tail -f /tmp/v2.log"
+ssh -i oracle-key.key ubuntu@VM_IP "tail -f ~/redmond-hub/logs/v2.log"
 ```
 
-В будущем — `systemd` unit + `git pull` deploy flow.
+Код деплоится через `git pull`; runtime-файлы (`.env`, `data/`, `venv/`,
+`config/owner_profile.json`) живут только на VM и не коммитятся.
 
 ## Ключевые файлы
 

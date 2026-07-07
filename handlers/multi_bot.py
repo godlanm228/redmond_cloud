@@ -470,7 +470,11 @@ async def redmond_photo_handler(update: Update, context: ContextTypes.DEFAULT_TY
     # 1. График смен → сохранить + план недели от Iris
     if ptype == "shift_schedule" and shifts:
         from logic.week_schedule import save_shifts, describe_saved_shifts
-        n = await asyncio.to_thread(save_shifts, shifts)
+        shift_items = [
+            {**s, "status": "planned", "source": "photo", "confidence": "high"}
+            for s in shifts
+        ]
+        n = await asyncio.to_thread(save_shifts, shift_items)
         await coordinator.respond_as(
             "Redmond", chat_id, describe_saved_shifts(shifts, n), "🦞", "html",
         )

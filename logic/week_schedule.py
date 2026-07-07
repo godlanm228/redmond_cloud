@@ -2,7 +2,9 @@
 Недельное расписание Влада: рабочие смены (из скрина графика, парсинг в logic/vision.py)
 + статичное учебное расписание (SoSe 2026, HRW Campus Bottrop).
 
-Смены: data/coach/shifts.json — {"YYYY-MM-DD": {"start": "HH:MM", "end": "HH:MM"}}.
+Смены: data/coach/shifts.json — {"YYYY-MM-DD": {"start": "HH:MM", "end": "HH:MM", ...}}.
+Метаданные опциональны: status/source/confidence/last_confirmed_at/updated.
+Старый формат со start/end остаётся валидным.
 Учёба: константа в коде (меняется раз в семестр — проще править тут, чем JSON).
 """
 
@@ -11,7 +13,7 @@ from __future__ import annotations
 import logging
 import re
 from datetime import date, datetime, timedelta
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from logic.coach_storage import _load_json, _save_json  # тот же data/coach каталог
 from utils.time import now_local
@@ -45,22 +47,71 @@ HOME_STUDY_WEEKDAYS = (2, 3)  # ср (вместо туториума), чт (п
 
 # ---------- смены: storage ----------
 
-def get_shift(d: date) -> Optional[Dict[str, str]]:
+ACTIVE_SHIFT_STATUSES = {"planned", "confirmed", "uncertain", "moved"}
+
+
+def _is_active_shift(shift: Optional[Dict[str, Any]]) -> bool:
+    return bool(shift and shift.get("start") and shift.get("end")
+                and shift.get("status", "planned") in ACTIVE_SHIFT_STATUSES)
+
+
+def get_shift_record(d: date) -> Optional[Dict[str, Any]]:
+    """Raw record for a date, including cancelled/uncertain metadata."""
     shifts = _load_json("shifts.json", {})
-    return shifts.get(d.strftime("%Y-%m-%d"))
+    item = shifts.get(d.strftime("%Y-%m-%d"))
+    return item if isinstance(item, dict) else None
 
 
-def save_shifts(items: List[Dict[str, str]]) -> int:
-    """Merge смен в shifts.json (date → start/end). Возвращает сколько сохранено."""
+def get_shift(d: date) -> Optional[Dict[str, Any]]:
+    """Active shift only. Cancelled records are visible via get_shift_record()."""
+    shift = get_shift_record(d)
+    return shift if _is_active_shift(shift) else None
+
+
+def save_shifts(items: List[Dict[str, Any]]) -> int:
+    """Merge смен в shifts.json. Возвращает сколько сохранено.
+
+    Backward-compatible: callers may still pass only date/start/end. Optional
+    metadata lets text corrections and photo imports carry status/source/confidence.
+    """
     shifts = _load_json("shifts.json", {})
     n = 0
+    updated = now_local().isoformat(timespec="minutes")
     for it in items:
         d, start, end = it.get("date"), it.get("start"), it.get("end")
-        if not (d and start and end):
+        if not d:
             continue
         if not re.match(r"^\d{4}-\d{2}-\d{2}$", d):
             continue
-        shifts[d] = {"start": start, "end": end}
+        prev = shifts.get(d, {}) if isinstance(shifts.get(d), dict) else {}
+        status = str(it.get("status") or prev.get("status") or "planned").strip().lower()
+        if status == "cancelled":
+            record = {
+                **prev,
+                "status": "cancelled",
+                "source": it.get("source") or prev.get("source") or "text",
+                "confidence": it.get("confidence") or prev.get("confidence") or "high",
+                "updated": updated,
+            }
+            if it.get("note"):
+                record["note"] = str(it["note"]).strip()
+        else:
+            if not (start and end):
+                continue
+            record = {
+                **prev,
+                "start": start,
+                "end": end,
+                "status": status,
+                "source": it.get("source") or prev.get("source") or "unknown",
+                "confidence": it.get("confidence") or prev.get("confidence") or "medium",
+                "updated": updated,
+            }
+            if status == "confirmed":
+                record["last_confirmed_at"] = updated
+            if it.get("note"):
+                record["note"] = str(it["note"]).strip()
+        shifts[d] = record
         n += 1
     if n:
         _save_json("shifts.json", shifts)
@@ -89,9 +140,12 @@ def format_week(days: int = 8) -> str:
     for i in range(days):
         d = today + timedelta(days=i)
         parts: List[str] = []
+        shift_record = get_shift_record(d)
         shift = get_shift(d)
         if shift:
             parts.append(f"смена {shift['start']}–{shift['end']} (дорога ~{WORK_COMMUTE_MIN} мин)")
+        elif shift_record and shift_record.get("status") == "cancelled":
+            parts.append("смена отменена")
         for start, end, what in STUDY_TIMETABLE.get(d.weekday(), []):
             parts.append(f"{start}–{end} {what}")
         label = f"{_DAY_NAMES[d.weekday()]} {d.strftime('%d.%m')}"
