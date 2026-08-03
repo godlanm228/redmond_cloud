@@ -99,6 +99,7 @@ class DaySituation:
     wake_time: Optional[str]
     shift: ShiftSituation
     in_study_block: bool
+    last_msg: Optional[str] = None  # «HH:MM» последнего сообщения Влада сегодня
 
     @property
     def has_work_today(self) -> bool:
@@ -121,8 +122,26 @@ class DaySituation:
             return None
         return max(parse_hm(t, self.now) or self.now for t in self.pings.values())
 
+    def ignored_pings_streak(self) -> int:
+        """Сколько пингов отправлено ПОСЛЕ последнего сообщения Влада (т.е. без
+        ответа). Нет сообщений сегодня — считаются все отправленные пинги."""
+        last = parse_hm(self.last_msg, self.now) if self.last_msg else None
+        count = 0
+        for t in self.pings.values():
+            pt = parse_hm(t, self.now)
+            if pt is None:
+                continue
+            if last is None or pt > last:
+                count += 1
+        return count
+
     def proactive_allowed(self, max_pings: int, min_gap_min: int) -> bool:
         if self.muted or len(self.pings) >= max_pings or self.in_study_block:
+            return False
+        # Backoff: два пинга подряд без ответа → тишина, пока Влад сам не
+        # напишет (данные 06–08.2026: checkin — самый частый пинг, а Влад
+        # регулярно глушил бота — давление превышало ценность).
+        if self.ignored_pings_streak() >= 2:
             return False
         last = self.last_ping_at()
         return last is None or (self.now - last) >= timedelta(minutes=min_gap_min)
@@ -175,4 +194,5 @@ def build_day_situation(now: Optional[datetime] = None) -> DaySituation:
         wake_time=coach_storage.wake_time_today(),
         shift=_build_shift_situation(current),
         in_study_block=_in_study_block(current),
+        last_msg=state.get("last_msg") or state.get("last_seen"),
     )
