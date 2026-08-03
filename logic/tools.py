@@ -341,7 +341,29 @@ TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "mark_deadline_done",
-            "description": "Close a deadline when owner reports it is passed/done («сдал тест»).",
+            "description": (
+                "Close a deadline as DONE when owner reports it is passed/completed "
+                "(«сдал тест»). If he asks to REMOVE a wrong or irrelevant deadline "
+                "(«удали/убери») use delete_deadline instead — done pollutes stats."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "deadline_id": {"type": "integer", "description": "Deadline id from list_deadlines"},
+                },
+                "required": ["deadline_id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "delete_deadline",
+            "description": (
+                "Remove a deadline ENTIRELY («удали/убери дедлайн» — wrong entry or "
+                "no longer relevant). Unlike mark_deadline_done (owner DID it / it "
+                "passed), delete leaves no trace in history or stats."
+            ),
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -475,11 +497,14 @@ TOOL_SCHEMAS = [
         "function": {
             "name": "mute_notifications",
             "description": (
-                "Silence ALL proactive bot messages (digest, deadline reminders, pings, "
-                "evening summary). Replies to owner's OWN messages keep working. "
-                "«отстань/не сейчас/занят» → hours=2; «не пиши сегодня/стоп» → "
-                "mode='today'; «вообще не пиши/отключись» → mode='forever'; "
-                "«пиши/можешь писать» → mode='off' (resume)."
+                "Silence proactive bot messages. Default scope='pings' mutes ONLY "
+                "day-ticker check-ins (meal/training/study/checkin) — morning digest, "
+                "deadline reminders and evening summary KEEP arriving. scope='all' = "
+                "total silence, use ONLY when owner explicitly wants everything off "
+                "(«вообще ничего не присылай», «полная тишина»). Replies to his OWN "
+                "messages always work. «отстань/не сейчас/занят» → hours=2; «не пиши "
+                "сегодня/стоп» → mode='today'; «вообще не пиши/отключись» → "
+                "mode='forever' + scope='all'; «пиши/можешь писать» → mode='off'."
             ),
             "parameters": {
                 "type": "object",
@@ -489,6 +514,10 @@ TOOL_SCHEMAS = [
                         "description": "today (till end of day) / forever / off (resume). Omit if using hours.",
                     },
                     "hours": {"type": "number", "description": "Hours of silence, 0.5-168."},
+                    "scope": {
+                        "type": ["string", "null"],
+                        "description": "'pings' (default: only ticker check-ins) or 'all' (total silence incl. digests).",
+                    },
                 },
             },
         },
@@ -704,8 +733,14 @@ def execute_tool(name: str, args: Dict[str, Any], rg=None) -> str:
         hours = float(args.get("hours") or 0)
         if not mode and not hours:
             hours = 2.0  # голое «отстань» = как старый snooze
-        desc = set_mute(mode=mode or "hours", hours=hours)
-        return f"Все проактивные сообщения выключены {desc}."
+        scope = str(args.get("scope") or "pings").strip().lower()
+        desc = set_mute(mode=mode or "hours", hours=hours, scope=scope)
+        if scope == "all":
+            return (f"Полная тишина {desc} — включая утренний дайджест, "
+                    f"напоминания о дедлайнах и вечерний итог.")
+        return (f"Пинги-напоминалки выключены {desc}. Утренний дайджест и "
+                f"вечерний итог остаются — если нужно убрать и их, скажи "
+                f"«вообще ничего не присылай».")
     if name == "get_week_schedule":
         from logic.week_schedule import format_week
         return format_week(int(args.get("days", 8)))
@@ -744,6 +779,8 @@ def execute_tool(name: str, args: Dict[str, Any], rg=None) -> str:
         return _tool_add_deadline(args)
     if name == "mark_deadline_done":
         return _tool_mark_deadline_done(args)
+    if name == "delete_deadline":
+        return _tool_delete_deadline(args)
     if name == "postpone_deadline":
         return _tool_postpone_deadline(args)
     if name == "list_deadlines":
@@ -828,6 +865,15 @@ def _tool_mark_deadline_done(args: Dict[str, Any]) -> str:
         msg += (f" ВНИМАНИЕ, ещё открыты: {listing}. Если что-то из этого — тот же "
                 f"дедлайн (дубль/устаревший перенос), закрой и его.")
     return msg
+
+
+def _tool_delete_deadline(args: Dict[str, Any]) -> str:
+    from logic import coach_storage
+    did = int(args.get("deadline_id", 0))
+    d = coach_storage.delete_deadline(did)
+    if not d:
+        return f"Дедлайн #{did} не найден."
+    return f"Дедлайн #{did} «{d['title']}» удалён насовсем — в историю и статистику не попадёт."
 
 
 def _tool_postpone_deadline(args: Dict[str, Any]) -> str:

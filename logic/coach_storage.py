@@ -153,6 +153,20 @@ def mark_deadline_done(deadline_id: int) -> Optional[Dict[str, Any]]:
     return None
 
 
+def delete_deadline(deadline_id: int) -> Optional[Dict[str, Any]]:
+    """Удалить дедлайн НАСОВСЕМ («удали/убери — не нужен»). Не путать с
+    mark_deadline_done: done = «сдал/прошло», остаётся в истории; delete —
+    ошибочный/неактуальный исчезает и статистику не портит (кейс 02.08:
+    «Удали его» превратился в done, потому что удалять было нечем)."""
+    deadlines = _load_json("deadlines.json", [])
+    for i, d in enumerate(deadlines):
+        if d.get("id") == deadline_id:
+            deadlines.pop(i)
+            _save_json("deadlines.json", deadlines)
+            return d
+    return None
+
+
 def update_deadline(
     deadline_id: int,
     due: Optional[str] = None,
@@ -370,13 +384,16 @@ def save_day_state(state: Dict[str, Any]) -> None:
 
 
 def mark_owner_seen() -> None:
-    """Влад написал в HUB сегодня — фиксируем «на связи» (per-day, day_state
-    сбрасывается на новой дате). Питает cold-start тикера: пока не на связи и
-    день идёт → Iris инициирует сама. Пишем только первый раз за день."""
+    """Влад написал в HUB — фиксируем «на связи» (per-day, day_state
+    сбрасывается на новой дате). last_seen — ПЕРВОЕ сообщение дня (питает
+    cold-start тикера), last_msg — ПОСЛЕДНЕЕ (питает backoff: пинги после
+    last_msg без ответа = «ему сейчас не до меня», тикер отступает)."""
     state = get_day_state()
+    now_hm = now_local().strftime("%H:%M")
     if not state.get("last_seen"):
-        state["last_seen"] = now_local().strftime("%H:%M")
-        save_day_state(state)
+        state["last_seen"] = now_hm
+    state["last_msg"] = now_hm
+    save_day_state(state)
 
 
 def owner_seen_today() -> bool:
@@ -390,28 +407,38 @@ def mark_ping(ping_id: str) -> None:
 
 
 # ============================================================================
-# Mute — «стоп» от Влада: полная тишина ВСЕХ проактивных сообщений (дайджест,
-# дедлайны, вечерний итог, пинги тикера). Ответы на его собственные сообщения
-# не блокируются. Кросс-день (mute.json), в отличие от per-day day_state.
+# Mute — «стоп» от Влада. Два уровня (с 03.08.2026):
+#   scope='pings' (дефолт) — молчит только дневной тикер (checkin/еда/спорт/
+#     учёба); утренний дайджест, напоминания о дедлайнах и вечерний итог
+#     ОСТАЮТСЯ — это информация, а не «дёрганье».
+#   scope='all' — полная тишина всего проактивного (только по явной просьбе).
+# Ответы на его собственные сообщения не блокируются никогда.
+# Кросс-день (mute.json), в отличие от per-day day_state.
 # ============================================================================
 
-def set_mute(mode: str = "today", hours: float = 0) -> str:
+def set_mute(mode: str = "today", hours: float = 0, scope: str = "pings") -> str:
     """Выключить проактивные сообщения. mode: 'today' (до конца дня, дефолт) /
-    'forever' (пока явно не снимут) / часы через hours>0.
+    'forever' (пока явно не снимут) / часы через hours>0. scope: 'pings'/'all'.
     Возвращает человекочитаемое «до когда» для подтверждения."""
     now = now_local()
+    data: Dict[str, Any] = {
+        "set": now.isoformat(timespec="minutes"),
+        "scope": "all" if str(scope).strip().lower() == "all" else "pings",
+    }
     if mode == "forever":
-        _save_json("mute.json", {"until": "forever",
-                                 "set": now.isoformat(timespec="minutes")})
+        data["until"] = "forever"
+        _save_json("mute.json", data)
         return "пока не скажешь «пиши»"
     if mode != "today" and hours and hours > 0:
         until = now + timedelta(hours=max(0.5, min(float(hours), 168.0)))
-        _save_json("mute.json", {"until": until.isoformat(timespec="minutes")})
+        data["until"] = until.isoformat(timespec="minutes")
+        _save_json("mute.json", data)
         return ("до " + until.strftime("%H:%M")
                 if until.date() == now.date()
                 else "до " + until.strftime("%H:%M %d.%m"))
     until = now.replace(hour=23, minute=59, second=59, microsecond=0)
-    _save_json("mute.json", {"until": until.isoformat(timespec="minutes")})
+    data["until"] = until.isoformat(timespec="minutes")
+    _save_json("mute.json", data)
     return "до конца дня"
 
 
@@ -419,18 +446,31 @@ def unmute() -> None:
     _save_json("mute.json", {})
 
 
-def muted_now() -> bool:
+def _mute_record_active() -> Optional[Dict[str, Any]]:
     data = _load_json("mute.json", {})
     until = data.get("until")
     if not until:
-        return False
+        return None
     if until == "forever":
-        return True
+        return data
     try:
         # Пишем сюда только aware-ISO из now_local() — сравнение корректно.
-        return now_local() < datetime.fromisoformat(until)
+        return data if now_local() < datetime.fromisoformat(until) else None
     except (ValueError, TypeError):
-        return False
+        return None
+
+
+def muted_now() -> bool:
+    """Активен ли ЛЮБОЙ mute — гасит проактивные пинги дневного тикера."""
+    return _mute_record_active() is not None
+
+
+def hard_muted_now() -> bool:
+    """Полная тишина (scope='all') — гасит и дайджесты/вечерний итог.
+    Записи без scope считаем 'all': они ставились, когда mute был единственным
+    и полным — смысл уже действующей просьбы Влада не меняем."""
+    rec = _mute_record_active()
+    return bool(rec) and str(rec.get("scope") or "all") == "all"
 
 
 def today_tags() -> set:
@@ -451,6 +491,16 @@ def entries_today() -> int:
         1 for e in _load_json("diary.json", [])
         if str(e.get("timestamp", "")).startswith(today)
     )
+
+
+def next_style_index(n: int) -> int:
+    """Ротация стилевых вариантов пингов (persist кросс-день) — чтобы Iris не
+    открывала сообщения одинаково два раза подряд (жалоба 03.08: «формат
+    крайне одинаковый и надоедает»)."""
+    data = _load_json("ping_style.json", {})
+    idx = (int(data.get("idx", -1)) + 1) % max(1, n)
+    _save_json("ping_style.json", {"idx": idx})
+    return idx
 
 
 # ============================================================================

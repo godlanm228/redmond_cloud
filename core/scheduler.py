@@ -48,10 +48,13 @@ IRIS_DEADLINES = replace(IRIS, allowed_tools=["list_deadlines", "mark_deadline_d
 
 
 def _muted(job_id: str) -> bool:
-    """«Стоп» от Влада — все проактивные джобы молчат (mute снимается /unmute
-    или истекает сам). Ответы на его собственные сообщения не блокируются."""
-    from logic.coach_storage import muted_now
-    if muted_now():
+    """Полная тишина (scope='all') — дайджесты и вечерний итог молчат.
+    Обычный mute (scope='pings') глушит только дневной тикер — утренний
+    дайджест с дедлайнами остаётся: это информация, а не «дёрганье».
+    Mute снимается /unmute или истекает сам; ответы на собственные сообщения
+    Влада не блокируются никогда."""
+    from logic.coach_storage import hard_muted_now
+    if hard_muted_now():
         logger.info("Scheduled job %s skipped: mute активен", job_id)
         return True
     return False

@@ -83,7 +83,7 @@ def _now_str() -> str:
 _STATE_CHANGING_TOOLS = frozenset({
     "update_profile",
     "add_goal", "mark_goal_done",
-    "add_deadline", "mark_deadline_done",
+    "add_deadline", "mark_deadline_done", "delete_deadline",
     "add_diary_entry", "delete_diary_entry",
     "log_meal", "update_pantry",
     "save_week_plan", "save_work_shift", "set_work_shift_status",
@@ -96,6 +96,7 @@ _TOOL_HUMAN_LABEL = {
     "mark_goal_done": "закрыла цель",
     "add_deadline": "поставила дедлайн",
     "mark_deadline_done": "закрыла дедлайн",
+    "delete_deadline": "удалила дедлайн",
     "add_diary_entry": "записала в дневник",
     "delete_diary_entry": "удалила запись",
     "log_meal": "записала еду",
@@ -138,7 +139,7 @@ def _tool_status_label(name: str, args: Dict[str, Any]) -> Optional[str]:
     if name in ("list_goals", "list_deadlines", "read_diary", "get_pantry"):
         return "смотрю записи…"
     if name in ("add_goal", "mark_goal_done", "add_deadline",
-                "mark_deadline_done", "postpone_deadline", "add_diary_entry",
+                "mark_deadline_done", "delete_deadline", "postpone_deadline", "add_diary_entry",
                 "update_profile", "log_meal", "update_pantry", "delete_diary_entry",
                 "save_work_shift", "set_work_shift_status"):
         return "записываю…"
