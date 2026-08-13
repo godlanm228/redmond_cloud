@@ -106,6 +106,58 @@ class ShortFollowupTests(RouterTestBase):
         self.assertEqual(len(self.llm_calls), 1)
 
 
+class ReactionTests(RouterTestBase):
+    """«лол» после реплики агента — реакция на неё, а не мысли вслух."""
+
+    def _state_with_agent_reply(self, agent="Iris"):
+        state = RouterState()
+        state.add("user", "что там по еде", agent)
+        state.add("assistant", "записала обед", agent)
+        state.last_agent_name = agent
+        return state
+
+    def test_reaction_after_agent_reply_goes_to_that_agent(self):
+        self._llm(NOBODY)  # LLM бы промолчал — до неё дойти не должно
+        agent, _ = route("лол", self._state_with_agent_reply("Iris"), "key")
+        self.assertIsNotNone(agent)
+        self.assertEqual(agent.name, "Iris")
+        self.assertEqual(self.llm_calls, [])
+
+    def test_reaction_without_agent_reply_goes_to_llm(self):
+        self._llm(NOBODY)
+        state = RouterState()
+        state.add("user", "просто пишу себе", "Iris")
+        agent, _ = route("лол", state, "key")
+        self.assertIsNone(agent)
+        self.assertEqual(len(self.llm_calls), 1)
+
+    def test_laughter_variants_are_reactions(self):
+        for t in ("ахахах", "хахаха", "ахахахаха", "hahaha", "лоооол", "ЛОЛ!!"):
+            state = self._state_with_agent_reply("Newser")
+            self._llm(NOBODY)
+            agent, _ = route(t, state, "key")
+            self.assertIsNotNone(agent, t)
+            self.assertEqual(agent.name, "Newser", t)
+
+    def test_smileys_are_reactions(self):
+        for t in (")", "))", ":)", ";-)", "=)"):
+            state = self._state_with_agent_reply()
+            self._llm(NOBODY)
+            agent, _ = route(t, state, "key")
+            self.assertIsNotNone(agent, t)
+
+    def test_normal_short_word_is_not_a_smiley(self):
+        """Регресс на слишком широкую регулярку: «ок)» — не смайл."""
+        from logic.agent_router import _is_reaction
+        self.assertFalse(_is_reaction("хм)"))
+        self.assertFalse(_is_reaction("курс?"))
+
+    def test_double_letter_words_survive_normalization(self):
+        from logic.agent_router import _normalize_short
+        self.assertEqual(_normalize_short("класс"), "класс")
+        self.assertEqual(_normalize_short("лоооол"), "лол")
+
+
 class NobodyTests(RouterTestBase):
     def test_nobody_returns_no_agent(self):
         self._llm(NOBODY)

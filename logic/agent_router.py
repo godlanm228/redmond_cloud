@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
@@ -89,13 +90,60 @@ _CONTINUATION_MARKERS = frozenset({
 })
 _MAX_FOLLOWUP_WORDS = 3
 
+# Реакции: сами по себе темы не несут, но и молчать на них нельзя, если агент
+# только что говорил — иначе «лол» в ответ на шутку Iris уходит в пустоту.
+# Смысл целиком в контексте: есть свежая реплика агента → это реакция НА НЕЁ,
+# нет → владелец бормочет себе под нос, лезть не надо.
+_REACTION_MARKERS = frozenset({
+    "лол", "лул", "ор", "ору", "ахах", "ахаха", "хаха", "хах", "кек", "ржу",
+    "жиза", "бля", "блин", "пиздец", "капец", "жесть", "ужас", "ну да",
+    "вот именно", "точно", "согласен", "фу", "ого", "воу", "ничосе",
+})
+
+
+# Смайлы-скобки как отдельная реакция: «)», «))», «:)», «;-)», «=)».
+_SMILEY_RX = re.compile(r"[:;=]?-?\)+")
+# Смех любой длины и раскладки: ахах, хахаха, ahaha, hahah.
+_LAUGH_RX = re.compile(r"[ахah]{3,}")
+
+
+def _normalize_short(text: str) -> str:
+    """Нормализация коротких реплик к каноничному виду.
+
+    «лоооол» → «лол», «ахахаха»/«hahaha» → «ахах». Схлопываем только серии от
+    трёх подряд, чтобы не портить обычные слова с двойной буквой («класс»).
+    """
+    t = (text or "").strip().lower().strip(".!?, ")
+    t = re.sub(r"(.)\1{2,}", r"\1", t)
+    if _LAUGH_RX.fullmatch(t):
+        return "ахах"
+    return t
+
 
 def _is_short_followup(text: str) -> bool:
     """Сообщение не несёт новой темы — держим текущего агента без вызова LLM."""
-    t = (text or "").strip().lower().strip(".!?,")
+    t = _normalize_short(text)
     if not t or len(t.split()) > _MAX_FOLLOWUP_WORDS:
         return False
     return t in _CONTINUATION_MARKERS
+
+
+def _is_reaction(text: str) -> bool:
+    """Короткая эмоциональная реакция («лол», «бля», «ого»)."""
+    t = _normalize_short(text)
+    if not t or len(t.split()) > _MAX_FOLLOWUP_WORDS:
+        return False
+    return t in _REACTION_MARKERS or bool(_SMILEY_RX.fullmatch(t))
+
+
+def _agent_spoke_last(state: "RouterState") -> str:
+    """Имя агента, чья реплика была последней в истории ('' если её нет).
+    Реакция без свежей реплики агента — это не ответ нам."""
+    for m in reversed(state.recent_messages or []):
+        if m.get("role") == "assistant":
+            return m.get("agent", "") or state.last_agent_name
+        return ""  # последним говорил владелец — реагирует он не на нас
+    return ""
 
 
 def reply_target_agent(update: Any) -> str:
@@ -369,6 +417,17 @@ def route(
         agent = agent_by_name(state.last_agent_name)
         if agent is not None:
             logger.info("Router: продолжение %r → %s (без LLM)", text[:40], agent.name)
+            return agent, False
+
+    # 3a. Реакция («лол», «бля», «ого») сразу после реплики агента — это реакция
+    # НА НЕЁ, отвечает он же. Без свежей реплики агента реакция уходит в LLM,
+    # и тот обычно возвращает «Никто» — владелец бормочет себе, лезть незачем.
+    if _is_reaction(text):
+        spoke = _agent_spoke_last(state)
+        agent = agent_by_name(spoke) if spoke else None
+        if agent is not None:
+            logger.info("Router: реакция %r на реплику %s → %s (без LLM)",
+                        text[:40], agent.name, agent.name)
             return agent, False
 
     # 4. LLM-классификация (агент + research-флаг одним вызовом)
