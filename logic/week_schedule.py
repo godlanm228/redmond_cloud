@@ -15,7 +15,7 @@ import re
 from datetime import date, datetime, timedelta
 from typing import Any, Dict, List, Optional, Tuple
 
-from logic.coach_storage import _load_json, _save_json  # тот же data/coach каталог
+from logic.coach_storage import _guarded, _load_json, _save_json  # тот же data/coach каталог
 from utils.time import now_local
 
 logger = logging.getLogger(__name__)
@@ -68,6 +68,7 @@ def get_shift(d: date) -> Optional[Dict[str, Any]]:
     return shift if _is_active_shift(shift) else None
 
 
+@_guarded("shifts.json")
 def save_shifts(items: List[Dict[str, Any]]) -> int:
     """Merge смен в shifts.json. Возвращает сколько сохранено.
 

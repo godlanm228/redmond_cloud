@@ -48,6 +48,13 @@ def main() -> None:
     logger.info("=== Cloud Redmond v2 starting ===")
     logger.info("Whitelist: %s", allowed)
 
+    # Проверка моделей до старта ботов: снятая провайдером модель должна быть
+    # видна в логе сразу, а не через два месяца в момент отказа основной
+    # (так `qwen/qwen3-32b` тихо пролежал мёртвым с июня по 12.08.2026).
+    # Старт не блокируем — провайдер может лежать временно.
+    from utils.model_healthcheck import run_and_log  # noqa: E402
+    run_and_log(config)
+
     # Один Dispatcher на всех — содержит response_generator, intent_recognizer,
     # safety, auth. State в нём stateless или защищён shared dict.
     dispatcher = Dispatcher(config)

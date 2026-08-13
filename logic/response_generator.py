@@ -4,7 +4,7 @@ import random
 import re
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import requests
 
@@ -14,6 +14,7 @@ from config.config_loader import (
     load_personality_profile,
     save_owner_profile,
 )
+from logic import prompt_budget
 from logic.intent_recognizer import Intent
 from utils.memory import MemoryStore
 from utils.searcher import WebSearcher
@@ -63,6 +64,24 @@ def _is_oversize_error(err: str) -> bool:
     return ("413" in low or "request too large" in low
             or "request_too_large" in low or "reduce the length" in low
             or "reduce your message" in low)
+
+
+def _is_model_gone_error(err: str) -> bool:
+    """404 / модель снята провайдером. Не транзиентно: чинится только правкой
+    конфига, поэтому логируем громко и отдельно от остальных отказов."""
+    low = (err or "").lower()
+    return "model_not_found" in low or "does not exist" in low
+
+
+def chain_has(errors: List[str], predicate) -> bool:
+    """Есть ли в ЦЕПОЧКЕ моделей хоть одна ошибка нужного класса.
+
+    Классифицировать по одной «последней» ошибке нельзя: 12.08.2026 primary
+    отдала 429 (rate limit), fallback следом — 404 (снятая модель), 404 затёр
+    429, ветка rate-limit не сработала, и Gemini-compose вместе с результатами
+    веб-поиска молча ушли в мусор. Смотрим на весь список.
+    """
+    return any(predicate(e) for e in errors)
 
 
 _DAY_NAMES_RU = [
@@ -468,6 +487,10 @@ class ResponseGenerator:
         # Tracker успешно выполненных tool calls — для safety-net когда LLM
         # «молчит» после tools (Qwen 3 часто так делает).
         successful_tool_calls: List[str] = []
+        # Имена инструментов, которые оставил бы теневой отбор (см. prompt_budget).
+        # Пустое множество = отбор не считался, промахи не логируем.
+        shadow_tools: set = set()
+        agent_name = getattr(ctx.agent, "name", "?") if ctx.agent else "?"
 
         temperature = getattr(ctx.agent, "temperature", 0.5) if ctx.agent else 0.5
         max_tokens = getattr(ctx.agent, "max_tokens", 800) if ctx.agent else 800
@@ -496,21 +519,37 @@ class ResponseGenerator:
             if ctx.force_tool and hop == 0 and hop_tools:
                 hop_tool_choice = {"type": "function", "function": {"name": ctx.force_tool}}
 
+            # Замер бюджета + теневой отбор инструментов. Ничего не отключает:
+            # только считает размер промпта (раньше он вообще не логировался) и
+            # проверяет, не отрезал ли бы отбор инструмент, который модель
+            # реально запросит. См. logic/prompt_budget.py.
+            if hop == 0 and hop_tools:
+                try:
+                    shadow_tools = prompt_budget.log_shadow(
+                        agent_name, ctx.user_text, messages, hop_tools,
+                    )
+                except Exception:
+                    logger.debug("prompt_budget shadow failed", exc_info=True)
+
             # Пробуем модели по цепочке: primary, потом fallback.
             # Fallback включается при rate_limit / tool_use_failed / любой transient ошибке.
+            # Ошибки КОПИМ: классификация ниже смотрит на всю цепочку, а не на
+            # последнюю ошибку (см. chain_has).
             completion = None
+            hop_errors: List[str] = []
             for model in model_chain:
-                completion = self._groq_chat(
+                completion, err = self._groq_chat(
                     api_key, model, messages, tools=hop_tools,
                     temperature=temperature, max_tokens=max_tokens,
                     tool_choice=hop_tool_choice,
                 )
+                if err:
+                    hop_errors.append(err)
                 # Финальный compose: модель иногда игнорирует запрет tools и
                 # пишет tool call → Groq 400 tool_use_failed. Один повтор с
                 # жёстким стоп-сообщением обычно дисциплинирует — финальный
                 # ответ не роняем на fallback-модель.
-                if (completion is None and final_hop
-                        and "tool_use_failed" in getattr(self, "_last_groq_error", "")):
+                if completion is None and final_hop and "tool_use_failed" in err:
                     messages.append({
                         "role": "system",
                         "content": (
@@ -518,10 +557,12 @@ class ResponseGenerator:
                             "Write the final plain-text answer immediately."
                         ),
                     })
-                    completion = self._groq_chat(
+                    completion, err = self._groq_chat(
                         api_key, model, messages, tools=None,
                         temperature=temperature, max_tokens=max_tokens,
                     )
+                    if err:
+                        hop_errors.append(err)
                 if completion is not None:
                     if model != primary_model:
                         logger.warning(
@@ -530,12 +571,19 @@ class ResponseGenerator:
                         )
                     break
             if completion is None:
-                logger.warning("All Groq models failed in chain: %s", model_chain)
+                logger.warning(
+                    "All Groq models failed in chain %s: %s",
+                    model_chain, " | ".join(e[:120] for e in hop_errors) or "нет деталей",
+                )
+                if chain_has(hop_errors, _is_model_gone_error):
+                    logger.error(
+                        "В цепочке есть снятая модель — правь config.json: %s", model_chain,
+                    )
                 # Все модели исчерпали лимит — не зависаем и не отдаём generic.
                 # Если что-то уже записали (tools) — резюмируем. Иначе пробуем
                 # Gemini-compose (без tools), и только потом честный отказ.
-                last_err = getattr(self, "_last_groq_error", "")
-                if _is_rate_limit_error(last_err) or _is_oversize_error(last_err):
+                rate_limited = chain_has(hop_errors, _is_rate_limit_error)
+                if rate_limited or chain_has(hop_errors, _is_oversize_error):
                     if successful_tool_calls:
                         return _summarize_actions(successful_tool_calls)
                     # Gemini-compose: огромный контекст, бесплатно — единственный
@@ -543,13 +591,24 @@ class ResponseGenerator:
                     fallback = self._compose_with_gemini(messages, ctx)
                     if fallback:
                         return fallback
-                    if _is_rate_limit_error(last_err):
+                    if rate_limited:
                         # Формулировка без рода: строку шлют и Iris (она), и
                         # Redmond/Newser (он) — «Упёрся…» от Айрис резало глаз.
                         return (
                             "Дневной лимит Groq исчерпан (бесплатный тариф, сброс в "
                             "полночь по UTC). Чуть позже смогу ответить нормально."
                         )
+                    return None
+                # Прочие отказы (снятая модель, сеть, 400). Если рисёрч уже собран —
+                # дособираем ответ на Gemini из накопленных messages, иначе он уйдёт
+                # в мусор: провайдерный цикл начнёт Gemini с чистого листа и потеряет
+                # результаты tools (так 12.08 пропала выдача веб-поиска).
+                if successful_tool_calls or any(m.get("role") == "tool" for m in messages):
+                    composed = self._compose_with_gemini(messages, ctx)
+                    if composed:
+                        return composed
+                # Ничего не наработано — отдаём None, пусть провайдерный цикл
+                # сделает полноценный заход на Gemini с tools.
                 return None
 
             choice = completion["choices"][0]
@@ -587,6 +646,8 @@ class ResponseGenerator:
             for tc in tool_calls:
                 fn = tc.get("function", {})
                 fn_name = fn.get("name", "")
+                # Теневая метрика: отбор инструментов оставил бы модель без этого?
+                prompt_budget.log_selection_miss(agent_name, fn_name, shadow_tools)
                 try:
                     fn_args = _json.loads(fn.get("arguments") or "{}")
                 except _json.JSONDecodeError:
@@ -652,12 +713,18 @@ class ResponseGenerator:
         temperature: float = 0.5,
         max_tokens: int = 800,
         tool_choice: Optional[dict] = None,
-    ) -> Optional[dict]:
-        """Низкоуровневый chat-completion с tools. Возвращает сырой JSON ответа или None.
+    ) -> Tuple[Optional[dict], str]:
+        """Низкоуровневый chat-completion с tools. Возвращает (сырой JSON | None, ошибка).
+
+        Ошибка отдаётся ЗНАЧЕНИЕМ, а не полем объекта: ResponseGenerator один на
+        все 4 бота и вызывается из потоков (asyncio.to_thread), так что общее
+        поле `_last_groq_error` перетиралось и последовательно (404 поверх 429
+        в цепочке моделей), и параллельно (успех Iris обнулял ошибку Redmond'а
+        прямо перед её проверкой).
+
         tools=None — финальный compose-вызов без tools (модель обязана дать текст).
         tool_choice — forced choice (принудительное делегирование), иначе auto."""
         base_url = getattr(self.config, "groq_api_base", "https://api.groq.com").rstrip("/")
-        self._last_groq_error = ""
         try:
             if GROQ_SDK_AVAILABLE:
                 kwargs = dict(
@@ -680,7 +747,9 @@ class ResponseGenerator:
                 # и явный ответ при исчерпании лимита делаем сами, выше по стеку.
                 client = Groq(api_key=api_key, timeout=GROQ_TIMEOUT_SEC, max_retries=0)
                 completion = client.chat.completions.create(**kwargs)
-                return completion.to_dict() if hasattr(completion, "to_dict") else completion.model_dump()
+                raw = (completion.to_dict() if hasattr(completion, "to_dict")
+                       else completion.model_dump())
+                return raw, ""
 
             payload = {
                 "model": model,
@@ -700,11 +769,16 @@ class ResponseGenerator:
                 timeout=GROQ_TIMEOUT_SEC,
             )
             resp.raise_for_status()
-            return resp.json()
+            return resp.json(), ""
         except Exception as e:
-            self._last_groq_error = str(e)
-            logger.warning("Groq chat call failed: %s", e)
-            return None
+            err = str(e)
+            # Снятая провайдером модель — не транзиент, чинится только правкой
+            # конфига. Отдельный уровень, чтобы не тонуло среди 429-шума.
+            if _is_model_gone_error(err):
+                logger.error("Groq model %s недоступна (снята провайдером?): %s", model, err)
+            else:
+                logger.warning("Groq chat call failed (%s): %s", model, err)
+            return None, err
 
     # _execute_tool удалён в v2 — заменён на execute_tool() из logic/tools.py
     # (полный набор tools, единый dispatcher, agent-filter поддержка).

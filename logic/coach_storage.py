@@ -11,9 +11,12 @@ Coach storage — JSON-файлы для целей/дедлайнов/днев�
 
 from __future__ import annotations
 
+import contextlib
+import functools
 import json
 import logging
 import os
+import threading
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -40,20 +43,95 @@ def _coach_dir() -> Path:
     return p
 
 
+class StorageCorrupt(RuntimeError):
+    """Файл есть, но не читается. Писать поверх нельзя — там данные."""
+
+
+# Файловые блокировки на время read-modify-write. Один процесс, но генерация
+# идёт в потоках (asyncio.to_thread) и параллельно тикает планировщик: без
+# блокировки два «прочитал → добавил → записал» теряют одну из записей.
+_LOCKS: Dict[str, threading.RLock] = {}
+_LOCKS_GUARD = threading.Lock()
+
+
+def _lock_for(name: str) -> threading.RLock:
+    with _LOCKS_GUARD:
+        return _LOCKS.setdefault(name, threading.RLock())
+
+
+def _guarded(*names: str):
+    """Весь цикл «прочитал → поменял → записал» под блокировкой файла(ов).
+
+    Вешается на функцию целиком, а не на _load_json/_save_json по отдельности:
+    блокировать нужно именно интервал между чтением и записью, иначе два
+    параллельных вызова прочитают одно и то же состояние и один затрёт другого.
+    RLock — реентрантный: вложенные вызовы (mark_ping → save_day_state) не виснут.
+    """
+    def deco(fn):
+        @functools.wraps(fn)
+        def wrapper(*args, **kwargs):
+            with contextlib.ExitStack() as stack:
+                for n in names:
+                    stack.enter_context(_lock_for(n))
+                return fn(*args, **kwargs)
+        return wrapper
+    return deco
+
+
 def _load_json(name: str, default: Any) -> Any:
+    """Три исхода вместо двух: файла нет → дефолт; прочитался → данные;
+    битый → StorageCorrupt.
+
+    Раньше любая ошибка чтения молча возвращала дефолт, вызывающий добавлял
+    свою запись и сохранял — дневник из двухсот записей превращался в одну.
+    Потеря данных не должна выглядеть как пустая база.
+    """
     p = _coach_dir() / name
     if not p.exists():
         return default
     try:
         return json.loads(p.read_text(encoding="utf-8"))
     except Exception as e:
-        logger.warning("Failed to read %s: %s — returning default", p, e)
+        backup = p.with_suffix(p.suffix + ".corrupt")
+        try:
+            if not backup.exists():
+                backup.write_bytes(p.read_bytes())
+        except Exception:
+            logger.warning("Не удалось сохранить копию битого %s", p, exc_info=True)
+        logger.error("Файл %s не читается (%s) — копия в %s, запись поверх запрещена",
+                     p, e, backup.name)
+        raise StorageCorrupt(f"{name}: {e}") from e
+
+
+def _load_json_safe(name: str, default: Any) -> Any:
+    """Только для чтения, за которым НЕ следует запись в тот же файл.
+
+    Битый файл не должен ронять горячий путь (проверка mute идёт на каждом
+    сообщении), но и подменять данные дефолтом там, откуда потом сохраняют,
+    нельзя — иначе возвращается ровно тот баг, от которого лечит _load_json.
+    """
+    try:
+        return _load_json(name, default)
+    except StorageCorrupt:
+        logger.warning("%s битый — работаем на дефолте, файл не трогаем", name)
         return default
 
 
 def _save_json(name: str, data: Any) -> None:
+    """Атомарная запись: пишем во временный файл, fsync, затем rename.
+
+    `write_text` сначала обрезает файл, потом пишет — падение/OOM в этот момент
+    оставляет обрубок, а он дальше не читается. Теперь либо старое содержимое,
+    либо новое целиком.
+    """
     p = _coach_dir() / name
-    p.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    tmp = p.with_suffix(p.suffix + ".tmp")
+    payload = json.dumps(data, ensure_ascii=False, indent=2)
+    with open(tmp, "w", encoding="utf-8") as fh:
+        fh.write(payload)
+        fh.flush()
+        os.fsync(fh.fileno())
+    os.replace(tmp, p)
 
 
 def _next_id(items: List[Dict[str, Any]]) -> int:
@@ -71,6 +149,7 @@ def list_goals(status: Optional[str] = None) -> List[Dict[str, Any]]:
     return goals
 
 
+@_guarded("goals.json")
 def add_goal(title: str, why: str = "", target_date: Optional[str] = None) -> Dict[str, Any]:
     goals = _load_json("goals.json", [])
     goal = {
@@ -87,6 +166,7 @@ def add_goal(title: str, why: str = "", target_date: Optional[str] = None) -> Di
     return goal
 
 
+@_guarded("goals.json")
 def mark_goal_done(goal_id: int, note: str = "") -> Optional[Dict[str, Any]]:
     goals = _load_json("goals.json", [])
     for g in goals:
@@ -124,6 +204,7 @@ def list_deadlines(upcoming_days: Optional[int] = None) -> List[Dict[str, Any]]:
     return deadlines
 
 
+@_guarded("deadlines.json")
 def add_deadline(title: str, due: str, importance: str = "medium") -> Dict[str, Any]:
     """due: YYYY-MM-DD. importance: low/medium/high."""
     deadlines = _load_json("deadlines.json", [])
@@ -140,6 +221,7 @@ def add_deadline(title: str, due: str, importance: str = "medium") -> Dict[str, 
     return deadline
 
 
+@_guarded("deadlines.json")
 def mark_deadline_done(deadline_id: int) -> Optional[Dict[str, Any]]:
     """Закрыть дедлайн (сдал/прошло). Без этого сданный тест вечно висит
     в TOP PRIORITIES и Iris продолжает пушить."""
@@ -153,6 +235,7 @@ def mark_deadline_done(deadline_id: int) -> Optional[Dict[str, Any]]:
     return None
 
 
+@_guarded("deadlines.json")
 def delete_deadline(deadline_id: int) -> Optional[Dict[str, Any]]:
     """Удалить дедлайн НАСОВСЕМ («удали/убери — не нужен»). Не путать с
     mark_deadline_done: done = «сдал/прошло», остаётся в истории; delete —
@@ -167,6 +250,7 @@ def delete_deadline(deadline_id: int) -> Optional[Dict[str, Any]]:
     return None
 
 
+@_guarded("deadlines.json")
 def update_deadline(
     deadline_id: int,
     due: Optional[str] = None,
@@ -194,6 +278,7 @@ def update_deadline(
 # Diary
 # ============================================================================
 
+@_guarded("diary.json")
 def add_diary_entry(
     text: str,
     tags: Optional[List[str]] = None,
@@ -231,6 +316,7 @@ def read_diary(last_n: int = 10, tag: Optional[str] = None) -> List[Dict[str, An
     return diary[-last_n:]
 
 
+@_guarded("diary.json")
 def delete_diary_entries(ids: List[int]) -> List[int]:
     """Удалить записи дневника по id. Возвращает РЕАЛЬНО удалённые id
     (чтобы Iris отчитывалась только о фактически снесённом, а не врала)."""
@@ -268,6 +354,7 @@ def get_pantry() -> Dict[str, Any]:
     return _load_json("pantry.json", {"items": [], "updated": None})
 
 
+@_guarded("pantry.json")
 def pantry_update(add: Optional[List[str]] = None,
                   remove: Optional[List[str]] = None) -> Dict[str, Any]:
     """Инкрементально: добавить купленное / убрать потраченное. Дедуп по
@@ -309,6 +396,7 @@ def get_week_plan() -> Dict[str, Any]:
     return _load_json("week_plan.json", {})
 
 
+@_guarded("week_plan.json")
 def save_week_plan(text: str) -> Dict[str, Any]:
     plan = {
         "updated": now_local().isoformat(timespec="minutes"),
@@ -327,6 +415,7 @@ def save_week_plan(text: str) -> Dict[str, Any]:
 _WAKE_WINDOW = (5, 15)  # часы, [from, to). До 15: ловим поздние подъёмы (бар → встаёт поздно)
 
 
+@_guarded("presence.json")
 def log_wake_if_first() -> Optional[Dict[str, Any]]:
     """
     Вызывается на каждом сообщении владельца. Если это первое сообщение
@@ -379,10 +468,12 @@ def get_day_state() -> Dict[str, Any]:
     return state
 
 
+@_guarded("day_state.json")
 def save_day_state(state: Dict[str, Any]) -> None:
     _save_json("day_state.json", state)
 
 
+@_guarded("day_state.json")
 def mark_owner_seen() -> None:
     """Влад написал в HUB — фиксируем «на связи» (per-day, day_state
     сбрасывается на новой дате). last_seen — ПЕРВОЕ сообщение дня (питает
@@ -400,6 +491,7 @@ def owner_seen_today() -> bool:
     return bool(get_day_state().get("last_seen"))
 
 
+@_guarded("day_state.json")
 def mark_ping(ping_id: str) -> None:
     state = get_day_state()
     state["pings"][ping_id] = now_local().strftime("%H:%M")
@@ -416,6 +508,7 @@ def mark_ping(ping_id: str) -> None:
 # Кросс-день (mute.json), в отличие от per-day day_state.
 # ============================================================================
 
+@_guarded("mute.json")
 def set_mute(mode: str = "today", hours: float = 0, scope: str = "pings") -> str:
     """Выключить проактивные сообщения. mode: 'today' (до конца дня, дефолт) /
     'forever' (пока явно не снимут) / часы через hours>0. scope: 'pings'/'all'.
@@ -442,12 +535,16 @@ def set_mute(mode: str = "today", hours: float = 0, scope: str = "pings") -> str
     return "до конца дня"
 
 
+@_guarded("mute.json")
 def unmute() -> None:
     _save_json("mute.json", {})
 
 
 def _mute_record_active() -> Optional[Dict[str, Any]]:
-    data = _load_json("mute.json", {})
+    # safe-вариант: проверка mute идёт на каждом сообщении и на каждой джобе,
+    # ронять этот путь из-за битого файла нельзя. Запись в mute.json всегда
+    # перезаписывает его целиком (set_mute/unmute), терять тут нечего.
+    data = _load_json_safe("mute.json", {})
     until = data.get("until")
     if not until:
         return None
@@ -493,6 +590,7 @@ def entries_today() -> int:
     )
 
 
+@_guarded("ping_style.json")
 def next_style_index(n: int) -> int:
     """Ротация стилевых вариантов пингов (persist кросс-день) — чтобы Iris не
     открывала сообщения одинаково два раза подряд (жалоба 03.08: «формат
@@ -512,6 +610,7 @@ def radar_pinged(deadline_id: Any) -> bool:
     return str(deadline_id) in _load_json("radar.json", {})
 
 
+@_guarded("radar.json")
 def mark_radar(deadline_id: Any) -> None:
     data = _load_json("radar.json", {})
     data[str(deadline_id)] = now_local().strftime("%Y-%m-%d")
@@ -526,6 +625,7 @@ def mark_radar(deadline_id: Any) -> None:
 _GEMINI_RPD_WARN = (1200, 1450)  # пороги для одноразового warning в лог
 
 
+@_guarded("gemini_usage.json")
 def gemini_bump() -> int:
     data = _load_json("gemini_usage.json", {})
     today = now_local().strftime("%Y-%m-%d")
