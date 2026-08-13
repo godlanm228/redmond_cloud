@@ -145,6 +145,13 @@ class RouterMenuTests(unittest.TestCase):
         for name in ("Redmond", "Iris", "Newser", "Cipher"):
             self.assertIn(name, self.prompt)
 
+    def test_infra_names_are_disambiguated(self):
+        """«Почему гемини упал» — жалоба на сбой, а не новость про компанию.
+        Без этой подсказки роутер уводил такое в Newser+research."""
+        low = self.prompt.lower()
+        for word in ("gemini", "groq", "telegram"):
+            self.assertIn(word, low)
+
 
 class ReplyTargetExtractionTests(unittest.TestCase):
     """Извлечение агента из Telegram-реплая."""
