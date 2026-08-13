@@ -146,6 +146,36 @@ def _agent_spoke_last(state: "RouterState") -> str:
     return ""
 
 
+def get_state(states: Dict[int, "RouterState"], chat_id: int) -> "RouterState":
+    """RouterState чата; при первом обращении поднимается из базы.
+
+    Без этого после каждого рестарта sticky начинался с нуля: «лол» или
+    «продолжи» не находили, к кому относятся, а роутер шёл в LLM с пустой
+    историей. Рестартов 13.08 было пять подряд.
+    """
+    state = states.get(chat_id)
+    if state is not None:
+        return state
+
+    state = RouterState()
+    try:
+        from utils import db
+        for turn in db.history_load(chat_id, 3):
+            agent = turn.get("agent") or state.last_agent_name
+            state.add("user", turn.get("user", ""), agent)
+            state.add("assistant", turn.get("bot", ""), agent)
+            if turn.get("agent"):
+                state.last_agent_name = turn["agent"]
+        if state.recent_messages:
+            logger.info("Sticky чата %s восстановлен из базы: последним был %s",
+                        chat_id, state.last_agent_name)
+    except Exception:
+        logger.warning("Не удалось восстановить sticky чата %s", chat_id, exc_info=True)
+
+    states[chat_id] = state
+    return state
+
+
 def reply_target_agent(update: Any) -> str:
     """Имя агента, на чьё сообщение отвечают реплаем ('' если это не реплай).
 

@@ -66,8 +66,8 @@ def _set_sticky(router_states: Optional[dict], chat_id: int, agent_name: str, te
     дайджеста Newser поймал Redmond и ответил встречным вопросом."""
     if router_states is None:
         return
-    from logic.agent_router import RouterState
-    state = router_states.setdefault(chat_id, RouterState())
+    from logic.agent_router import get_state
+    state = get_state(router_states, chat_id)
     state.last_agent_name = agent_name
     if text:
         state.add("assistant", text, agent_name)

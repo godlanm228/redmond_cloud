@@ -115,7 +115,7 @@ def _ensure_schema_once(conn: sqlite3.Connection, path: Path) -> None:
 # Схема
 # ---------------------------------------------------------------------------
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 _SCHEMA = """
 -- Цели и дедлайны: id остаётся сквозным, как в JSON (на него ссылаются tools).
@@ -192,15 +192,18 @@ CREATE TABLE IF NOT EXISTS kv (
 );
 
 -- История диалога. Раньше жила только в RAM и стиралась каждым рестартом
--- (их 13.08 было пять подряд), плюс правилась из нескольких потоков без
--- синхронизации.
+-- (13.08 их было пять подряд), плюс правилась из нескольких потоков без
+-- синхронизации. Храним парами «реплика — ответ»: ровно в таком виде история
+-- уходит в промпт, и разбирать её обратно из отдельных строк было бы незачем.
+-- agent нужен, чтобы после рестарта восстановить sticky роутера: без него
+-- «лол» сразу после перезапуска не находил, к кому относится.
 CREATE TABLE IF NOT EXISTS chat_history (
     id      INTEGER PRIMARY KEY AUTOINCREMENT,
     chat_id INTEGER NOT NULL,
     ts      TEXT NOT NULL,
-    role    TEXT NOT NULL,               -- user | assistant
     agent   TEXT NOT NULL DEFAULT '',
-    text    TEXT NOT NULL
+    user    TEXT NOT NULL,
+    bot     TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_chat_history ON chat_history(chat_id, id);
 """
@@ -233,6 +236,39 @@ def execute(sql: str, params: Iterable[Any] = ()) -> sqlite3.Cursor:
     cur = conn.execute(sql, tuple(params))
     conn.commit()
     return cur
+
+
+def history_load(chat_id: int, limit: int) -> list:
+    """Последние `limit` обменов чата, в хронологическом порядке."""
+    rows = query(
+        "SELECT ts, agent, user, bot FROM chat_history WHERE chat_id=?"
+        " ORDER BY id DESC LIMIT ?",
+        (chat_id, limit),
+    )
+    return [{"user": r["user"], "bot": r["bot"], "timestamp": r["ts"],
+             "agent": r["agent"]} for r in reversed(rows)]
+
+
+def history_add(chat_id: int, user_text: str, bot_text: str,
+                agent: str = "", ts: str = "") -> None:
+    execute(
+        "INSERT INTO chat_history(chat_id, ts, agent, user, bot) VALUES(?,?,?,?,?)",
+        (chat_id, ts or _now(), agent, user_text, bot_text),
+    )
+
+
+def history_trim(chat_id: int, keep: int) -> int:
+    """Оставить последние `keep` обменов. Возвращает сколько удалено.
+
+    История нужна для промпта (последние несколько реплик) — держать всё
+    незачем, для долгой памяти есть таблица memory с полнотекстовым поиском.
+    """
+    cur = execute(
+        "DELETE FROM chat_history WHERE chat_id=? AND id NOT IN"
+        " (SELECT id FROM chat_history WHERE chat_id=? ORDER BY id DESC LIMIT ?)",
+        (chat_id, chat_id, keep),
+    )
+    return cur.rowcount or 0
 
 
 def kv_get(key: str, default: Any = None) -> Any:

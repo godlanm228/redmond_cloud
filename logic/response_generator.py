@@ -2,6 +2,7 @@ import logging
 import os
 import random
 import re
+import threading
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
@@ -295,8 +296,14 @@ class ResponseGenerator:
 
         # Состояние — per-chat, чтобы контекст Iris/Newser/Redmond не смешивался
         # в multi-bot режиме где приходят сообщения параллельно от разных chat_id.
-        # Dict[chat_id → история]. chat_id = 0 для legacy home-режима без TG.
+        # Dict[chat_id → история] — теперь это КЭШ над таблицей chat_history:
+        # подгружается из базы при первом обращении и пишется сквозь неё.
+        # Раньше история жила только здесь и стиралась каждым рестартом (13.08
+        # их было пять подряд), а правилась из нескольких потоков без блокировки.
+        # chat_id = 0 для legacy home-режима без TG.
         self.history_by_chat: Dict[int, List[Dict[str, str]]] = {}
+        self._history_guard = threading.RLock()
+        self._history_loaded: set = set()
         self.max_history = getattr(self.config, "max_history", 6)
         self.top_k = getattr(self.config, "top_k", 3)
         self.last_response: str = ""
@@ -352,7 +359,7 @@ class ResponseGenerator:
             agent = default_agent()
 
         # Per-chat история (изолирует контексты Iris/Newser/Redmond в multi-bot)
-        chat_history = self.history_by_chat.setdefault(chat_id, [])
+        chat_history = self.chat_history(chat_id)
 
         ctx = GenerationContext(
             intent=intent,
@@ -1454,13 +1461,36 @@ class ResponseGenerator:
         text = re.sub(r"\n{3,}", "\n\n", text)
         return text.strip()
 
-    def note_to_history(self, chat_id: int, user_text: str, note: str) -> None:
+    def note_to_history(self, chat_id: int, user_text: str, note: str,
+                        agent: str = "") -> None:
         """Записать факт в историю чата без LLM-вызова. Нужно чтобы внешние
         события (разбор фото зрением) попадали в контекст: иначе на «что на
         фото?» текстовая модель галлюцинирует (был кейс «ракумаки»)."""
-        self._save_interaction(user_text, note, chat_id)
+        self._save_interaction(user_text, note, chat_id, agent=agent)
 
-    def _save_interaction(self, user_text: str, response: str, chat_id: int = 0) -> None:
+    def chat_history(self, chat_id: int) -> List[Dict[str, str]]:
+        """История чата: кэш в памяти, при первом обращении — из базы.
+
+        Подгрузка из базы и есть то, ради чего история туда переехала: после
+        рестарта бот помнит, о чём шёл разговор, а не начинает с чистого листа.
+        """
+        with self._history_guard:
+            if chat_id not in self._history_loaded:
+                self._history_loaded.add(chat_id)
+                try:
+                    from utils import db
+                    loaded = db.history_load(chat_id, self.max_history * 2)
+                    if loaded:
+                        self.history_by_chat[chat_id] = loaded
+                        logger.info("История чата %s поднята из базы: %d обменов",
+                                    chat_id, len(loaded))
+                except Exception:
+                    logger.warning("Не удалось поднять историю чата %s", chat_id,
+                                   exc_info=True)
+            return self.history_by_chat.setdefault(chat_id, [])
+
+    def _save_interaction(self, user_text: str, response: str, chat_id: int = 0,
+                          agent: str = "") -> None:
         if not response:
             return
 
@@ -1472,14 +1502,26 @@ class ResponseGenerator:
 
         # Per-chat history — изоляция между chat_id (Iris не путается с Newser
         # когда у Влада параллельно идут диалоги в разных меншенах).
-        chat_history = self.history_by_chat.setdefault(chat_id, [])
-        chat_history.append({
-            "user": user_text,
-            "bot": response,
-            "timestamp": datetime.now().isoformat(),
-        })
-        if len(chat_history) > self.max_history * 2:
-            self.history_by_chat[chat_id] = chat_history[-self.max_history:]
+        # Пишем сквозь кэш в базу: под блокировкой, чтобы параллельные
+        # генерации четырёх ботов не теряли реплики друг друга.
+        ts = datetime.now().isoformat()
+        with self._history_guard:
+            chat_history = self.chat_history(chat_id)
+            chat_history.append({
+                "user": user_text,
+                "bot": response,
+                "timestamp": ts,
+                "agent": agent,
+            })
+            if len(chat_history) > self.max_history * 2:
+                self.history_by_chat[chat_id] = chat_history[-self.max_history:]
+        try:
+            from utils import db
+            db.history_add(chat_id, user_text, response, agent=agent, ts=ts)
+            db.history_trim(chat_id, self.max_history * 4)
+        except Exception:
+            # База недоступна — работаем на кэше в памяти, как раньше.
+            logger.warning("История чата %s не записалась в базу", chat_id, exc_info=True)
 
     @staticmethod
     def _error_response() -> str:
