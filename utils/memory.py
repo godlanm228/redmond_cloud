@@ -6,12 +6,22 @@ MemoryStore — хранилище диалогов с опциональным 
 - **lite**: только SQLite (для облака на 1 GB RAM, без ML-зависимостей)
 
 Режим определяется автоматически: если `faiss`/`sentence_transformers` не
-установлены или `vector_search=False`, переходим в lite. `search()` тогда
-работает по SQL LIKE — менее точно, но без 400 MB RAM на эмбеддер.
+установлены или `vector_search=False`, переходим в lite. В lite поиск идёт
+через **FTS5** — полнотекстовый индекс самого SQLite: ранжирование по bm25,
+префиксный матч, кириллица через unicode61, ноль дополнительных зависимостей
+и ноль RAM на эмбеддер. SQL LIKE остался третьим эшелоном на случай сборки
+SQLite без FTS5.
+
+История (13.08.2026). На VM векторный поиск мёртв: faiss и
+sentence_transformers не установлены, эмбеддингов в базе 0 из 479 записей.
+Работал `_search_like`, и он возвращал score ровно 0.5 при фильтре
+`score > 0.5` у вызывающего — то есть память не отдавала НИЧЕГО. Не «менее
+точно», а ноль результатов, молча, с июня.
 """
 
 import logging
 import os
+import re
 import sqlite3
 import time
 from typing import Any, Dict, List, Optional
@@ -105,6 +115,57 @@ class MemoryStore:
             """
         )
         self.conn.commit()
+        self.fts = self._init_fts()
+
+    def _init_fts(self) -> bool:
+        """FTS5-индекс над memory. False — сборка SQLite без FTS5, уходим на LIKE.
+
+        content='memory' — индекс внешнего содержимого: тексты не дублируются,
+        синхронизацию держат триггеры. 'rebuild' добирает записи, созданные до
+        появления индекса (у нас это все 479 строк с июня).
+
+        Наличие индекса проверяем ЧЕРЕЗ sqlite_master, а не COUNT(*): у таблицы
+        с внешним содержимым COUNT(*) читает источник (memory), а не индекс, и
+        всегда равен общему числу записей. По такой проверке rebuild не запустился
+        бы никогда, а память молча искала бы по пустому индексу.
+        """
+        existed = self.conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='memory_fts'"
+        ).fetchone() is not None
+        try:
+            self.conn.executescript(
+                """
+                CREATE VIRTUAL TABLE IF NOT EXISTS memory_fts USING fts5(
+                    user, bot,
+                    content='memory', content_rowid='id',
+                    tokenize='unicode61 remove_diacritics 2'
+                );
+
+                CREATE TRIGGER IF NOT EXISTS memory_ai AFTER INSERT ON memory BEGIN
+                    INSERT INTO memory_fts(rowid, user, bot)
+                    VALUES (new.id, new.user, new.bot);
+                END;
+                CREATE TRIGGER IF NOT EXISTS memory_ad AFTER DELETE ON memory BEGIN
+                    INSERT INTO memory_fts(memory_fts, rowid, user, bot)
+                    VALUES('delete', old.id, old.user, old.bot);
+                END;
+                CREATE TRIGGER IF NOT EXISTS memory_au AFTER UPDATE ON memory BEGIN
+                    INSERT INTO memory_fts(memory_fts, rowid, user, bot)
+                    VALUES('delete', old.id, old.user, old.bot);
+                    INSERT INTO memory_fts(rowid, user, bot)
+                    VALUES (new.id, new.user, new.bot);
+                END;
+                """
+            )
+            if not existed:
+                total = self.conn.execute("SELECT COUNT(*) FROM memory").fetchone()[0]
+                self.conn.execute("INSERT INTO memory_fts(memory_fts) VALUES('rebuild')")
+                logger.info("FTS-индекс памяти построен с нуля: %d записей", total)
+            self.conn.commit()
+            return True
+        except sqlite3.OperationalError as e:
+            logger.warning("FTS5 недоступен (%s) — поиск памяти уйдёт на LIKE", e)
+            return False
 
     def _init_embedder(self, embed_model: str) -> None:
         try:
@@ -155,9 +216,13 @@ class MemoryStore:
         return memory_id
 
     def search(self, query: str, top_k: int = 5) -> List[Dict[str, Any]]:
-        """Поиск похожих диалогов. Vector search если доступен, иначе SQL LIKE."""
+        """Поиск похожих диалогов: вектор → FTS5 → LIKE, что доступно."""
         if self.vector_search and self.index is not None and self.index.ntotal > 0:
             return self._search_vector(query, top_k)
+        if getattr(self, "fts", False):
+            results = self._search_fts(query, top_k)
+            if results:
+                return results
         return self._search_like(query, top_k)
 
     def _search_vector(self, query: str, top_k: int) -> List[Dict[str, Any]]:
@@ -193,8 +258,62 @@ class MemoryStore:
             logger.error("Vector search error: %s", e)
             return []
 
+    # Слова короче трёх букв в запрос не берём: «а», «на», «до» матчат всё
+    # подряд и топят выдачу. Цифры оставляем — даты и суммы бывают ключом.
+    _TOKEN_RX = re.compile(r"[\w']{3,}", re.UNICODE)
+    _MAX_TERMS = 8
+
+    @classmethod
+    def _fts_query(cls, query: str) -> str:
+        """Свободный текст → безопасный FTS5-запрос.
+
+        Пользовательский текст нельзя отдавать в MATCH как есть: кавычки,
+        звёздочки, дефисы и слова AND/OR/NEAR — это синтаксис FTS5, и на
+        «что-то (важное)» запрос падает с ошибкой. Поэтому берём только слова,
+        каждое закавычиваем и добавляем префиксный матч — русский не
+        стеммится, а «график*» ловит «графика» и «графике».
+        """
+        terms = cls._TOKEN_RX.findall((query or "").lower())[: cls._MAX_TERMS]
+        return " OR ".join(f'"{t}"*' for t in terms)
+
+    @staticmethod
+    def _bm25_to_score(rank: float) -> float:
+        """bm25 (чем меньше, тем лучше; всегда ≤ 0) → score в (0.55, 0.99).
+
+        Держим выше 0.5 намеренно: вызывающий отфильтровывает `score > 0.5`, и
+        именно из-за ровно 0.5 у старого LIKE-поиска память годами отдавала
+        пустоту. Реальное совпадение обязано проходить этот порог.
+        """
+        strength = abs(float(rank))
+        return round(0.55 + 0.44 * (strength / (strength + 3.0)), 3)
+
+    def _search_fts(self, query: str, top_k: int) -> List[Dict[str, Any]]:
+        """Полнотекстовый поиск с ранжированием bm25."""
+        match = self._fts_query(query)
+        if not match:
+            return []
+        try:
+            cursor = self.conn.execute(
+                """
+                SELECT m.id, m.user, m.bot, m.timestamp, bm25(memory_fts) AS rank
+                FROM memory_fts JOIN memory m ON m.id = memory_fts.rowid
+                WHERE memory_fts MATCH ?
+                ORDER BY rank
+                LIMIT ?
+                """,
+                (match, top_k),
+            )
+            return [
+                {"id": r[0], "user": r[1], "bot": r[2], "timestamp": r[3],
+                 "score": self._bm25_to_score(r[4])}
+                for r in cursor
+            ]
+        except sqlite3.OperationalError as e:
+            logger.warning("FTS-поиск не отработал (%s) — уходим на LIKE", e)
+            return []
+
     def _search_like(self, query: str, top_k: int) -> List[Dict[str, Any]]:
-        """Fallback-поиск по SQL LIKE — для lite-режима."""
+        """Последний эшелон: SQL LIKE. Сборка SQLite без FTS5 или пустой индекс."""
         if not query.strip():
             return []
         like = f"%{query.strip().lower()}%"
@@ -208,8 +327,10 @@ class MemoryStore:
             """,
             (like, like, top_k),
         )
+        # 0.6, а не 0.5: у вызывающего фильтр `score > 0.5`, и ровно на границе
+        # результаты молча пропадали (см. докстринг модуля).
         return [
-            {"id": r[0], "user": r[1], "bot": r[2], "timestamp": r[3], "score": 0.5}
+            {"id": r[0], "user": r[1], "bot": r[2], "timestamp": r[3], "score": 0.6}
             for r in cursor
         ]
 
