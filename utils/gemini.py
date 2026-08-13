@@ -241,11 +241,13 @@ def tool_schemas_to_gemini(schemas: List[dict]) -> Optional[List[dict]]:
     return [{"functionDeclarations": decls}] if decls else None
 
 
-# Grounding намеренно прибит к 2.5, а не к DEFAULT_MODEL: у google_search своя
-# квота, и 13.08.2026 она была выжжена до того, как удалось проверить 3.6-flash.
-# 2.5 этот путь отработал 20 раз из 23 за всё время — не меняем вслепую.
-# TODO: проверить grounding на DEFAULT_MODEL и убрать пин.
-GROUNDING_MODEL = "gemini-2.5-flash"
+# У google_search grounding отдельная и заметно более узкая квота, чем у обычной
+# генерации, поэтому модель тут не одна, а список: берём первую, которая ответит.
+# 13.08.2026 замерено: 3.6 на обычных вызовах отвечает стабильно, 2.5 — через раз
+# (429 → 200 на повторе), то есть жёсткий пин на любую одну модель хуже перебора.
+# Второй эшелон (CSE/DDG) остаётся ниже по стеку в logic/tools.py.
+GROUNDING_MODELS = ("", "gemini-2.5-flash")  # "" = DEFAULT_MODEL
+GROUNDING_MODEL = GROUNDING_MODELS[-1]  # для healthcheck и обратной совместимости
 
 
 def grounded_search(
@@ -258,26 +260,35 @@ def grounded_search(
     Поиск через Google Search grounding: модель сама гуглит и отвечает фактурой.
     Возвращает (answer_text, [(source_title, url), …]) или None при ошибке.
     URL источников — redirect-ссылки Google (vertexaisearch…), они рабочие.
+    Модели пробуются по очереди (GROUNDING_MODELS) — у grounding узкая квота.
     """
-    data = generate(
-        [{"text": query}],
-        model=GROUNDING_MODEL,
-        system=(
-            "You are a web search assistant. Answer factually based on Google "
-            "Search results, concise and specific. Reply in the language of "
-            "the query. No preamble. "
-            "The user is Ukrainian: do NOT use, cite, or repeat claims from Russian "
-            "state / propaganda / aggregator sources (ria, tass, rt, lenta, rbc, "
-            "gazeta, vesti, regnum, iz.ru, kp.ru, etc.). For any Russia/Ukraine war "
-            "or politics topic rely ONLY on Western, Ukrainian or neutral international "
-            "sources."
-        ),
-        tools=[{"google_search": {}}],
-        temperature=0.2,
-        max_tokens=max_tokens,
-        api_key=api_key,
+    system = (
+        "You are a web search assistant. Answer factually based on Google "
+        "Search results, concise and specific. Reply in the language of "
+        "the query. No preamble. "
+        "The user is Ukrainian: do NOT use, cite, or repeat claims from Russian "
+        "state / propaganda / aggregator sources (ria, tass, rt, lenta, rbc, "
+        "gazeta, vesti, regnum, iz.ru, kp.ru, etc.). For any Russia/Ukraine war "
+        "or politics topic rely ONLY on Western, Ukrainian or neutral international "
+        "sources."
     )
-    text = extract_text(data)
+    data = None
+    text = ""
+    for model in GROUNDING_MODELS:
+        data = generate(
+            [{"text": query}],
+            model=model,
+            system=system,
+            tools=[{"google_search": {}}],
+            temperature=0.2,
+            max_tokens=max_tokens,
+            api_key=api_key,
+        )
+        text = extract_text(data)
+        if text:
+            break
+        logger.warning("Grounding на %s не ответил — пробуем следующую модель",
+                       model or DEFAULT_MODEL)
     if not text:
         return None
 
