@@ -123,6 +123,48 @@ class RouterProviderChainTests(unittest.TestCase):
         self.assertEqual(agent.name, "Newser")
 
 
+class GroundingModelChainTests(unittest.TestCase):
+    """У google_search своя узкая квота — одна модель ненадёжна, нужен перебор."""
+
+    def setUp(self):
+        self.tried = []
+        self._orig = gemini.generate
+
+    def tearDown(self):
+        gemini.generate = self._orig
+
+    def _patch(self, answers):
+        """answers: {model: текст ответа или '' если модель молчит}."""
+        def fake(parts, **kw):
+            model = kw.get("model", "")
+            self.tried.append(model)
+            text = answers.get(model, "")
+            return {"candidates": [{"content": {"parts": [{"text": text}]}}]} if text else None
+        gemini.generate = fake
+
+    def test_first_model_answers_second_not_touched(self):
+        self._patch({"": "ответ"})
+        result = gemini.grounded_search("погода")
+        self.assertIsNotNone(result)
+        self.assertEqual(self.tried, [""])
+
+    def test_falls_through_to_backup_model(self):
+        self._patch({"gemini-2.5-flash": "ответ с запасной"})
+        result = gemini.grounded_search("погода")
+        self.assertIsNotNone(result)
+        self.assertEqual(result[0], "ответ с запасной")
+        self.assertEqual(self.tried, list(gemini.GROUNDING_MODELS))
+
+    def test_all_silent_gives_none(self):
+        self._patch({})
+        self.assertIsNone(gemini.grounded_search("погода"))
+        self.assertEqual(self.tried, list(gemini.GROUNDING_MODELS))
+
+    def test_default_model_is_first_in_chain(self):
+        # Основная модель должна пробоваться первой: у неё квота здоровее.
+        self.assertEqual(gemini.GROUNDING_MODELS[0], "")
+
+
 class DeadModelGuardTests(unittest.TestCase):
     """Простой стоп-кран: снятая провайдером модель не должна вернуться в конфиг."""
 
