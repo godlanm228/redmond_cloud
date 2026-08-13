@@ -4,10 +4,10 @@
   "llm_provider_order": ["groq", "gemini"],
 
   "groq_model": "openai/gpt-oss-120b",
-  "groq_fallback_model": "qwen/qwen3-32b",
+  "groq_fallback_model": "qwen/qwen3.6-27b",
   "groq_api_base": "https://api.groq.com",
 
-  "gemini_model": "gemini-2.5-flash",
+  "gemini_model": "gemini-3.6-flash",
 
   "groq_whisper_model": "whisper-large-v3-turbo",
 

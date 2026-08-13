@@ -3,7 +3,7 @@ Smart router — выбирает агента когда нет явного @-
 
 Стратегия:
   1. Явный @-префикс (`@coach`, `@redmond`, ...) → точное переключение (логика в agents.find_by_trigger)
-  2. Сторонняя LLM-классификация (Groq llama-3.1-8b-instant, дёшево):
+  2. Сторонняя LLM-классификация (Gemini flash-lite, дёшево; Groq 8B — запасной):
      - даём ей описания всех агентов + краткую историю разговора + новое сообщение
      - просим вернуть имя агента одним словом
   3. Если LLM-router не доступен — keyword fallback (по триггерным словам)
@@ -55,7 +55,13 @@ class RouterState:
 # Router LLM
 # ============================================================================
 
-_ROUTER_MODEL = "llama-3.1-8b-instant"
+# Роутер на Gemini flash-lite, а не на Groq llama-3.1-8b:
+#   • 8B плыла на промпте роутера (~1000 токенов правил) — отсюда промахи вроде
+#     «почему гемини упал» → Redmond+web_search про курс валют (12.08.2026);
+#   • квота отдельная от Groq — стена TPM в чате больше не роняет роутинг заодно.
+# Groq остаётся запасным путём: Gemini молчит → пробуем 8B, потом keywords.
+_ROUTER_MODEL = "gemini-3.1-flash-lite"
+_ROUTER_MODEL_GROQ = "llama-3.1-8b-instant"
 
 
 def _build_router_prompt() -> str:
@@ -111,12 +117,43 @@ def _parse_router_reply(raw: str) -> tuple:
     return (name or None), research
 
 
+def _ask_gemini(system: str, user_msg: str) -> str:
+    """Роутинг через Gemini flash-lite. '' при любой проблеме — уйдём на Groq."""
+    try:
+        from utils import gemini
+        return gemini.generate_text(
+            user_msg, system=system, model=_ROUTER_MODEL,
+            temperature=0.0, max_tokens=20,
+        ).strip()
+    except Exception as e:
+        logger.debug("Router Gemini failed: %s", e)
+        return ""
+
+
+def _ask_groq(system: str, user_msg: str, api_key: str) -> str:
+    """Запасной роутинг через Groq 8B. '' при любой проблеме — уйдём на keywords."""
+    if not api_key or not GROQ_AVAILABLE:
+        return ""
+    try:
+        client = Groq(api_key=api_key)
+        completion = client.chat.completions.create(
+            model=_ROUTER_MODEL_GROQ,
+            messages=[
+                {"role": "system", "content": system},
+                {"role": "user", "content": user_msg},
+            ],
+            temperature=0.0,
+            max_tokens=20,
+        )
+        return (completion.choices[0].message.content or "").strip()
+    except Exception as e:
+        logger.debug("Router Groq failed: %s", e)
+        return ""
+
+
 def _llm_route(text: str, history: List[Dict[str, str]], api_key: str) -> tuple:
     """Спрашиваем дешёвую LLM кому отдать + нужен ли research.
     Возвращает (имя агента | None, research: bool)."""
-    if not api_key or not GROQ_AVAILABLE:
-        return None, False
-
     history_block = ""
     if history:
         lines = []
@@ -130,20 +167,9 @@ def _llm_route(text: str, history: List[Dict[str, str]], api_key: str) -> tuple:
         f"НОВОЕ СООБЩЕНИЕ ВЛАДЕЛЬЦА: «{text[:400]}»"
     )
 
-    try:
-        client = Groq(api_key=api_key)
-        completion = client.chat.completions.create(
-            model=_ROUTER_MODEL,
-            messages=[
-                {"role": "system", "content": _build_router_prompt()},
-                {"role": "user", "content": user_msg},
-            ],
-            temperature=0.0,
-            max_tokens=20,
-        )
-        raw = (completion.choices[0].message.content or "").strip()
-    except Exception as e:
-        logger.debug("Router LLM failed: %s", e)
+    system = _build_router_prompt()
+    raw = _ask_gemini(system, user_msg) or _ask_groq(system, user_msg, api_key)
+    if not raw:
         return None, False
 
     name, research = _parse_router_reply(raw)

@@ -1,10 +1,13 @@
 """
 Gemini API (generativelanguage.googleapis.com) — единый низкоуровневый клиент.
 
-Ключ REDMOND_GEMINI_API_KEY = free-tier проект RedmondFree (~10 RPM / 250 RPD
-на gemini-2.5-flash) — для наших объёмов с запасом. ВАЖНО: проект должен быть
-БЕЗ биллинга — проект с prepay-биллингом при нуле кредитов отдаёт 429 без
-отката на free tier (так «не работал» старый ключ).
+Ключ REDMOND_GEMINI_API_KEY = free-tier проект RedmondFree (~10 RPM / сотни RPD)
+— для наших объёмов с запасом (реальный расход ~16 запросов в день). ВАЖНО:
+проект должен быть БЕЗ биллинга — проект с prepay-биллингом при нуле кредитов
+отдаёт 429 без отката на free tier (так «не работал» старый ключ).
+У google_search grounding квота ОТДЕЛЬНАЯ и заметно меньше — см. GROUNDING_MODEL.
+
+Модель по умолчанию — REDMOND_GEMINI_MODEL из env, иначе DEFAULT_MODEL.
 
 Используется для:
   • vision-разбора фото (logic/vision.py) — качество сильно выше Groq scout
@@ -13,8 +16,10 @@ Gemini API (generativelanguage.googleapis.com) — единый низкоуро
   • перевода заголовков дайджеста (logic/digest.py)
   • fallback-генерации когда Groq исчерпал дневной TPD (response_generator)
 
-thinkingBudget=0 во всех вызовах: 2.5-flash по умолчанию «думает» и молча
+Думание отключается во всех вызовах: модель по умолчанию «думает» и молча
 сжигает выходные токены на рассуждения — для наших коротких задач это вред.
+Параметр разный по семействам (см. _thinking_config): 2.5 понимает только
+thinkingBudget, 3.x — только thinkingLevel, и каждое отвечает 400 на чужое.
 """
 
 from __future__ import annotations
@@ -28,11 +33,24 @@ import requests
 logger = logging.getLogger(__name__)
 
 _API_BASE = "https://generativelanguage.googleapis.com/v1beta"
-DEFAULT_MODEL = "gemini-2.5-flash"
+DEFAULT_MODEL = os.getenv("REDMOND_GEMINI_MODEL", "gemini-3.6-flash")
 
 
 def api_key_from_env() -> str:
     return os.getenv("REDMOND_GEMINI_API_KEY", "")
+
+
+def _thinking_config(model: str) -> Dict[str, Any]:
+    """Как выключить размышления у конкретного семейства моделей.
+
+    Проверено на живом API 13.08.2026:
+      • 3.x + thinkingBudget=0 → 400 INVALID_ARGUMENT; без конфига думает всегда
+        и съедает весь maxOutputTokens (ответ приходит пустым, finish=MAX_TOKENS)
+      • 2.5 + thinkingLevel   → 400 «Thinking level is not supported for this model»
+    Незнакомое семейство → thinkingBudget (поведение до 3.x, безопасный дефолт).
+    """
+    return ({"thinkingLevel": "minimal"} if (model or DEFAULT_MODEL).startswith("gemini-3")
+            else {"thinkingBudget": 0})
 
 
 def _bump_usage() -> None:
@@ -94,7 +112,7 @@ def generate(
         "generationConfig": {
             "temperature": temperature,
             "maxOutputTokens": max_tokens,
-            "thinkingConfig": {"thinkingBudget": 0},
+            "thinkingConfig": _thinking_config(model),
         },
     }
     if system:
@@ -155,7 +173,7 @@ def generate_contents(
         "generationConfig": {
             "temperature": temperature,
             "maxOutputTokens": max_tokens,
-            "thinkingConfig": {"thinkingBudget": 0},
+            "thinkingConfig": _thinking_config(model),
         },
     }
     if system:
@@ -223,6 +241,13 @@ def tool_schemas_to_gemini(schemas: List[dict]) -> Optional[List[dict]]:
     return [{"functionDeclarations": decls}] if decls else None
 
 
+# Grounding намеренно прибит к 2.5, а не к DEFAULT_MODEL: у google_search своя
+# квота, и 13.08.2026 она была выжжена до того, как удалось проверить 3.6-flash.
+# 2.5 этот путь отработал 20 раз из 23 за всё время — не меняем вслепую.
+# TODO: проверить grounding на DEFAULT_MODEL и убрать пин.
+GROUNDING_MODEL = "gemini-2.5-flash"
+
+
 def grounded_search(
     query: str,
     *,
@@ -236,6 +261,7 @@ def grounded_search(
     """
     data = generate(
         [{"text": query}],
+        model=GROUNDING_MODEL,
         system=(
             "You are a web search assistant. Answer factually based on Google "
             "Search results, concise and specific. Reply in the language of "
