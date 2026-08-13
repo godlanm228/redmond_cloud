@@ -1,14 +1,24 @@
 """
 Smart router — выбирает агента когда нет явного @-меншина.
 
-Стратегия:
-  1. Явный @-префикс (`@coach`, `@redmond`, ...) → точное переключение (логика в agents.find_by_trigger)
-  2. Сторонняя LLM-классификация (Gemini flash-lite, дёшево; Groq 8B — запасной):
-     - даём ей описания всех агентов + краткую историю разговора + новое сообщение
-     - просим вернуть имя агента одним словом
-  3. Если LLM-router не доступен — keyword fallback (по триггерным словам)
-  4. Если ничего не сработало — sticky-режим: текущий активный агент (last_agent_per_chat)
-  5. По умолчанию — Redmond
+Стратегия (порядок важен — дешёвые и однозначные сигналы идут первыми):
+  1. Явный @-префикс или имя («@coach», «айрис,») → точное переключение
+  2. Реплай на сообщение Cipher → Cipher. Единственный жёсткий оверрайд:
+     остальным реплай уходит подсказкой в промпт, потому что «отвечаю на
+     сообщение Newser'а, но прошу в нём Айрис» — обычное дело
+  3. Короткое продолжение («да», «продолжи», «даю разрешение») → текущий агент
+     без вызова классификатора: темы там нет, платить за LLM не за что
+  4. LLM-классификация (Gemini flash-lite, дёшево; Groq 8B — запасной).
+     Ей отдаются описания ВСЕХ агентов (включая Cipher — с пометкой о цене),
+     история, кто отвечал последним, на чьё сообщение реплай — и право
+     ответить «Никто»
+  5. Keyword fallback → sticky → Redmond по умолчанию
+
+Разбор 12.08.2026, почему так. Cipher был исключён из списка вариантов, реплаи
+не читались, исхода «промолчать» не существовало. В итоге «Почему гемини упал?»
+уходило Redmond'у (тот шёл искать курс валют), а «Даю разрешение» — Newser'у,
+который отвечал «это к Cipher». Модель роутера была ни при чём: правильного
+ответа просто не было в меню.
 
 Контекст хранится в `RouterState` per-chat — чтобы серия сообщений шла одному агенту,
 пока тема не сменилась.
@@ -19,11 +29,12 @@ from __future__ import annotations
 import logging
 import os
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 import requests
 
-from logic.agents import AGENTS, REDMOND, AgentConfig, agent_by_name, default_agent, find_by_trigger
+from logic.agents import (AGENTS, REDMOND, AgentConfig, agent_by_name,
+                          agent_by_username, default_agent, find_by_trigger)
 
 logger = logging.getLogger(__name__)
 
@@ -64,13 +75,53 @@ _ROUTER_MODEL = "gemini-3.1-flash-lite"
 _ROUTER_MODEL_GROQ = "llama-3.1-8b-instant"
 
 
+NOBODY = "Никто"
+
+# Короткие продолжения: смысла звать классификатор нет, тема не меняется.
+# Список намеренно узкий — «а погода?» тоже короткое, но тему МЕНЯЕТ, поэтому
+# липнем только на явных подтверждениях/продолжениях.
+_CONTINUATION_MARKERS = frozenset({
+    "да", "ага", "угу", "ок", "окей", "хорошо", "давай", "давай же", "плюс",
+    "нет", "не", "не надо", "не нужно", "стой", "погоди",
+    "продолжи", "продолжай", "дальше", "и что", "а дальше", "ещё", "еще",
+    "спасибо", "спс", "понял", "поняла", "принял", "ясно",
+    "разрешаю", "даю разрешение", "разрешение даю", "можно", "валяй",
+})
+_MAX_FOLLOWUP_WORDS = 3
+
+
+def _is_short_followup(text: str) -> bool:
+    """Сообщение не несёт новой темы — держим текущего агента без вызова LLM."""
+    t = (text or "").strip().lower().strip(".!?,")
+    if not t or len(t.split()) > _MAX_FOLLOWUP_WORDS:
+        return False
+    return t in _CONTINUATION_MARKERS
+
+
+def reply_target_agent(update: Any) -> str:
+    """Имя агента, на чьё сообщение отвечают реплаем ('' если это не реплай).
+
+    Самый точный сигнал о том, кому адресовано сообщение, и до 13.08.2026 он
+    просто выбрасывался: роутер вообще не знал про реплаи.
+
+    Работает по duck-typing, без импорта telegram: это логика роутинга, ей
+    незачем тянуть за собой Bot API (и незачем требовать его в тестах).
+    """
+    msg = getattr(update, "message", None)
+    replied = getattr(msg, "reply_to_message", None) if msg else None
+    author = getattr(replied, "from_user", None) if replied else None
+    if not author or not getattr(author, "is_bot", False):
+        return ""
+    agent = agent_by_username(getattr(author, "username", "") or "")
+    return agent.name if agent else ""
+
+
 def _build_router_prompt() -> str:
-    # Cipher не участвует в LLM-routing — он дорогой (Pro лимит).
-    # Активируется только через явный @cipher / @c / @шифр.
-    routable = [a for a in AGENTS if a.name != "Cipher"]
-    agents_desc = "\n".join(
-        f"  - {a.name}: {a.description}" for a in routable
-    )
+    # Cipher участвует в роутинге, но с явным предупреждением о цене: до
+    # 13.08.2026 он был исключён совсем, и технические вопросы физически не
+    # могли попасть по адресу — «почему гемини упал?» уходило Redmond'у,
+    # тот шёл искать курс валют. Правильного ответа просто не было в меню.
+    agents_desc = "\n".join(f"  - {a.name}: {a.description}" for a in AGENTS)
     return (
         "Ты — роутер. По сообщению владельца + краткой истории диалога выбери, "
         "какой агент должен ответить.\n\n"
@@ -87,6 +138,20 @@ def _build_router_prompt() -> str:
         "адреса, часы работы, цены товаров/услуг, «посмотри/найди/погугли» бытовое "
         "→ Redmond (сам решит: искать или передать Newser)\n"
         "  • Погода, текущее время, болтовня, общие вопросы, фоновое объяснение → Redmond\n"
+        "  • Код, логи, ошибки бота, архитектура, «почему упало/не работает», "
+        "диагностика системы → Cipher\n"
+        "\n"
+        "ПРО CIPHER (ВАЖНО):\n"
+        "  Он дорогой — работает на платной подписке владельца с общим лимитом.\n"
+        "  Бери его ТОЛЬКО для реального технического запроса про сам бот, его код,\n"
+        "  логи или сбои. Обычный вопрос про технологии — это Redmond или Newser.\n"
+        "  Если разговор УЖЕ идёт с Cipher — продолжение остаётся на нём.\n"
+        "\n"
+        "ВАРИАНТ «Никто»:\n"
+        "  Если сообщение не адресовано ни одному агенту — владелец думает вслух,\n"
+        "  комментирует, реагирует эмоцией, говорит о чём-то своём и ответа не ждёт —\n"
+        "  верни «Никто». Лучше промолчать, чем влезть без спроса.\n"
+        "  Прямой вопрос или просьба — это ВСЕГДА агент, а не «Никто».\n"
         "\n"
         "STICKY-ПРАВИЛО (КРИТИЧНО):\n"
         "  Если предыдущий ответ был от агента X и текущее сообщение — продолжение "
@@ -102,7 +167,8 @@ def _build_router_prompt() -> str:
         "«как лучше вложить/заработать» — добавь к имени «+research».\n"
         "  Одиночный быстрый факт (погода, время, один адрес/цена, «когда выйдет X») — "
         "НЕ research.\n\n"
-        "ФОРМАТ ОТВЕТА: «Имя» или «Имя+research». Одна строка, без объяснений."
+        f"ФОРМАТ ОТВЕТА: «Имя», «Имя+research» или «{NOBODY}». "
+        "Одна строка, без объяснений."
     )
 
 
@@ -151,9 +217,22 @@ def _ask_groq(system: str, user_msg: str, api_key: str) -> str:
         return ""
 
 
-def _llm_route(text: str, history: List[Dict[str, str]], api_key: str) -> tuple:
+def _llm_route(
+    text: str,
+    history: List[Dict[str, str]],
+    api_key: str,
+    reply_to_agent: str = "",
+    last_agent: str = "",
+) -> tuple:
     """Спрашиваем дешёвую LLM кому отдать + нужен ли research.
-    Возвращает (имя агента | None, research: bool)."""
+    Возвращает (имя агента | NOBODY | None, research: bool).
+
+    reply_to_agent/last_agent — контекст, которого у роутера раньше не было:
+    он не видел ни на чьё сообщение отвечают, ни кто говорил последним (история
+    обрезана до 120 символов на реплику). Реплай здесь ПОДСКАЗКА, а не приказ:
+    ответить на сообщение Newser'а и попросить в нём же «айрис, глянь» — обычное
+    дело, и уйти это должно Айрис.
+    """
     history_block = ""
     if history:
         lines = []
@@ -162,7 +241,19 @@ def _llm_route(text: str, history: List[Dict[str, str]], api_key: str) -> tuple:
             lines.append(f"  {who}: {m['text'][:120]}")
         history_block = "ИСТОРИЯ:\n" + "\n".join(lines) + "\n\n"
 
+    context_lines = []
+    if last_agent:
+        context_lines.append(f"  Последним отвечал: {last_agent}")
+    if reply_to_agent:
+        context_lines.append(
+            f"  Это ОТВЕТ на сообщение агента {reply_to_agent} "
+            "(сильная подсказка, но текст важнее: если в нём назван другой агент "
+            "или сменилась тема — выбирай по тексту)"
+        )
+    context_block = ("КОНТЕКСТ:\n" + "\n".join(context_lines) + "\n\n") if context_lines else ""
+
     user_msg = (
+        f"{context_block}"
         f"{history_block}"
         f"НОВОЕ СООБЩЕНИЕ ВЛАДЕЛЬЦА: «{text[:400]}»"
     )
@@ -175,6 +266,9 @@ def _llm_route(text: str, history: List[Dict[str, str]], api_key: str) -> tuple:
     name, research = _parse_router_reply(raw)
     if not name:
         return None, False
+
+    if name.lower().strip() == NOBODY.lower():
+        return NOBODY, False
 
     agent = agent_by_name(name)
     if agent is None:
@@ -229,9 +323,19 @@ def _keyword_route(text: str) -> Optional[str]:
 # Public router
 # ============================================================================
 
-def route(text: str, state: RouterState, groq_api_key: str = "") -> tuple:
+def route(
+    text: str,
+    state: RouterState,
+    groq_api_key: str = "",
+    reply_to_agent: str = "",
+) -> tuple:
     """
-    Главный роутер. Возвращает (AgentConfig, research: bool) + обновляет state.
+    Главный роутер. Возвращает (AgentConfig | None, research: bool) + обновляет state.
+
+    None вместо агента — «никто не отвечает»: владелец думает вслух или
+    комментирует. Раньше такого исхода не было вообще, поэтому на любое
+    сообщение обязательно кто-то влезал.
+
     research=True означает «нужен глубокий веб-рисёрч»: если агент при этом
     Redmond — handler принудительно делегирует Ньюсеру (решение в коде,
     не на воле 120b-модели).
@@ -239,20 +343,47 @@ def route(text: str, state: RouterState, groq_api_key: str = "") -> tuple:
     if not text or not text.strip():
         return default_agent(), False
 
-    # 1. Явный @-меншин (точное переключение, перезаписывает sticky)
+    # 1. Явный @-меншин (точное переключение, перезаписывает всё остальное)
     explicit = find_by_trigger(text)
     if explicit is not None:
         state.last_agent_name = explicit.name
         return explicit, False
 
-    # 2. LLM-классификация (агент + research-флаг одним вызовом)
-    chosen_name, research = _llm_route(text, state.recent_messages, groq_api_key)
+    # 2. Реплай на Cipher — единственный жёсткий оверрайд. Он и так участвует
+    # в LLM-роутинге, но ответ на его конкретное сообщение это однозначный
+    # сигнал, на который не надо тратить вызов классификатора.
+    if reply_to_agent == "Cipher":
+        cipher = agent_by_name("Cipher")
+        if cipher is not None:
+            state.last_agent_name = cipher.name
+            logger.info("Router: реплай Cipher'у → Cipher (без LLM)")
+            return cipher, False
 
-    # 3. Keyword fallback (если LLM не доступна или вернула мусор)
+    # 3. Короткое продолжение («да», «продолжи», «даю разрешение») — тема не
+    # менялась, держим текущего агента и не платим за вызов классификатора.
+    if _is_short_followup(text) and state.last_agent_name:
+        agent = agent_by_name(state.last_agent_name)
+        if agent is not None:
+            logger.info("Router: продолжение %r → %s (без LLM)", text[:40], agent.name)
+            return agent, False
+
+    # 4. LLM-классификация (агент + research-флаг одним вызовом)
+    chosen_name, research = _llm_route(
+        text, state.recent_messages, groq_api_key,
+        reply_to_agent=reply_to_agent, last_agent=state.last_agent_name,
+    )
+
+    # 4a. Роутер решил, что сообщение вообще не к агентам — молчим.
+    # last_agent_name НЕ трогаем: разговор не сменился, он просто не начинался.
+    if chosen_name == NOBODY:
+        logger.info("Router: %r → никто (не адресовано агентам)", text[:60])
+        return None, False
+
+    # 5. Keyword fallback (если LLM не доступна или вернула мусор)
     if not chosen_name:
         chosen_name = _keyword_route(text)
 
-    # 4. Sticky: если LLM/keywords ничего не дали — оставляем последнего
+    # 6. Sticky: если LLM/keywords ничего не дали — оставляем последнего
     if not chosen_name:
         chosen_name = state.last_agent_name or default_agent().name
 

@@ -32,7 +32,7 @@ from logic.agents import (
     agent_by_name,
     find_by_trigger,
 )
-from logic.agent_router import RouterState, llm_research_flag, route
+from logic.agent_router import RouterState, llm_research_flag, reply_target_agent, route
 from logic.tools import DELEGATION_MARKER
 
 logger = logging.getLogger(__name__)
@@ -557,6 +557,7 @@ async def _route_and_respond(
     chat_id: int,
     user,
     handle_foreign: bool = False,
+    reply_to_agent: str = "",
 ) -> None:
     """
     Ядро обработки сообщения владельца: роутинг (явный @-меншин → LLM-классификатор
@@ -587,7 +588,15 @@ async def _route_and_respond(
             needs_research = llm_research_flag(clean_text, state, groq_key)
     else:
         clean_text = text
-        agent, needs_research = route(text, state, groq_api_key=groq_key)
+        agent, needs_research = route(
+            text, state, groq_api_key=groq_key, reply_to_agent=reply_to_agent,
+        )
+        # Роутер решил, что сообщение не к агентам (владелец думает вслух).
+        # Молчим — но сообщение всё равно кладём в историю, чтобы следующая
+        # реплика имела контекст.
+        if agent is None:
+            state.add("user", clean_text, state.last_agent_name or "—")
+            return
 
     # Стоп-слово — до LLM и мимо истории: «стоп» должен сработать всегда,
     # даже когда модели лежат или заняты.
@@ -654,7 +663,10 @@ async def redmond_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     if chat_id is None:
         return
 
-    await _route_and_respond(text, context, chat_id, update.effective_user)
+    await _route_and_respond(
+        text, context, chat_id, update.effective_user,
+        reply_to_agent=reply_target_agent(update),
+    )
 
 
 # ---------- Voice handler (голосовые → Groq Whisper → обычный пайплайн) ----------
@@ -705,7 +717,10 @@ async def redmond_voice_handler(update: Update, context: ContextTypes.DEFAULT_TY
 
     # Транскрипт видим — Влад сразу заметит, если распознало криво
     await coordinator.respond_as("Redmond", chat_id, f"🎙 «{text}»", "🦞", "plain")
-    await _route_and_respond(text, context, chat_id, update.effective_user, handle_foreign=True)
+    await _route_and_respond(
+        text, context, chat_id, update.effective_user, handle_foreign=True,
+        reply_to_agent=reply_target_agent(update),
+    )
 
 
 # ---------- Slim handler (Iris/Cipher/Newser) ----------
