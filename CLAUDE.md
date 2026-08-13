@@ -16,7 +16,9 @@ Multi-agent Telegram-хаб на Oracle Cloud Free VM (`203.0.113.10`). 4 бот
 | 📰 Newser | `@newser_redmond_bot` | Searcher + новости с источниками | то же |
 | 🧠 Cipher | `@cipher_redberry_bot` | Claude Code через Pro (stub) | subprocess |
 
-Fallback при rate_limit / tool_use_failed: `qwen/qwen3-32b`.
+Fallback при rate_limit / tool_use_failed: `qwen/qwen3.6-27b` (предыдущий
+`qwen/qwen3-32b` Groq снёс — 404 `model_not_found`, чинили 13.08.2026).
+Gemini — `gemini-3.6-flash`, роутер — `gemini-3.1-flash-lite`.
 
 ## Структура
 
