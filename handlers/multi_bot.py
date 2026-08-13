@@ -32,7 +32,8 @@ from logic.agents import (
     agent_by_name,
     find_by_trigger,
 )
-from logic.agent_router import RouterState, llm_research_flag, reply_target_agent, route
+from logic.agent_router import (RouterState, get_state, llm_research_flag,
+                                reply_target_agent, route)
 from logic.tools import DELEGATION_MARKER
 
 logger = logging.getLogger(__name__)
@@ -355,7 +356,7 @@ async def _run_delegation(
             # Iris делегировала дальше (напр. факт у Newser) — один уровень вглубь.
             await _run_delegation(iris, response[len(DELEGATION_MARKER):], context, chat_id)
             return
-        state: RouterState = router_states.setdefault(chat_id, RouterState())
+        state: RouterState = get_state(router_states, chat_id)
         state.add("assistant", response, iris.name)
         state.last_agent_name = iris.name
         await coordinator.respond_as(iris.name, chat_id, response, iris.emoji, iris.output_format)
@@ -379,7 +380,7 @@ async def _run_delegation(
         response = await _generate_with_status(newser, envelope, context, chat_id)
 
     # Sticky на Newser: «а подробнее?» следом уйдёт ему — контекст рисёрча у него.
-    state: RouterState = router_states.setdefault(chat_id, RouterState())
+    state: RouterState = get_state(router_states, chat_id)
     state.add("assistant", response, newser.name)
     state.last_agent_name = newser.name
 
@@ -539,7 +540,7 @@ async def redmond_photo_handler(update: Update, context: ContextTypes.DEFAULT_TY
         if not resp.startswith(DELEGATION_MARKER):
             await coordinator.respond_as(iris.name, chat_id, resp, iris.emoji, iris.output_format)
         # Sticky → Iris: текстовый follow-up после фото-еды держим за ней.
-        st: RouterState = context.application.bot_data["router_states"].setdefault(chat_id, RouterState())
+        st: RouterState = get_state(context.application.bot_data["router_states"], chat_id)
         st.add("assistant", resp, iris.name)
         st.last_agent_name = iris.name
         return
@@ -572,7 +573,7 @@ async def _route_and_respond(
     dispatcher = bot_data["dispatcher"]
     router_states: dict = bot_data["router_states"]
 
-    state: RouterState = router_states.setdefault(chat_id, RouterState())
+    state: RouterState = get_state(router_states, chat_id)
     groq_key = dispatcher.config.groq_api_key
 
     # research-флаг считает классификатор (8b) — решение о делегировании в коде,
@@ -779,7 +780,7 @@ async def slim_agent_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
     async with coordinator.typing(agent.name, chat_id):
         response = await _generate_with_status(agent, clean_text, context, chat_id)
 
-    state: RouterState = router_states.setdefault(chat_id, RouterState())
+    state: RouterState = get_state(router_states, chat_id)
     state.add("user", clean_text, agent.name)
 
     # Агент делегировал (например Iris → Newser за внешним фактом)
