@@ -69,6 +69,76 @@ SYSTEM_APPENDIX = """\
 
 
 # ---------------------------------------------------------------------------
+# Авторизация: живой ли Cipher вообще
+# ---------------------------------------------------------------------------
+
+CREDENTIALS_PATH = Path.home() / ".claude" / ".credentials.json"
+# За сколько до истечения refresh-токена начинать предупреждать. Access-токен
+# обновляется сам, а вот refresh — нет: он просто кончается, и Cipher молча
+# умирает до следующего ручного /login.
+REFRESH_WARN_DAYS = 5
+
+
+def auth_status() -> Dict[str, Any]:
+    """Состояние авторизации CLI. Читаем ТОЛЬКО метаданные, не токены.
+
+    13–15.08.2026 Cipher был мёртв, и узнали об этом случайно: файла
+    credentials не было вообще (не «протух» — исчез). Пользователь замечает
+    такое только когда сам обратится к Cipher и получит отказ.
+    """
+    out: Dict[str, Any] = {"ok": False, "reason": "", "expires_in_days": None}
+    if not CREDENTIALS_PATH.exists():
+        out["reason"] = "нет файла авторизации — нужен /login на VM"
+        return out
+    try:
+        raw = json.loads(CREDENTIALS_PATH.read_text(encoding="utf-8"))
+    except Exception as e:  # noqa: BLE001
+        out["reason"] = f"файл авторизации не читается: {e}"
+        return out
+
+    refresh_at = _find_key(raw, "refreshtokenexpiresat")
+    if refresh_at is None:
+        # Формат мог смениться — файл есть, значит логин был. Не паникуем.
+        out["ok"] = True
+        out["reason"] = "срок неизвестен (формат файла другой)"
+        return out
+    try:
+        ts = float(refresh_at)
+        ts = ts / 1000 if ts > 1e12 else ts
+        left = (datetime.fromtimestamp(ts) - datetime.now()).total_seconds() / 86400
+    except (TypeError, ValueError):
+        out["ok"] = True
+        out["reason"] = "срок не распарсился"
+        return out
+
+    out["expires_in_days"] = round(left, 1)
+    if left <= 0:
+        out["reason"] = "refresh-токен истёк — нужен /login на VM"
+        return out
+    out["ok"] = True
+    if left <= REFRESH_WARN_DAYS:
+        out["reason"] = f"refresh-токен кончится через {left:.1f} дн — нужен /login"
+    return out
+
+
+def _find_key(obj: Any, needle: str) -> Any:
+    """Поиск ключа по имени на любой глубине: структура файла может меняться."""
+    if isinstance(obj, dict):
+        for k, v in obj.items():
+            if k.lower() == needle:
+                return v
+            found = _find_key(v, needle)
+            if found is not None:
+                return found
+    elif isinstance(obj, list):
+        for item in obj:
+            found = _find_key(item, needle)
+            if found is not None:
+                return found
+    return None
+
+
+# ---------------------------------------------------------------------------
 # Замок по лимиту Pro
 # ---------------------------------------------------------------------------
 

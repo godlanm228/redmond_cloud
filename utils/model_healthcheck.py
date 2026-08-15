@@ -94,8 +94,35 @@ def check_models(config: Any) -> List[Tuple[str, str, str, str]]:
     return results
 
 
+def check_cipher_auth() -> Tuple[str, str]:
+    """(статус, деталь) авторизации Claude Code CLI.
+
+    Дешёвая проверка по файлу credentials — без запроса к API, значит без
+    траты общего с десктопом лимита Pro. Ловит ровно тот случай, который
+    случился 13–15.08.2026: авторизация исчезла, Cipher молча умер, и узнали
+    об этом только когда полезли проверять руками.
+    """
+    try:
+        from core.cipher_wrapper import auth_status
+        status = auth_status()
+    except Exception as e:  # noqa: BLE001
+        return UNAVAILABLE, f"проверка не отработала: {e}"
+    if not status["ok"]:
+        return GONE, status["reason"]
+    return (OK, status["reason"]) if status["reason"] else (OK, "")
+
+
 def run_and_log(config: Any) -> List[Tuple[str, str, str, str]]:
     """Прогнать проверку и написать итог в лог. Никогда не бросает."""
+    auth, detail = check_cipher_auth()
+    if auth == GONE:
+        logger.error("Cipher НЕ АВТОРИЗОВАН: %s. Пока это так, он не отвечает "
+                     "вообще — Влад узнает об этом, только обратившись к нему.", detail)
+    elif detail:
+        logger.warning("Cipher: %s", detail)
+    else:
+        logger.info("Cipher: авторизация в порядке")
+
     try:
         results = check_models(config)
     except Exception:
