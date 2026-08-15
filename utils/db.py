@@ -127,7 +127,7 @@ def _ensure_schema_once(conn: sqlite3.Connection, path: Path) -> None:
 # Схема
 # ---------------------------------------------------------------------------
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 _SCHEMA = """
 -- Цели и дедлайны: id остаётся сквозным, как в JSON (на него ссылаются tools).
@@ -222,6 +222,22 @@ CREATE TABLE IF NOT EXISTS chat_history (
     bot     TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_chat_history ON chat_history(chat_id, id);
+
+-- Сессии Cipher (Claude Code CLI). Каждое сообщение раньше запускало CLI
+-- заново: он не помнил ни предыдущего вопроса, ни собственного ответа, и на
+-- «Даю разрешение» не знал, что сам же просил. message_id — id его реплики в
+-- Telegram: ответ на неё однозначно указывает, какую сессию продолжать.
+CREATE TABLE IF NOT EXISTS cipher_sessions (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    chat_id    INTEGER NOT NULL,
+    session_id TEXT NOT NULL,
+    message_id INTEGER,
+    topic      TEXT NOT NULL DEFAULT '',
+    created    TEXT NOT NULL,
+    updated    TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_cipher_msg ON cipher_sessions(chat_id, message_id);
+CREATE INDEX IF NOT EXISTS idx_cipher_recent ON cipher_sessions(chat_id, updated);
 """
 
 

@@ -198,15 +198,19 @@ async def _generate(
     chat_id: int = 0,
     status_cb=None,
     force_tool: Optional[str] = None,
+    meta: Optional[dict] = None,
 ) -> str:
     """
     Вызывает response_generator для указанного агента.
     chat_id → per-chat history (изоляция Iris/Newser/Redmond контекстов).
     status_cb — живой статус из tool-loop; force_tool — принудительное
     делегирование (классификатор решил «research»). Cipher идёт через subprocess.
+    meta — необязательный словарь для побочных данных: Cipher кладёт туда
+    session_id, чтобы вызывающий привязал к сессии id отправленного сообщения
+    (реплай на него потом однозначно указывает, какой разговор продолжать).
     """
     if agent.executor == "cipher_subprocess":
-        return await _generate_cipher(user_text, context)
+        return await _generate_cipher(user_text, context, chat_id, meta)
 
     bot_data = context.application.bot_data
     dispatcher = bot_data["dispatcher"]
@@ -252,6 +256,7 @@ async def _generate_with_status(
     context: ContextTypes.DEFAULT_TYPE,
     chat_id: int,
     force_tool: Optional[str] = None,
+    meta: Optional[dict] = None,
 ) -> str:
     """
     Генерация + живой статус из РЕАЛЬНЫХ tool calls: первый вызов тула постит
@@ -290,7 +295,7 @@ async def _generate_with_status(
     try:
         response = await _generate(
             agent, user_text, context, chat_id,
-            status_cb=status_cb, force_tool=force_tool,
+            status_cb=status_cb, force_tool=force_tool, meta=meta,
         )
     finally:
         watcher.cancel()
@@ -408,10 +413,16 @@ async def _run_delegation(
         )
 
 
-async def _generate_cipher(user_text: str, context: ContextTypes.DEFAULT_TYPE) -> str:
+async def _generate_cipher(user_text: str, context: ContextTypes.DEFAULT_TYPE,
+                           chat_id: int = 0, meta: Optional[dict] = None) -> str:
     """Cipher = Claude Code CLI subprocess на VM (см. core/cipher_wrapper.py)."""
     from core.cipher_wrapper import run_cipher
-    return await run_cipher(user_text)
+    reply_to = (meta or {}).get("reply_to_message_id")
+    text, session_id = await run_cipher(user_text, chat_id=chat_id,
+                                        reply_to_message_id=reply_to)
+    if meta is not None:
+        meta["cipher_session"] = session_id
+    return text
 
 
 # ---------- Photo handler (скрин графика смен → расписание) ----------
@@ -787,8 +798,13 @@ async def slim_agent_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await coordinator.respond_as(agent.name, chat_id, mute_reply, agent.emoji, "plain")
         return
 
+    # Cipher: реплай на его сообщение — сигнал «продолжаем ЭТОТ разговор».
+    meta: dict = {"reply_to_message_id": getattr(
+        getattr(update.message, "reply_to_message", None), "message_id", None)}
+
     async with coordinator.typing(agent.name, chat_id):
-        response = await _generate_with_status(agent, clean_text, context, chat_id)
+        response = await _generate_with_status(agent, clean_text, context, chat_id,
+                                               meta=meta)
 
     state: RouterState = get_state(router_states, chat_id)
     state.add("user", clean_text, agent.name)
@@ -804,4 +820,22 @@ async def slim_agent_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
     state.add("assistant", response, agent.name)
     state.last_agent_name = agent.name
 
-    await coordinator.respond_as(agent.name, chat_id, response, agent.emoji, agent.output_format)
+    sent = await coordinator.respond_as(agent.name, chat_id, response, agent.emoji,
+                                        agent.output_format)
+
+    # Ответы Cipher идут мимо response_generator, поэтому в общую память их
+    # надо положить руками — иначе остальные агенты (и он сам) не видят, что
+    # он вообще отвечал. И привязываем сообщение к сессии для реплаев.
+    if agent.executor == "cipher_subprocess":
+        session_id = meta.get("cipher_session") or ""
+        if session_id and sent:
+            from core.cipher_wrapper import bind_message
+            await asyncio.to_thread(bind_message, chat_id, session_id, sent[-1])
+        try:
+            dispatcher = context.application.bot_data["dispatcher"]
+            await asyncio.to_thread(
+                dispatcher.response_generator.note_to_history,
+                chat_id, clean_text, response, agent.name,
+            )
+        except Exception:
+            logger.warning("Cipher: ответ не попал в память", exc_info=True)

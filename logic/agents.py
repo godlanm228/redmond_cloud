@@ -43,12 +43,19 @@ class AgentConfig:
 
     def _all_triggers(self) -> List[str]:
         """@-триггеры + имена-алиасы с разделителями (запятая/пробел/двоеточие).
-        Имена без знаков препинания не ловятся — иначе «iris это библиотека» поломалось бы."""
+        Имена без знаков препинания не ловятся — иначе «iris это библиотека» поломалось бы.
+
+        Сортировка по длине убыв. — обязательна. Без неё strip_trigger срезал
+        первое совпадение по списку: «@cipher_redberry_bot чек логи» матчилось
+        коротким «@cipher», и в задачу Claude уходило «_redberry_bot чек логи».
+        Так было у всех четырёх ботов, и Cipher видел этот мусор первым словом
+        каждого сообщения (12.08.2026).
+        """
         out = list(self.triggers)
         for alias in self.name_aliases:
             a = alias.lower()
             out.extend([f"{a},", f"{a} ", f"{a}:", f"{a}!", f"{a}?"])
-        return out
+        return sorted(out, key=len, reverse=True)
 
     def matches_trigger(self, text: str) -> bool:
         lower = text.lower().strip()
