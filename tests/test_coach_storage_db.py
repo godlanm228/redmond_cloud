@@ -22,9 +22,15 @@ if str(ROOT) not in sys.path:
 
 from logic import coach_storage
 from logic.week_schedule import (
+    apply_shifts,
+    describe_conflicts,
+    get_conflict_policy,
     get_shift,
     get_shift_record,
+    pending_conflicts,
+    resolve_pending_conflicts,
     save_shifts,
+    set_conflict_policy,
     shift_history,
 )
 from utils import db
@@ -414,13 +420,12 @@ class ShiftPriorityTests(unittest.TestCase):
         self.assertEqual(shift["start"], "16:00")
         self.assertEqual(shift["source"], "text")
 
-    def test_rejection_is_logged_with_reason(self):
+    def test_conflict_is_logged_with_reason(self):
         self._save("text", start="16:00")
         self._save("photo", start="18:00")
-        events = shift_history(self.D)
-        rejects = [e for e in events if e["action"] == "reject"]
-        self.assertEqual(len(rejects), 1)
-        self.assertIn("приоритет ниже", rejects[0]["reason"])
+        events = [e for e in shift_history(self.D) if e["action"] == "conflict"]
+        self.assertEqual(len(events), 1)
+        self.assertIn("расходится", events[0]["reason"])
 
     def test_identical_photo_confirmation_is_not_a_conflict(self):
         """Фото, подтверждающее известную смену, ничего не портит."""
@@ -436,6 +441,170 @@ class ShiftPriorityTests(unittest.TestCase):
     def test_unknown_source_does_not_override_photo(self):
         self._save("photo", start="18:00")
         self.assertEqual(self._save("unknown", start="09:00"), 0)
+
+
+class ShiftConflictQuestionTests(unittest.TestCase):
+    """Молча отклонить фото мало: Влад об этом не узнает и будет думать, что
+    график обновился. По умолчанию расхождение превращается в вопрос."""
+
+    D = "2026-08-25"
+    DD = date(2026, 8, 25)
+
+    def _text(self, start="16:00"):
+        return apply_shifts([{"date": self.D, "start": start, "end": "23:00",
+                              "source": "text", "status": "confirmed"}])
+
+    def _photo(self, start="18:00"):
+        return apply_shifts([{"date": self.D, "start": start, "end": "23:30",
+                              "source": "photo", "status": "planned"}])
+
+    def test_default_policy_is_ask(self):
+        self.assertEqual(get_conflict_policy(), "ask")
+
+    def test_conflict_is_reported_not_swallowed(self):
+        self._text()
+        result = self._photo()
+        self.assertEqual(result.saved, 0)
+        self.assertEqual(len(result.conflicts), 1)
+        self.assertEqual(result.conflicts[0].date, self.D)
+
+    def test_question_names_both_versions(self):
+        self._text()
+        text = describe_conflicts(self._photo().conflicts)
+        self.assertIn("18:00", text)   # что в графике
+        self.assertIn("16:00", text)   # что сказал Влад
+        self.assertIn("вт 25.08", text)
+
+    def test_no_question_when_photo_agrees(self):
+        self._text(start="16:00")
+        result = apply_shifts([{"date": self.D, "start": "16:00", "end": "23:00",
+                                "source": "photo", "status": "confirmed"}])
+        self.assertEqual(result.conflicts, [])
+        self.assertEqual(result.saved, 1)
+
+    def test_no_question_when_nothing_was_said_before(self):
+        result = self._photo()
+        self.assertEqual(result.conflicts, [])
+        self.assertEqual(result.saved, 1)
+
+    def test_pending_survives_until_answered(self):
+        self._text()
+        self._photo()
+        self.assertEqual(len(pending_conflicts()), 1)
+
+    def test_answer_photo_applies_it(self):
+        self._text()
+        self._photo()
+        applied = resolve_pending_conflicts("photo")
+        self.assertEqual(applied, 1)
+        self.assertEqual(get_shift(self.DD)["start"], "18:00")
+        self.assertEqual(pending_conflicts(), [])
+
+    def test_answer_photo_is_stored_as_manual(self):
+        """Решение владельца — не догадка машины: следующее фото его не тронет."""
+        self._text()
+        self._photo()
+        resolve_pending_conflicts("photo")
+        self.assertEqual(get_shift(self.DD)["source"], "manual")
+        result = apply_shifts([{"date": self.D, "start": "20:00", "end": "23:00",
+                                "source": "photo"}])
+        self.assertEqual(result.saved, 0)
+
+    def test_answer_mine_keeps_correction(self):
+        self._text()
+        self._photo()
+        self.assertEqual(resolve_pending_conflicts("mine"), 0)
+        self.assertEqual(get_shift(self.DD)["start"], "16:00")
+        self.assertEqual(pending_conflicts(), [])
+
+    def test_answer_mine_is_logged(self):
+        self._text()
+        self._photo()
+        resolve_pending_conflicts("mine")
+        reasons = [e["reason"] for e in shift_history(self.D)]
+        self.assertTrue(any("оставил свою версию" in (r or "") for r in reasons))
+
+    def test_remember_photo_stops_asking(self):
+        self._text()
+        self._photo()
+        resolve_pending_conflicts("photo", remember=True)
+        self.assertEqual(get_conflict_policy(), "photo_wins")
+        result = apply_shifts([{"date": "2026-08-26", "start": "09:00",
+                                "end": "17:00", "source": "text"}])
+        self.assertEqual(result.saved, 1)
+        second = apply_shifts([{"date": "2026-08-26", "start": "10:00",
+                                "end": "18:00", "source": "photo"}])
+        self.assertEqual(second.conflicts, [])
+        self.assertEqual(second.saved, 1)
+
+    def test_remember_mine_stops_asking_and_keeps_correction(self):
+        self._text()
+        self._photo()
+        resolve_pending_conflicts("mine", remember=True)
+        self.assertEqual(get_conflict_policy(), "keep_mine")
+        result = self._photo(start="19:00")
+        self.assertEqual(result.conflicts, [])
+        self.assertEqual(result.saved, 0)
+        self.assertEqual(get_shift(self.DD)["start"], "16:00")
+
+    def test_unknown_policy_falls_back_to_ask(self):
+        set_conflict_policy("что-то странное")
+        self.assertEqual(get_conflict_policy(), "ask")
+
+    def test_resolve_without_pending_is_safe(self):
+        self.assertEqual(resolve_pending_conflicts("photo"), 0)
+
+    def test_batch_reports_every_conflicting_day(self):
+        for d in ("2026-08-27", "2026-08-28"):
+            apply_shifts([{"date": d, "start": "16:00", "end": "23:00",
+                           "source": "text"}])
+        result = apply_shifts([
+            {"date": "2026-08-27", "start": "18:00", "end": "23:30", "source": "photo"},
+            {"date": "2026-08-28", "start": "19:00", "end": "23:30", "source": "photo"},
+            {"date": "2026-08-29", "start": "17:00", "end": "23:00", "source": "photo"},
+        ])
+        self.assertEqual(result.saved, 1)          # свободный день записался
+        self.assertEqual(len(result.conflicts), 2)  # два дня спорные
+        self.assertEqual(len(pending_conflicts()), 2)
+
+
+class ConflictToolTests(unittest.TestCase):
+    """Ответ приходит словами в чат, значит должен работать через tool."""
+
+    D = "2026-08-25"
+
+    def setUp(self):
+        from logic.tools import execute_tool
+        self.run = execute_tool
+        apply_shifts([{"date": self.D, "start": "16:00", "end": "23:00",
+                       "source": "text", "status": "confirmed"}])
+        apply_shifts([{"date": self.D, "start": "18:00", "end": "23:30",
+                       "source": "photo", "status": "planned"}])
+
+    def test_take_photo_applies(self):
+        reply = self.run("resolve_shift_conflict", {"take": "photo"})
+        self.assertIn("Принял график", reply)
+        self.assertEqual(get_shift(date(2026, 8, 25))["start"], "18:00")
+
+    def test_take_mine_keeps(self):
+        reply = self.run("resolve_shift_conflict", {"take": "mine"})
+        self.assertIn("Оставил", reply)
+        self.assertEqual(get_shift(date(2026, 8, 25))["start"], "16:00")
+
+    def test_always_sets_policy(self):
+        self.run("resolve_shift_conflict", {"take": "photo", "always": True})
+        self.assertEqual(get_conflict_policy(), "photo_wins")
+
+    def test_without_always_policy_stays_ask(self):
+        self.run("resolve_shift_conflict", {"take": "photo"})
+        self.assertEqual(get_conflict_policy(), "ask")
+
+    def test_bad_argument_is_reported(self):
+        self.assertIn("Неясно", self.run("resolve_shift_conflict", {"take": "хз"}))
+
+    def test_no_pending_says_so(self):
+        self.run("resolve_shift_conflict", {"take": "mine"})
+        self.assertIn("нет", self.run("resolve_shift_conflict", {"take": "mine"}))
 
 
 class ShiftBehaviourTests(unittest.TestCase):
