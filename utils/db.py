@@ -225,9 +225,32 @@ CREATE INDEX IF NOT EXISTS idx_chat_history ON chat_history(chat_id, id);
 """
 
 
+# Колонки, добавленные в уже существующие таблицы. CREATE TABLE IF NOT EXISTS
+# на живой базе не срабатывает вообще, поэтому новые поля надо доливать явно —
+# иначе на проде, где таблица создана прошлой версией схемы, вставка падает на
+# отсутствующей колонке. Формат: (таблица, колонка, определение).
+_ADDED_COLUMNS = [
+    ("diary", "data", "TEXT"),          # v3: структурная нагрузка записи
+]
+
+
+def _add_missing_columns(conn: sqlite3.Connection) -> None:
+    for table, column, decl in _ADDED_COLUMNS:
+        exists = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)
+        ).fetchone()
+        if not exists:
+            continue  # таблицу создаст _SCHEMA уже с этой колонкой
+        columns = {r["name"] for r in conn.execute(f"PRAGMA table_info({table})")}
+        if column not in columns:
+            logger.info("Схема: добавляю %s.%s", table, column)
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
+
+
 def init_schema(conn: sqlite3.Connection) -> None:
-    """Идемпотентно: создаёт недостающие таблицы, поднимает user_version.
+    """Идемпотентно: создаёт недостающие таблицы и колонки, поднимает user_version.
     Вызывается под _schema_lock из _ensure_schema_once (или напрямую в тестах)."""
+    _add_missing_columns(conn)
     conn.executescript(_SCHEMA)
     version = conn.execute("PRAGMA user_version").fetchone()[0]
     if version < SCHEMA_VERSION:
