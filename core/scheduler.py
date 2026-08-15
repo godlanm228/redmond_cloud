@@ -240,6 +240,45 @@ async def evening_summary(
     await _generate_and_send(dispatcher, coordinator, chat_id, IRIS_EVENING, prompt, router_states)
 
 
+async def cipher_auth_watch(
+    dispatcher: Dispatcher,
+    coordinator: Coordinator,
+    chat_id: int,
+    router_states: Optional[dict] = None,
+) -> None:
+    """Ежедневная проверка, жив ли Cipher.
+
+    13–15.08.2026 он был мёртв трое суток: авторизация на VM исчезла, а узнали
+    об этом случайно. Пользователь такое замечает, только когда сам обратится
+    и получит отказ — то есть в худший момент.
+
+    Пишем в чат ТОЛЬКО когда есть проблема: сломано или скоро сломается.
+    Молчание здесь — это «всё хорошо», и оно ничего не стоит.
+    """
+    from utils.model_healthcheck import GONE, check_cipher_auth
+
+    status, detail = check_cipher_auth()
+    if status != GONE and not detail:
+        logger.info("Cipher auth watch: в порядке")
+        return
+
+    if status == GONE:
+        text = (f"🧠 Cipher не отвечает: {detail}.\n"
+                f"Починить: `ssh` на VM → команда `claude` → `/login`.")
+        logger.error("Cipher auth watch: %s", detail)
+    else:
+        text = f"🧠 Cipher скоро отвалится: {detail}."
+        logger.warning("Cipher auth watch: %s", detail)
+
+    # Это не проактивный пинг «как дела», а сообщение о сломанном инструменте —
+    # шлём даже при мягком mute. Полную тишину (scope='all') всё же уважаем.
+    from logic.coach_storage import hard_muted_now
+    if hard_muted_now():
+        logger.info("Cipher auth watch: полная тишина, сообщение не отправляю")
+        return
+    await coordinator.respond_as("Cipher", chat_id, text, "🧠", "plain")
+
+
 # ---------- сборка ----------
 
 def setup_scheduler(
@@ -269,6 +308,10 @@ def setup_scheduler(
                   id="evening_summary", coalesce=True, misfire_grace_time=3600)
     sched.add_job(day_ticker, CronTrigger(hour="10-22", minute="0,30", timezone=tz), args=args,
                   id="day_ticker", coalesce=True, misfire_grace_time=600)
+    # Молчит, пока всё в порядке. Говорит, только если Cipher сломан или скоро
+    # сломается — чтобы это не выяснялось в момент, когда он реально нужен.
+    sched.add_job(cipher_auth_watch, CronTrigger(hour=9, minute=10, timezone=tz), args=args,
+                  id="cipher_auth_watch", coalesce=True, misfire_grace_time=3600)
 
     # Диагностика: явно логируем выполнение/пропуск/ошибку джоб. Раньше misfire
     # был невидим (apscheduler-логгер подавлен), причину сбоя нельзя было понять.

@@ -206,3 +206,86 @@ class LockTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class AuthStatusTests(unittest.TestCase):
+    """13–15.08.2026 Cipher был мёртв трое суток, и это никак не всплывало."""
+
+    def setUp(self):
+        import tempfile
+        self.tmp = tempfile.TemporaryDirectory()
+        self.path = Path(self.tmp.name) / ".credentials.json"
+        self._orig = cw.CREDENTIALS_PATH
+        cw.CREDENTIALS_PATH = self.path
+
+    def tearDown(self):
+        cw.CREDENTIALS_PATH = self._orig
+        self.tmp.cleanup()
+
+    def _write(self, payload):
+        import json as _json
+        self.path.write_text(_json.dumps(payload), encoding="utf-8")
+
+    @staticmethod
+    def _in_days(days):
+        from datetime import datetime as _dt
+        return int((_dt.now() + timedelta(days=days)).timestamp() * 1000)
+
+    def test_missing_file_is_the_reported_failure(self):
+        status = cw.auth_status()
+        self.assertFalse(status["ok"])
+        self.assertIn("/login", status["reason"])
+
+    def test_healthy_token_is_ok_and_quiet(self):
+        self._write({"claudeAiOauth": {"refreshTokenExpiresAt": self._in_days(28)}})
+        status = cw.auth_status()
+        self.assertTrue(status["ok"])
+        self.assertEqual(status["reason"], "")
+
+    def test_expiring_soon_warns_without_breaking(self):
+        self._write({"claudeAiOauth": {"refreshTokenExpiresAt": self._in_days(2)}})
+        status = cw.auth_status()
+        self.assertTrue(status["ok"])
+        self.assertIn("/login", status["reason"])
+
+    def test_expired_refresh_is_a_failure(self):
+        self._write({"claudeAiOauth": {"refreshTokenExpiresAt": self._in_days(-1)}})
+        self.assertFalse(cw.auth_status()["ok"])
+
+    def test_unreadable_file_is_a_failure(self):
+        self.path.write_text("{битый", encoding="utf-8")
+        self.assertFalse(cw.auth_status()["ok"])
+
+    def test_unknown_format_does_not_cry_wolf(self):
+        """Формат файла сменится — это не повод объявлять Cipher мёртвым."""
+        self._write({"что-то": "новое"})
+        status = cw.auth_status()
+        self.assertTrue(status["ok"])
+
+    def test_seconds_timestamps_also_understood(self):
+        from datetime import datetime as _dt
+        secs = int((_dt.now() + timedelta(days=20)).timestamp())
+        self._write({"claudeAiOauth": {"refreshTokenExpiresAt": secs}})
+        self.assertTrue(cw.auth_status()["ok"])
+        self.assertGreater(cw.auth_status()["expires_in_days"], 19)
+
+    def test_healthcheck_maps_missing_to_gone(self):
+        from utils.model_healthcheck import GONE, check_cipher_auth
+        status, detail = check_cipher_auth()
+        self.assertEqual(status, GONE)
+        self.assertIn("/login", detail)
+
+    def test_healthcheck_maps_healthy_to_ok(self):
+        from utils.model_healthcheck import OK, check_cipher_auth
+        self._write({"claudeAiOauth": {"refreshTokenExpiresAt": self._in_days(28)}})
+        status, _ = check_cipher_auth()
+        self.assertEqual(status, OK)
+
+    def test_token_values_are_never_read(self):
+        """Читаем только сроки. Токены в память не тянем — незачем."""
+        self._write({"claudeAiOauth": {"accessToken": "СЕКРЕТ",
+                                       "refreshToken": "ТОЖЕ-СЕКРЕТ",
+                                       "refreshTokenExpiresAt": self._in_days(10)}})
+        status = cw.auth_status()
+        self.assertNotIn("СЕКРЕТ", repr(status))
+        self.assertNotIn("ТОЖЕ-СЕКРЕТ", repr(status))
