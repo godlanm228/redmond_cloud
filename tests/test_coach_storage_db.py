@@ -495,6 +495,66 @@ class ShiftBehaviourTests(unittest.TestCase):
         self.assertEqual(n, 2)
 
 
+class LegacyShiftCompatibilityTests(unittest.TestCase):
+    """Смены июня лежали в JSON без метаданных: только start/end.
+
+    Миграция подставляет им status='planned', source='unknown', confidence=
+    'medium', updated=''. Старый код на отсутствующих полях подставлял свои
+    дефолты — 'planned', 'legacy', 'medium'. Значения разные, решения должны
+    совпадать: 'unknown' и 'legacy' обрабатываются одной веткой, а пустой
+    updated парсится в None ровно как отсутствующий.
+    """
+
+    DS = "2026-06-26"
+    D = date(2026, 6, 26)
+
+    def _insert_legacy(self):
+        db.execute(
+            "INSERT INTO shifts(date, start, end, status, source, confidence, updated)"
+            " VALUES(?,?,?,?,?,?,?)",
+            (self.DS, "18:00", "00:00", "planned", "unknown", "medium", ""),
+        )
+
+    def test_legacy_shift_is_active(self):
+        self._insert_legacy()
+        self.assertIsNotNone(get_shift(self.D))
+
+    def test_empty_updated_parses_as_absent(self):
+        from logic.situation_engine import _parse_iso
+        self.assertIsNone(_parse_iso(""))
+        self.assertIsNone(_parse_iso(None))
+
+    @staticmethod
+    def _situation(now, **over):
+        """Смена через два часа — внутри окна, в котором вопрос уместен."""
+        from logic.situation_engine import ShiftSituation
+        record = {"start": "18:00", "end": "00:00"}
+        params = dict(record=record, active_record=record,
+                      start_at=now + timedelta(hours=2), end_at=now + timedelta(hours=8),
+                      status="planned", source="unknown", confidence="medium",
+                      updated_at=None, confirmed_at=None)
+        params.update(over)
+        return ShiftSituation(**params)
+
+    def test_unknown_source_needs_confirmation_like_legacy(self):
+        now = datetime.now().astimezone()
+        for source in ("", "unknown", "legacy"):
+            self.assertTrue(
+                self._situation(now, source=source).needs_confirmation(now), source)
+
+    def test_confirmed_text_shift_does_not_need_confirmation(self):
+        now = datetime.now().astimezone()
+        sit = self._situation(now, status="confirmed", source="text",
+                              confidence="high", updated_at=now, confirmed_at=now)
+        self.assertFalse(sit.needs_confirmation(now))
+
+    def test_fresh_text_shift_outside_window_is_not_asked(self):
+        now = datetime.now().astimezone()
+        sit = self._situation(now, source="text", confidence="high",
+                              updated_at=now, start_at=now + timedelta(hours=10))
+        self.assertFalse(sit.needs_confirmation(now))
+
+
 class ConcurrencyTests(unittest.TestCase):
     def test_parallel_diary_writes_keep_unique_ids(self):
         n = 16
