@@ -127,7 +127,7 @@ def _ensure_schema_once(conn: sqlite3.Connection, path: Path) -> None:
 # Схема
 # ---------------------------------------------------------------------------
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 6
 
 _SCHEMA = """
 -- Цели и дедлайны: id остаётся сквозным, как в JSON (на него ссылаются tools).
@@ -238,6 +238,33 @@ CREATE TABLE IF NOT EXISTS cipher_sessions (
 );
 CREATE INDEX IF NOT EXISTS idx_cipher_msg ON cipher_sessions(chat_id, message_id);
 CREATE INDEX IF NOT EXISTS idx_cipher_recent ON cipher_sessions(chat_id, updated);
+
+-- Архив разбора фото. 12.08.2026 на вопрос «почему скрин распознался криво»
+-- ответить было нечем: картинка не сохранялась, в лог падало только
+-- «type=shift_schedule, shifts=5». Теперь хранится и файл, и сырой ответ
+-- модели, и что из него в итоге записали.
+-- sha256 — дедуп: одно и то же фото не ложится на диск дважды.
+CREATE TABLE IF NOT EXISTS vision_results (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts          TEXT NOT NULL,
+    chat_id     INTEGER NOT NULL DEFAULT 0,
+    sha256      TEXT NOT NULL,
+    file_path   TEXT NOT NULL,
+    bytes       INTEGER NOT NULL DEFAULT 0,
+    kind        TEXT NOT NULL DEFAULT '',      -- food | shift_schedule | other | …
+    description TEXT NOT NULL DEFAULT '',
+    tags        TEXT NOT NULL DEFAULT '[]',    -- JSON: для поиска «кинь тот график»
+    model       TEXT NOT NULL DEFAULT '',
+    raw         TEXT NOT NULL DEFAULT '{}',    -- JSON: полный ответ модели
+    applied     TEXT NOT NULL DEFAULT '',      -- что записали по итогу
+    label       TEXT NOT NULL DEFAULT '',      -- как Влад сам назвал фото
+    -- Нормализованная строка для поиска: описание + теги + метка в нижнем
+    -- регистре. Отдельная колонка нужна потому, что SQL LOWER() в SQLite
+    -- умеет только ASCII — «Оливье» он не опускает, и LIKE '%оливье%' мимо.
+    search_text TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_vision_ts ON vision_results(ts);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_vision_sha ON vision_results(sha256);
 """
 
 
@@ -246,7 +273,8 @@ CREATE INDEX IF NOT EXISTS idx_cipher_recent ON cipher_sessions(chat_id, updated
 # иначе на проде, где таблица создана прошлой версией схемы, вставка падает на
 # отсутствующей колонке. Формат: (таблица, колонка, определение).
 _ADDED_COLUMNS = [
-    ("diary", "data", "TEXT"),          # v3: структурная нагрузка записи
+    ("diary", "data", "TEXT"),                                   # v3
+    ("vision_results", "search_text", "TEXT NOT NULL DEFAULT ''"),  # v6
 ]
 
 

@@ -458,6 +458,14 @@ async def redmond_photo_handler(update: Update, context: ContextTypes.DEFAULT_TY
         )
     logger.info("Vision: type=%s, shifts=%d", result.get("type"), len(result.get("shifts") or []))
 
+    # Архив: фото + полный ответ модели. Без него на вопрос «почему распознал
+    # криво» отвечать нечем — 12.08 в логе была ровно одна строка про тип.
+    from utils import vision_archive
+    from utils.gemini import DEFAULT_MODEL
+    archive_id = await asyncio.to_thread(
+        vision_archive.save, raw, result, chat_id, DEFAULT_MODEL,
+    )
+
     # Описание фото → в историю чата, чтобы последующие текстовые вопросы
     # («что на фото?») имели контекст и модель не галлюцинировала (кейс «ракумаки»).
     vdesc = result.get("description") or ""
@@ -488,6 +496,9 @@ async def redmond_photo_handler(update: Update, context: ContextTypes.DEFAULT_TY
         ]
         outcome = await asyncio.to_thread(apply_shifts, shift_items)
         n = outcome.saved
+        await asyncio.to_thread(
+            vision_archive.set_applied, archive_id,
+            f"смен сохранено: {n}, спорных: {len(outcome.conflicts)}")
         saved_dates = {c.date for c in outcome.conflicts}
         await coordinator.respond_as(
             "Redmond", chat_id,
@@ -558,6 +569,8 @@ async def redmond_photo_handler(update: Update, context: ContextTypes.DEFAULT_TY
 
         async with coordinator.typing(iris.name, chat_id):
             resp = await _generate_with_status(iris, prompt, context, chat_id)
+        await asyncio.to_thread(vision_archive.set_applied, archive_id,
+                                f"еда: {food_kind}")
         if not resp.startswith(DELEGATION_MARKER):
             await coordinator.respond_as(iris.name, chat_id, resp, iris.emoji, iris.output_format)
         # Sticky → Iris: текстовый follow-up после фото-еды держим за ней.
@@ -568,6 +581,7 @@ async def redmond_photo_handler(update: Update, context: ContextTypes.DEFAULT_TY
 
     # 3. Что угодно ещё → Redmond описывает, что видит (без вранья «не вижу картинок»)
     desc = result.get("description") or "Вижу картинку, но не пойму, что именно на ней."
+    await asyncio.to_thread(vision_archive.set_applied, archive_id, "ничего не записано")
     await coordinator.respond_as("Redmond", chat_id, desc, "🦞", "plain")
 
 

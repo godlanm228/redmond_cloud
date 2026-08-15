@@ -586,6 +586,30 @@ TOOL_SCHEMAS = [
     {
         "type": "function",
         "function": {
+            "name": "find_photo",
+            "description": (
+                "Find a photo the owner sent earlier, by meaning or by the label he gave "
+                "it. Use for «кинь тот график, что я скидывал», «что было на том скрине», "
+                "«найди фото еды за прошлую неделю». Returns what was recognised and "
+                "what was recorded from it — say it in words; the file itself is not "
+                "attached automatically."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "What to look for: «график смен», «оливье», «заработок»",
+                    },
+                    "limit": {"type": "integer", "description": "How many, 1-5", "default": 3},
+                },
+                "required": ["query"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "resolve_shift_conflict",
             "description": (
                 "Answer the pending question about a schedule photo that contradicts what "
@@ -779,6 +803,8 @@ def execute_tool(name: str, args: Dict[str, Any], rg=None) -> str:
         return _tool_set_work_shift_status(args)
     if name == "resolve_shift_conflict":
         return _tool_resolve_shift_conflict(args)
+    if name == "find_photo":
+        return _tool_find_photo(args)
     if name == "get_week_plan":
         from logic.coach_storage import get_week_plan
         plan = get_week_plan()
@@ -1061,6 +1087,33 @@ def _tool_set_work_shift_status(args: Dict[str, Any]) -> str:
 
     coach_storage.add_diary_entry(text, tags=["работа"], data={"date": shift_date, "status": status})
     return reply
+
+
+def _tool_find_photo(args: Dict[str, Any]) -> str:
+    """Поиск по архиву разборов фото.
+
+    До 15.08.2026 присланные фото нигде не хранились: «кинь тот график» было
+    невыполнимо, а «почему распознал криво» — непроверяемо.
+    """
+    from utils import vision_archive
+
+    query = str(args.get("query") or "").strip()
+    try:
+        limit = max(1, min(int(args.get("limit") or 3), 5))
+    except (TypeError, ValueError):
+        limit = 3
+    found = vision_archive.search(query, limit=limit)
+    if not found:
+        return f"По «{query}» в архиве фото ничего нет."
+
+    lines = []
+    for r in found:
+        when = str(r["ts"])[:16].replace("T", " ")
+        label = f" «{r['label']}»" if r["label"] else ""
+        applied = f" · записано: {r['applied']}" if r["applied"] else ""
+        gone = "" if r["exists"] else " · файл уже удалён по сроку, остался разбор"
+        lines.append(f"[{r['id']}] {when}{label} — {r['description'][:110]}{applied}{gone}")
+    return "Нашла в архиве:\n" + "\n".join(lines)
 
 
 def _tool_resolve_shift_conflict(args: Dict[str, Any]) -> str:

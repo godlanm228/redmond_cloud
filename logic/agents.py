@@ -122,6 +122,7 @@ IRIS = AgentConfig(
         "add_deadline", "list_deadlines", "mark_deadline_done", "delete_deadline", "postpone_deadline",
         "mute_notifications", "get_week_schedule", "save_work_shift", "set_work_shift_status",
         "resolve_shift_conflict",  # ответ на «бери с фото» / «оставь как есть»
+        "find_photo",  # «кинь тот график, что я скидывал»
         "get_week_plan", "save_week_plan",
         "delegate_research",  # внешние факты для советов — через Newser, не гадать
     ],
