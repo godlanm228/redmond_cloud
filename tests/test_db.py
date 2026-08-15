@@ -62,6 +62,60 @@ class SchemaTests(DbTestBase):
         self.assertEqual(mode.lower(), "wal")
 
 
+class SchemaUpgradeTests(DbTestBase):
+    """Апгрейд БОЕВОЙ базы, созданной прошлой версией схемы.
+
+    CREATE TABLE IF NOT EXISTS на существующей таблице не делает ничего, так что
+    новые колонки надо доливать явно. Без этого на проде, где diary создана
+    схемой v2, первая же запись с data падала бы на отсутствующей колонке.
+    """
+
+    def _make_old_diary(self):
+        db.close_all()
+        Path("data").mkdir(parents=True, exist_ok=True)
+        conn = sqlite3.connect("data/hub-test.sqlite")
+        conn.executescript(
+            "CREATE TABLE diary (id INTEGER PRIMARY KEY, ts TEXT NOT NULL,"
+            " text TEXT NOT NULL, tags TEXT NOT NULL DEFAULT '[]');"
+            "INSERT INTO diary(id, ts, text, tags)"
+            " VALUES(1,'2026-08-12T21:53','Поел салат','[\"питание\"]');"
+            "PRAGMA user_version=2;"
+        )
+        conn.commit()
+        conn.close()
+
+    def test_missing_column_is_added(self):
+        self._make_old_diary()
+        columns = {r["name"] for r in db.query("PRAGMA table_info(diary)")}
+        self.assertIn("data", columns)
+
+    def test_existing_rows_survive_upgrade(self):
+        self._make_old_diary()
+        row = db.query_one("SELECT * FROM diary WHERE id=1")
+        self.assertEqual(row["text"], "Поел салат")
+        self.assertIsNone(row["data"])
+
+    def test_version_is_raised(self):
+        self._make_old_diary()
+        self.assertEqual(db.query_one("PRAGMA user_version")[0], db.SCHEMA_VERSION)
+
+    def test_write_with_data_works_after_upgrade(self):
+        self._make_old_diary()
+        from logic import coach_storage
+        entry = coach_storage.add_diary_entry(
+            "Поел: Оливье", tags=["питание"], data={"dish": "Оливье"})
+        self.assertEqual(coach_storage.read_diary(last_n=1)[0]["data"],
+                         {"dish": "Оливье"})
+        self.assertEqual(entry["id"], 2)
+
+    def test_upgrade_is_idempotent(self):
+        self._make_old_diary()
+        db.init_schema(db.connect())
+        db.init_schema(db.connect())
+        columns = [r["name"] for r in db.query("PRAGMA table_info(diary)")]
+        self.assertEqual(columns.count("data"), 1)
+
+
 class KvTests(DbTestBase):
     def test_roundtrip(self):
         db.kv_set("mute", {"until": "2026-08-20T10:00", "scope": "pings"})
