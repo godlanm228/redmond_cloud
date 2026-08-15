@@ -14,7 +14,7 @@ Multi-agent Telegram-хаб на Oracle Cloud Free VM (`203.0.113.10`). 4 бот
 | 🦞 Redmond | `@redmond_hub_bot` | Listener + router + общий ассистент | Groq `gpt-oss-120b` |
 | 🎯 Iris | `@iris_redberry_bot` | Коуч/трекер (goals/diary/deadlines) | то же |
 | 📰 Newser | `@newser_redmond_bot` | Searcher + новости с источниками | то же |
-| 🧠 Cipher | `@cipher_redberry_bot` | Claude Code через Pro (stub) | subprocess |
+| 🧠 Cipher | `@cipher_redberry_bot` | Claude Code через Pro | subprocess + сессии |
 
 Fallback при rate_limit / tool_use_failed: `qwen/qwen3.6-27b` (предыдущий
 `qwen/qwen3-32b` Groq снёс — 404 `model_not_found`, чинили 13.08.2026).
@@ -87,30 +87,44 @@ Template — `.env.example`.
 
 **НЕ использовать `scp`** для деплоя кода. Только git. Исключение — заливка ключей в `.env` (одноразово) или больших не-git артефактов.
 
+> **Если ты Cipher — ты УЖЕ на этой VM.** Команды ниже с `ssh` предназначены
+> для запуска с ноутбука. Изнутри VM никакой ssh не нужен: работай локально.
+> До 15.08.2026 здесь был раздел про `nohup` и `/tmp/v2.log`, и Cipher по нему
+> честно пытался заssh-иться сам в себя с виндовым путём к ключу.
+
 ```bash
-# SSH
-ssh -i "C:/Users/Vlad/Downloads/oracle-key.key" ubuntu@203.0.113.10
+# SSH с ноутбука (ключ: C:\Users\you\.ssh\oracle-key.key)
+ssh -i "C:/Users/you/.ssh/oracle-key.key" ubuntu@203.0.113.10
 
-# Подтянуть изменения и рестартануть
-ssh -i "..." ubuntu@203.0.113.10 "cd ~/redmond-hub && git pull && pkill -f cloud_main_v2; sleep 2; \
-   set -a && . .env && set +a && \
-   nohup ./venv/bin/python cloud_main_v2.py > /tmp/v2.log 2>&1 & disown"
+# Деплой: git pull + рестарт systemd-юнита
+ssh -i "..." ubuntu@203.0.113.10 "cd ~/redmond-hub && git pull && \
+   sudo systemctl restart redmond-hub.service"
 
-# Логи
-ssh -i "..." ubuntu@203.0.113.10 "tail -50 /tmp/v2.log"
+# Логи (пишутся сервисом, файл под root:ubuntu)
+ssh -i "..." ubuntu@203.0.113.10 "sudo tail -50 ~/redmond-hub/logs/v2.log"
+
+# Тесты (pytest стоит в venv)
+ssh -i "..." ubuntu@203.0.113.10 "cd ~/redmond-hub && ./venv/bin/python -m pytest tests/ -q"
 ```
+
+**Сервис:** `redmond-hub.service` (systemd, enabled — автостарт после ребута).
+Ручной `nohup` больше не используется.
+
+**Данные:** `data/memory.sqlite` — единая база (coach-данные, история чата,
+память с FTS5, сессии Cipher). `data/coach/*.json` — замороженный архив до
+миграции 15.08.2026, живыми данными НЕ является. Бэкап — ежедневно в 04:30
+через `deploy/backup_db.sh` (VACUUM INTO, 14 снимков в `~/backups/db/`).
 
 **Github SSH:** VM имеет deploy key (`~/.ssh/github_deploy` + `~/.ssh/config` маппит github.com на этот ключ). Read-only. Добавлен в `repo Settings → Deploy keys → "Oracle VM redmond-hub"`.
 
 **Что НЕ коммитится (gitignored, живёт только на VM):**
 - `.env` — секреты
 - `venv/` — Python venv
-- `data/` — runtime SQLite + JSON storage (memory, coach goals/diary, search usage, owner_dossier)
+- `data/` — runtime SQLite (memory.sqlite: coach, история, память, сессии Cipher) + owner_dossier
 - `config/owner_profile.json` — мутируется Iris в runtime
 
 При первичной инициализации VM или восстановлении из backup — эти файлы перенести руками поверх `git clone`.
 
-**TODO (не критично):** systemd unit для автостарта вместо ручного nohup.
 
 ## Правила поведения LLM (НЕ хардкодить в код — это для меня)
 

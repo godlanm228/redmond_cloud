@@ -20,7 +20,7 @@ import contextlib
 import html
 import logging
 import re
-from typing import AsyncIterator, Dict, Optional
+from typing import AsyncIterator, Dict, List, Optional
 
 from telegram import Bot
 from telegram.constants import ChatAction, ParseMode
@@ -192,21 +192,26 @@ class Coordinator:
         text: str,
         emoji: str = "",
         output_format: str = "plain",
-    ) -> None:
+    ) -> List[int]:
         """
         Отправить сообщение от имени указанного агента (его токеном).
+
+        Возвращает id отправленных сообщений (длинный текст режется на куски).
+        Нужно, чтобы связать реплай Влада с конкретной сессией Cipher: ответ на
+        сообщение — самый точный сигнал «продолжаем этот разговор».
 
         output_format:
           "plain" — markdown снимается, отправка без parse_mode
           "html"  — [text](url) → <a>, голые URL → <a>, остальное HTML-escape,
                     отправка с parse_mode=HTML (ссылки кликабельные)
         """
+        sent: List[int] = []
         bot = self.bots.get(agent_name)
         if bot is None:
             logger.error("Coordinator: no bot registered for agent %r", agent_name)
-            return
+            return sent
         if not text or not text.strip():
-            return
+            return sent
 
         prefix = f"{emoji} " if emoji else ""
         parse_mode = None
@@ -219,12 +224,14 @@ class Coordinator:
 
         for chunk in _chunk(body, 4000):
             try:
-                await bot.send_message(
+                msg = await bot.send_message(
                     chat_id=chat_id,
                     text=chunk,
                     parse_mode=parse_mode,
                     disable_web_page_preview=True,
                 )
+                if getattr(msg, "message_id", None):
+                    sent.append(msg.message_id)
             except Exception:
                 logger.exception(
                     "Coordinator: send failed for %s → chat %s (format=%s)",
@@ -235,7 +242,10 @@ class Coordinator:
                     try:
                         plain_body = prefix + _clean_markdown_plain(text)
                         for c in _chunk(plain_body, 4000):
-                            await bot.send_message(chat_id=chat_id, text=c)
+                            m = await bot.send_message(chat_id=chat_id, text=c)
+                            if getattr(m, "message_id", None):
+                                sent.append(m.message_id)
                     except Exception:
                         logger.exception("Coordinator: plain fallback also failed")
-                return
+                return sent
+        return sent
