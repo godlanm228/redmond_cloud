@@ -312,16 +312,28 @@ class MemoryStore:
             logger.warning("FTS-поиск не отработал (%s) — уходим на LIKE", e)
             return []
 
+    @staticmethod
+    def _ci_lower(value: Optional[str]) -> str:
+        """Регистронезависимое приведение для SQL.
+
+        Нужна СВОЯ функция: встроенный LOWER() в SQLite опускает только ASCII,
+        «Оливье» он оставляет как есть — и LIKE '%оливье%' проходит мимо. По-русски
+        такой поиск не работал вообще, а вся переписка тут русская.
+        """
+        return (value or "").lower()
+
     def _search_like(self, query: str, top_k: int) -> List[Dict[str, Any]]:
         """Последний эшелон: SQL LIKE. Сборка SQLite без FTS5 или пустой индекс."""
         if not query.strip():
             return []
         like = f"%{query.strip().lower()}%"
+        # Регистрацию делаем на каждом соединении: оно может быть новым.
+        self.conn.create_function("ci_lower", 1, self._ci_lower, deterministic=True)
         cursor = self.conn.execute(
             """
             SELECT id, user, bot, timestamp
             FROM memory
-            WHERE LOWER(user) LIKE ? OR LOWER(bot) LIKE ?
+            WHERE ci_lower(user) LIKE ? OR ci_lower(bot) LIKE ?
             ORDER BY timestamp DESC
             LIMIT ?
             """,
