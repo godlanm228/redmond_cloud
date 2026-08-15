@@ -23,6 +23,7 @@ import logging
 import os
 import sqlite3
 import threading
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Iterable, Optional
 
@@ -75,8 +76,13 @@ def db_path() -> Path:
 
 
 def connect() -> sqlite3.Connection:
-    """Соединение текущего потока. Схема создаётся один раз на процесс."""
-    path = db_path()
+    """Соединение текущего потока. Схема создаётся один раз на процесс.
+
+    Путь приводим к абсолютному: конфиг задаёт его относительно (data/…), а
+    сравнение относительных путей после chdir считало бы «тот же путь» и
+    возвращало соединение к файлу в СТАРОМ каталоге.
+    """
+    path = db_path().absolute()
     conn = getattr(_local, "conn", None)
     if conn is not None and getattr(_local, "path", None) == path:
         return conn
@@ -87,6 +93,12 @@ def connect() -> sqlite3.Connection:
     conn = sqlite3.connect(str(path), timeout=_BUSY_TIMEOUT_MS / 1000,
                            check_same_thread=False)
     conn.row_factory = sqlite3.Row
+    # Автокоммит: транзакциями управляем сами через transaction() с BEGIN
+    # IMMEDIATE. С отложенным BEGIN (поведение по умолчанию) два потока
+    # спокойно читают одно значение, каждый пишет своё — и одно изменение
+    # теряется. Ровно это тест и поймал на счётчике Gemini: 20 инкрементов
+    # дали 2.
+    conn.isolation_level = None
     # Пер-соединенческие настройки — дёшевы и блокировок не берут.
     conn.execute(f"PRAGMA busy_timeout={_BUSY_TIMEOUT_MS}")
     conn.execute("PRAGMA foreign_keys=ON")
@@ -101,21 +113,21 @@ def connect() -> sqlite3.Connection:
 def _ensure_schema_once(conn: sqlite3.Connection, path: Path) -> None:
     """WAL и DDL — один раз на процесс и путь, под общей блокировкой."""
     global _schema_done_for
-    if _schema_done_for == path.absolute():
+    if _schema_done_for == path:
         return
     with _schema_lock:
-        if _schema_done_for == path.absolute():
+        if _schema_done_for == path:
             return
         conn.execute("PRAGMA journal_mode=WAL")
         init_schema(conn)
-        _schema_done_for = path.absolute()
+        _schema_done_for = path
 
 
 # ---------------------------------------------------------------------------
 # Схема
 # ---------------------------------------------------------------------------
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 _SCHEMA = """
 -- Цели и дедлайны: id остаётся сквозным, как в JSON (на него ссылаются tools).
@@ -142,11 +154,15 @@ CREATE TABLE IF NOT EXISTS deadlines (
 );
 CREATE INDEX IF NOT EXISTS idx_deadlines_due ON deadlines(due, status);
 
+-- data — структурная нагрузка записи (еда: dish/kcal/protein/place; смена:
+-- date/start/end). Есть у 14 записей из 84 на 15.08.2026; аналитический слой
+-- будет считать тренды по ней, поэтому колонка нужна с самого начала.
 CREATE TABLE IF NOT EXISTS diary (
     id   INTEGER PRIMARY KEY,
     ts   TEXT NOT NULL,
     text TEXT NOT NULL,
-    tags TEXT NOT NULL DEFAULT '[]'           -- JSON-массив
+    tags TEXT NOT NULL DEFAULT '[]',          -- JSON-массив
+    data TEXT                                  -- JSON-объект или NULL
 );
 CREATE INDEX IF NOT EXISTS idx_diary_ts ON diary(ts);
 
@@ -232,10 +248,29 @@ def query_one(sql: str, params: Iterable[Any] = ()) -> Optional[sqlite3.Row]:
 
 
 def execute(sql: str, params: Iterable[Any] = ()) -> sqlite3.Cursor:
+    """Одиночный statement. Соединение в автокоммите — commit не нужен."""
+    return connect().execute(sql, tuple(params))
+
+
+@contextmanager
+def transaction():
+    """Транзакция на «прочитал → поменял → записал».
+
+    BEGIN IMMEDIATE берёт write-блокировку СРАЗУ, а не при первой записи:
+    иначе два потока успевают прочитать одно и то же состояние до того, как
+    кто-то из них начнёт писать, и одно из изменений исчезает. Плюс это
+    убирает 'database is locked' — конкурент ждёт по busy_timeout, а не
+    падает на попытке апгрейда уже начатой read-транзакции.
+    """
     conn = connect()
-    cur = conn.execute(sql, tuple(params))
-    conn.commit()
-    return cur
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        yield conn
+    except Exception:
+        conn.execute("ROLLBACK")
+        raise
+    else:
+        conn.execute("COMMIT")
 
 
 def history_load(chat_id: int, limit: int) -> list:

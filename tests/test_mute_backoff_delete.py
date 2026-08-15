@@ -73,12 +73,10 @@ class SoftMuteTests(_TmpDataDir):
         self.assertTrue(coach_storage.hard_muted_now())
 
     def test_legacy_record_without_scope_is_hard(self):
-        # Старый mute.json (поставлен до введения scope) — полная тишина,
-        # смысл уже действующей просьбы не меняем.
-        Path("data/coach").mkdir(parents=True, exist_ok=True)
-        Path("data/coach/mute.json").write_text(
-            json.dumps({"until": "forever"}), encoding="utf-8"
-        )
+        # Запись без scope (поставлена до его введения, перенесена из mute.json) —
+        # полная тишина, смысл уже действующей просьбы не меняем.
+        from utils import db
+        db.kv_set("mute", {"until": "forever"})
         self.assertTrue(coach_storage.muted_now())
         self.assertTrue(coach_storage.hard_muted_now())
 

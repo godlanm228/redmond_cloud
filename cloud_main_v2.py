@@ -48,6 +48,14 @@ def main() -> None:
     logger.info("=== Cloud Redmond v2 starting ===")
     logger.info("Whitelist: %s", allowed)
 
+    # База: путь из конфига + разовый перенос старых JSON, если таблицы пусты.
+    # Ошибку переноса НЕ проглатываем — подняться на пустой базе поверх
+    # существующих данных значит молча начать жизнь с чистого листа.
+    from utils import db  # noqa: E402
+    from utils.migrate_json_to_db import run_if_needed  # noqa: E402
+    db.set_db_path(config.baseline_db_path)
+    run_if_needed()
+
     # Проверка моделей до старта ботов: снятая провайдером модель должна быть
     # видна в логе сразу, а не через два месяца в момент отказа основной
     # (так `qwen/qwen3-32b` тихо пролежал мёртвым с июня по 12.08.2026).

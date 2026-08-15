@@ -16,7 +16,7 @@ import json
 import logging
 import sys
 from pathlib import Path
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from utils import db
 
@@ -78,10 +78,12 @@ def _migrate_deadlines(conn) -> Tuple[int, int]:
 def _migrate_diary(conn) -> Tuple[int, int]:
     rows = _read("diary.json", [])
     for e in rows:
+        payload = e.get("data")
         conn.execute(
-            "INSERT OR REPLACE INTO diary(id, ts, text, tags) VALUES(?,?,?,?)",
+            "INSERT OR REPLACE INTO diary(id, ts, text, tags, data) VALUES(?,?,?,?,?)",
             (e.get("id"), e.get("timestamp", ""), e.get("text", ""),
-             json.dumps(e.get("tags") or [], ensure_ascii=False)),
+             json.dumps(e.get("tags") or [], ensure_ascii=False),
+             json.dumps(payload, ensure_ascii=False) if payload else None),
         )
     return len(rows), conn.execute("SELECT COUNT(*) FROM diary").fetchone()[0]
 
@@ -167,6 +169,38 @@ def run(dry_run: bool = False) -> List[Dict[str, Any]]:
     except Exception:
         conn.execute("ROLLBACK")
         raise
+    return report
+
+
+def needed() -> bool:
+    """Есть ли что переносить: JSON на диске лежит, а таблицы пустые.
+
+    Проверяем именно пустоту, а не факт наличия файлов: миграция идемпотентна,
+    но запускать её поверх живых данных при каждом старте незачем — да и любая
+    будущая ошибка в ней не должна получать доступ к рабочим таблицам.
+    """
+    if not COACH_DIR.exists():
+        return False
+    if not any(COACH_DIR.glob("*.json")):
+        return False
+    conn = db.connect()
+    for table in ("goals", "deadlines", "diary", "shifts", "pantry", "kv"):
+        if conn.execute(f"SELECT 1 FROM {table} LIMIT 1").fetchone() is not None:
+            return False
+    return True
+
+
+def run_if_needed() -> Optional[List[Dict[str, Any]]]:
+    """Разовый автоперенос на старте. None — переносить нечего.
+    Ошибку не проглатываем: подняться на пустой базе поверх существующих
+    JSON — это молча начать с чистого листа, чего нам как раз и не надо."""
+    if not needed():
+        return None
+    logger.warning("Обнаружены JSON-данные и пустые таблицы — переношу")
+    report = run()
+    for r in report:
+        logger.info("Перенос %s: из json %d → в базе %d%s",
+                    r["table"], r["json"], r["db"], "" if r["ok"] else "  РАСХОЖДЕНИЕ")
     return report
 
 
