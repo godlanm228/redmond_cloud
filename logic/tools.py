@@ -586,6 +586,35 @@ TOOL_SCHEMAS = [
     {
         "type": "function",
         "function": {
+            "name": "resolve_shift_conflict",
+            "description": (
+                "Answer the pending question about a schedule photo that contradicts what "
+                "the owner said earlier. Use when he replies «бери с фото» / «график "
+                "правильный» (take='photo') or «оставь как есть» / «я же сказал» "
+                "(take='mine'). Set always=true when he says «всегда», «и дальше так», "
+                "«больше не спрашивай» — then the same choice is applied automatically "
+                "next time and the question stops."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "take": {
+                        "type": "string",
+                        "enum": ["photo", "mine"],
+                        "description": "Whose version wins: the photo or his own correction",
+                    },
+                    "always": {
+                        "type": ["boolean", "null"],
+                        "description": "Remember this choice for future photos",
+                    },
+                },
+                "required": ["take"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "set_work_shift_status",
             "description": (
                 "Confirm or cancel an existing work shift, or mark it uncertain. Use for "
@@ -748,6 +777,8 @@ def execute_tool(name: str, args: Dict[str, Any], rg=None) -> str:
         return _tool_save_work_shift(args)
     if name == "set_work_shift_status":
         return _tool_set_work_shift_status(args)
+    if name == "resolve_shift_conflict":
+        return _tool_resolve_shift_conflict(args)
     if name == "get_week_plan":
         from logic.coach_storage import get_week_plan
         plan = get_week_plan()
@@ -1030,6 +1061,30 @@ def _tool_set_work_shift_status(args: Dict[str, Any]) -> str:
 
     coach_storage.add_diary_entry(text, tags=["работа"], data={"date": shift_date, "status": status})
     return reply
+
+
+def _tool_resolve_shift_conflict(args: Dict[str, Any]) -> str:
+    """Ответ Влада на вопрос «что верно — фото или твои слова».
+
+    Без этого приоритет источников работал бы как молчаливый отказ: фото
+    отклонено, Влад об этом не знает и считает, что график обновился.
+    """
+    from logic.week_schedule import pending_conflicts, resolve_pending_conflicts
+
+    take = str(args.get("take") or "").strip().lower()
+    if take not in ("photo", "mine"):
+        return "Неясно, чью версию оставить: 'photo' или 'mine'."
+    pending = pending_conflicts()
+    if not pending:
+        return "Открытых расхождений по сменам нет — спрашивать не о чем."
+
+    always = bool(args.get("always"))
+    applied = resolve_pending_conflicts(take, remember=always)
+    tail = " Дальше буду решать так же, без вопросов." if always else ""
+    if take == "photo":
+        return (f"Принял график: обновил смен — {applied}. Твоё решение записано "
+                f"как ручное, следующее фото его не перетрёт.{tail}")
+    return f"Оставил как ты говорил, график не трогаю (спорных дней: {len(pending)}).{tail}"
 
 
 def _tool_delete_diary_entry(args: Dict[str, Any]) -> str:

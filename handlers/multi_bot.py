@@ -470,15 +470,25 @@ async def redmond_photo_handler(update: Update, context: ContextTypes.DEFAULT_TY
 
     # 1. График смен → сохранить + план недели от Iris
     if ptype == "shift_schedule" and shifts:
-        from logic.week_schedule import save_shifts, describe_saved_shifts
+        from logic.week_schedule import apply_shifts, describe_conflicts, describe_saved_shifts
         shift_items = [
             {**s, "status": "planned", "source": "photo", "confidence": "high"}
             for s in shifts
         ]
-        n = await asyncio.to_thread(save_shifts, shift_items)
+        outcome = await asyncio.to_thread(apply_shifts, shift_items)
+        n = outcome.saved
+        saved_dates = {c.date for c in outcome.conflicts}
         await coordinator.respond_as(
-            "Redmond", chat_id, describe_saved_shifts(shifts, n), "🦞", "html",
+            "Redmond", chat_id,
+            describe_saved_shifts([s for s in shifts if s.get("date") not in saved_dates], n),
+            "🦞", "html",
         )
+        # Расхождение с тем, что Влад говорил текстом, — не повод молча
+        # отклонить: он решит, что график обновился. Спрашиваем сразу.
+        if outcome.conflicts:
+            await coordinator.respond_as(
+                "Redmond", chat_id, describe_conflicts(outcome.conflicts), "🦞", "plain",
+            )
         if n > 0:
             iris = agent_by_name("Iris")
             if iris is not None:

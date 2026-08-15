@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import logging
 import re
+from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -23,13 +24,61 @@ logger = logging.getLogger(__name__)
 # Приоритет источников (B1). Машинная догадка НЕ перетирает то, что сказал
 # человек: 12.08.2026 фото графика с двумя сотрудниками записало чужие смены,
 # а бот при этом сам предлагал «поправь текстом» — и следующее фото стёрло бы
-# правку обратно. Равный или больший приоритет побеждает, меньший — отклоняется
-# и попадает в журнал с причиной.
+# правку обратно. Равный или больший приоритет побеждает.
 SOURCE_PRIORITY = {"manual": 3, "text": 2, "photo": 1, "scheduler": 1, "unknown": 0}
+
+# Что делать, когда фото противоречит уже сказанному текстом.
+#   ask        — спросить Влада (дефолт): молча отклонить мало, он об этом
+#                просто не узнает и будет думать, что график обновился;
+#   keep_mine  — всегда оставлять свою правку, не переспрашивая;
+#   photo_wins — всегда доверять свежему фото.
+# Хранится в kv, ставится через tool по фразам вроде «всегда бери с фото».
+CONFLICT_POLICY_KEY = "shift_conflict_policy"
+PENDING_CONFLICTS_KEY = "pending_shift_conflicts"
+POLICIES = ("ask", "keep_mine", "photo_wins")
 
 
 def _priority(source: str) -> int:
     return SOURCE_PRIORITY.get(str(source or "unknown").lower(), 0)
+
+
+def get_conflict_policy() -> str:
+    value = str(db.kv_get(CONFLICT_POLICY_KEY, "ask") or "ask").strip().lower()
+    return value if value in POLICIES else "ask"
+
+
+def set_conflict_policy(policy: str) -> str:
+    policy = str(policy or "").strip().lower()
+    if policy not in POLICIES:
+        policy = "ask"
+    db.kv_set(CONFLICT_POLICY_KEY, policy)
+    return policy
+
+
+@dataclass
+class ShiftConflict:
+    """Фото противоречит тому, что Влад сказал текстом."""
+    date: str
+    incoming: Dict[str, Any]
+    existing: Dict[str, Any]
+
+    def describe(self) -> str:
+        d = datetime.strptime(self.date, "%Y-%m-%d").date()
+        label = f"{_DAY_NAMES[d.weekday()]} {d.strftime('%d.%m')}"
+        return (f"{label}: в графике {self.incoming.get('start')}–{self.incoming.get('end')}, "
+                f"а с твоих слов {self.existing.get('start')}–{self.existing.get('end')}")
+
+
+@dataclass
+class ShiftApplyResult:
+    saved: int = 0
+    conflicts: List[ShiftConflict] = field(default_factory=list)
+
+    def __int__(self) -> int:
+        return self.saved
+
+    def __bool__(self) -> bool:
+        return bool(self.saved or self.conflicts)
 
 _DAY_NAMES = ["пн", "вт", "ср", "чт", "пт", "сб", "вс"]
 
@@ -122,16 +171,26 @@ def get_shift(d: date) -> Optional[Dict[str, Any]]:
 
 
 def save_shifts(items: List[Dict[str, Any]]) -> int:
-    """Merge смен. Возвращает сколько РЕАЛЬНО сохранено.
+    """Совместимая обёртка: только количество сохранённого.
+    Конфликты видит apply_shifts — используй его, если надо о них сообщить."""
+    return apply_shifts(items).saved
+
+
+def apply_shifts(items: List[Dict[str, Any]]) -> ShiftApplyResult:
+    """Merge смен с разбором конфликтов.
 
     Backward-compatible: callers may still pass only date/start/end. Optional
     metadata lets text corrections and photo imports carry status/source/confidence.
 
-    С 15.08.2026 действует приоритет источников: запись с меньшим приоритетом
-    не перетирает существующую (фото не стирает правку текстом). Отклонённые
-    попытки не молчат — уходят в журнал с причиной и видны в shift_history().
+    Приоритет источников (с 15.08.2026): запись с меньшим приоритетом не
+    перетирает существующую — фото не стирает правку текстом. Но и молча
+    отклонять нельзя: Влад об этом не узнает и будет думать, что график
+    обновился. Поэтому по умолчанию (policy='ask') такие случаи возвращаются
+    как конфликты, и вызывающий спрашивает. Заранее заданная политика
+    ('keep_mine'/'photo_wins') снимает вопрос.
     """
-    n = 0
+    result = ShiftApplyResult()
+    policy = get_conflict_policy()
     updated = now_local().isoformat(timespec="minutes")
     with db.transaction() as conn:
         for it in items:
@@ -145,20 +204,25 @@ def save_shifts(items: List[Dict[str, Any]]) -> int:
             source = str(it.get("source") or prev.get("source")
                          or ("text" if status == "cancelled" else "unknown"))
 
-            # Приоритет: равный или выше — пишем; ниже — отклоняем с записью
-            # в журнал. Одинаковые значения не считаем конфликтом: фото,
-            # подтверждающее уже известную смену, ничего не портит.
-            if prev:
+            # Одинаковые значения конфликтом не считаем: фото, подтверждающее
+            # уже известную смену, ничего не портит и вопроса не стоит.
+            if prev and _priority(source) < _priority(prev.get("source", "")):
                 same = (prev.get("start") == start and prev.get("end") == end
                         and prev.get("status") == status)
-                if not same and _priority(source) < _priority(prev.get("source", "")):
-                    log_shift_event(
-                        d, "reject", source, dict(it),
-                        reason=(f"приоритет ниже: {source} не перетирает "
-                                f"{prev.get('source')} ({prev.get('start')}–{prev.get('end')})"),
+                if not same and policy != "photo_wins":
+                    conn.execute(
+                        "INSERT INTO shift_events(ts, date, action, source, payload, reason)"
+                        " VALUES(?,?,?,?,?,?)",
+                        (updated, d, "conflict" if policy == "ask" else "reject", source,
+                         _dumps(dict(it)),
+                         (f"{source} расходится с {prev.get('source')} "
+                          f"({prev.get('start')}–{prev.get('end')}), политика: {policy}")),
                     )
-                    logger.info("Смена %s: отклонён %s поверх %s", d, source,
-                                prev.get("source"))
+                    logger.info("Смена %s: %s расходится с %s (политика %s)",
+                                d, source, prev.get("source"), policy)
+                    if policy == "ask":
+                        result.conflicts.append(
+                            ShiftConflict(date=d, incoming=dict(it), existing=dict(prev)))
                     continue
 
             if status == "cancelled":
@@ -203,8 +267,52 @@ def save_shifts(items: List[Dict[str, Any]]) -> int:
                 (updated, d, "cancel" if status == "cancelled" else "set",
                  record["source"], _dumps(record), None),
             )
-            n += 1
-    return n
+            result.saved += 1
+
+    # Незакрытые конфликты держим до ответа Влада: без этого его «бери с фото»
+    # применять не к чему — разобранные смены к тому моменту уже забыты.
+    if result.conflicts:
+        db.kv_set(PENDING_CONFLICTS_KEY, {
+            "asked_at": updated,
+            "items": [c.incoming for c in result.conflicts],
+        })
+    return result
+
+
+def pending_conflicts() -> List[Dict[str, Any]]:
+    """Смены, по которым задан вопрос и ответа ещё не было."""
+    data = db.kv_get(PENDING_CONFLICTS_KEY, {}) or {}
+    return list(data.get("items") or [])
+
+
+def resolve_pending_conflicts(decision: str, remember: bool = False) -> int:
+    """Ответ Влада на вопрос о расхождении.
+
+    decision: 'photo' — принять то, что в графике; 'mine' — оставить свою правку.
+    remember=True запоминает решение политикой, и дальше вопрос не задаётся.
+    Возвращает количество применённых смен.
+    """
+    decision = str(decision or "").strip().lower()
+    items = pending_conflicts()
+    db.kv_set(PENDING_CONFLICTS_KEY, {})
+    if remember:
+        set_conflict_policy("photo_wins" if decision == "photo" else "keep_mine")
+    if decision != "photo" or not items:
+        for it in items:
+            log_shift_event(it.get("date", ""), "reject", it.get("source", "photo"),
+                            it, reason="Влад оставил свою версию")
+        return 0
+    # Явное решение владельца — это уже не догадка машины, поэтому применяем
+    # с источником manual: следующее фото его тоже не перетрёт.
+    return apply_shifts([{**it, "source": "manual"} for it in items]).saved
+
+
+def describe_conflicts(conflicts: List[ShiftConflict]) -> str:
+    """Вопрос для чата: что из этого верно."""
+    lines = [c.describe() for c in conflicts]
+    tail = ("Что верно? Скажи «бери с фото» или «оставь как есть» — "
+            "и добавь «всегда», если решать так же и дальше.")
+    return "Тут расхождение с тем, что ты говорил:\n• " + "\n• ".join(lines) + "\n\n" + tail
 
 
 def _dumps(obj: Any) -> str:
