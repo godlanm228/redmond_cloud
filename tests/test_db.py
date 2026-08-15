@@ -203,6 +203,34 @@ class MigrationTests(DbTestBase):
         self._run()
         self.assertTrue((Path("data/coach") / "diary.json").exists())
 
+    def test_needed_when_json_present_and_tables_empty(self):
+        from utils.migrate_json_to_db import needed
+        self.assertTrue(needed())
+
+    def test_not_needed_after_migration(self):
+        from utils.migrate_json_to_db import needed, run_if_needed
+        run_if_needed()
+        self.assertFalse(needed())
+
+    def test_run_if_needed_is_a_noop_second_time(self):
+        from utils.migrate_json_to_db import run_if_needed
+        self.assertIsNotNone(run_if_needed())
+        self.assertIsNone(run_if_needed())
+        self.assertEqual(db.query_one("SELECT COUNT(*) c FROM diary")["c"],
+                         len(self.DIARY))
+
+    def test_not_needed_without_json(self):
+        from utils.migrate_json_to_db import needed
+        for f in Path("data/coach").glob("*.json"):
+            f.unlink()
+        self.assertFalse(needed())
+
+    def test_existing_data_blocks_automigration(self):
+        """Живые таблицы не должны получать поверх себя старый снимок."""
+        from utils.migrate_json_to_db import needed
+        db.execute("INSERT INTO diary(ts, text, tags) VALUES('2026-08-15','живая','[]')")
+        self.assertFalse(needed())
+
     def test_corrupt_source_aborts_without_partial_write(self):
         (Path("data/coach") / "diary.json").write_text("{битый", encoding="utf-8")
         with self.assertRaises(RuntimeError):

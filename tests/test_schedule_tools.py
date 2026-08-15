@@ -42,13 +42,12 @@ class ScheduleToolTests(unittest.TestCase):
         )
 
         self.assertIn("2026-07-06 17:00–23:00", result)
-        shifts = json.loads(Path("data/coach/shifts.json").read_text(encoding="utf-8"))
-        self.assertEqual(shifts["2026-07-06"]["start"], "17:00")
-        self.assertEqual(shifts["2026-07-06"]["end"], "23:00")
-        self.assertEqual(shifts["2026-07-06"]["status"], "confirmed")
-        self.assertEqual(shifts["2026-07-06"]["source"], "text")
-        diary = json.loads(Path("data/coach/diary.json").read_text(encoding="utf-8"))
-        self.assertEqual(diary[-1]["tags"], ["работа"])
+        shift = get_shift_record(datetime(2026, 7, 6).date())
+        self.assertEqual(shift["start"], "17:00")
+        self.assertEqual(shift["end"], "23:00")
+        self.assertEqual(shift["status"], "confirmed")
+        self.assertEqual(shift["source"], "text")
+        self.assertEqual(coach_storage.read_diary(last_n=1)[0]["tags"], ["работа"])
 
     def test_cancel_shift_hides_it_from_active_schedule(self):
         save_shifts([{"date": "2026-07-06", "start": "17:00", "end": "23:00"}])

@@ -1,11 +1,13 @@
-"""Инварианты, которые вернули бы потерю данных, если их сломать.
+"""Инварианты, нарушение которых означало бы потерю данных.
 
 A — ошибка провайдера классифицируется по ВСЕЙ цепочке моделей, а не по последней;
-C — «файла нет» и «файл битый» это разные исходы, поверх битого не пишем;
-D — запись атомарна, а read-modify-write не теряет параллельных изменений.
+B — параллельные изменения не теряются, чтение не разрушает данные.
+
+До 15.08.2026 хранилищем были JSON-файлы, и B держался на блокировках плюс
+atomic write. Теперь это транзакции SQLite, но проверяем то же самое свойство:
+двадцать одновременных записей должны дать двадцать записей.
 """
 
-import json
 import os
 import sys
 import tempfile
@@ -26,13 +28,13 @@ if "requests" not in sys.modules:
     sys.modules["requests"] = requests_stub
 
 from logic import coach_storage
-from logic.coach_storage import StorageCorrupt
 from logic.response_generator import (
     _is_model_gone_error,
     _is_oversize_error,
     _is_rate_limit_error,
     chain_has,
 )
+from utils import db
 
 RATE_LIMIT_429 = (
     "Error code: 429 - {'error': {'message': 'Rate limit reached for model "
@@ -74,74 +76,28 @@ class ErrorChainTests(unittest.TestCase):
         self.assertFalse(chain_has([], _is_rate_limit_error))
 
 
-class StorageBaseTest(unittest.TestCase):
+class StorageBase(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.old_cwd = os.getcwd()
         os.chdir(self.tmp.name)
-        Path("data").mkdir()
+        db.set_db_path(Path("data/hub-test.sqlite"))
 
     def tearDown(self):
+        db.close_all()
+        db.set_db_path(db.DEFAULT_DB_PATH)
         os.chdir(self.old_cwd)
         self.tmp.cleanup()
 
-    def _path(self, name):
-        return Path(coach_storage._coach_dir()) / name
 
-
-class CorruptFileTests(StorageBaseTest):
-    def test_missing_file_gives_default(self):
-        self.assertEqual(coach_storage._load_json("нет-такого.json", []), [])
-
-    def test_corrupt_file_raises_instead_of_default(self):
-        self._path("diary.json").write_text("{битый", encoding="utf-8")
-        with self.assertRaises(StorageCorrupt):
-            coach_storage._load_json("diary.json", [])
-
-    def test_corrupt_file_is_copied_aside(self):
-        self._path("diary.json").write_text("{битый", encoding="utf-8")
-        with self.assertRaises(StorageCorrupt):
-            coach_storage._load_json("diary.json", [])
-        self.assertTrue(self._path("diary.json.corrupt").exists())
-
-    def test_mutator_does_not_overwrite_corrupt_data(self):
-        """Главный сценарий потери: битый дневник + новая запись = один элемент."""
-        self._path("diary.json").write_text("[{битый", encoding="utf-8")
-        with self.assertRaises(StorageCorrupt):
-            coach_storage.add_diary_entry("новая запись")
-        self.assertEqual(self._path("diary.json").read_text(encoding="utf-8"), "[{битый")
-
-    def test_safe_reader_degrades_without_touching_file(self):
-        self._path("mute.json").write_text("{битый", encoding="utf-8")
-        self.assertEqual(coach_storage._load_json_safe("mute.json", {}), {})
-        self.assertFalse(coach_storage.muted_now())
-        self.assertEqual(self._path("mute.json").read_text(encoding="utf-8"), "{битый")
-
-
-class AtomicWriteTests(StorageBaseTest):
-    def test_write_is_atomic_and_leaves_no_tmp(self):
-        coach_storage._save_json("goals.json", [{"id": 1}])
-        self.assertEqual(json.loads(self._path("goals.json").read_text(encoding="utf-8")),
-                         [{"id": 1}])
-        self.assertFalse(self._path("goals.json.tmp").exists())
-
-    def test_failed_serialization_leaves_old_content_intact(self):
-        coach_storage._save_json("goals.json", [{"id": 1}])
-        with self.assertRaises(TypeError):
-            coach_storage._save_json("goals.json", {"плохое": {1, 2, 3}})  # set не сериализуем
-        self.assertEqual(json.loads(self._path("goals.json").read_text(encoding="utf-8")),
-                         [{"id": 1}])
-
-
-class ConcurrentMutationTests(StorageBaseTest):
+class ConcurrentMutationTests(StorageBase):
     def test_parallel_diary_writes_do_not_lose_entries(self):
-        """Без блокировки два «прочитал → добавил → записал» теряют записи."""
         n = 12
         errors = []
 
         def add(i):
             try:
-                coach_storage.add_diary_entry(f"запись {i}")
+                coach_storage.add_diary_entry(f"запись номер {i}")
             except Exception as e:  # noqa: BLE001 — тест должен показать причину
                 errors.append(e)
 
@@ -162,6 +118,37 @@ class ConcurrentMutationTests(StorageBaseTest):
         for t in threads:
             t.join()
         self.assertEqual(coach_storage.gemini_count_today(), n)
+
+    def test_parallel_deadline_adds_get_unique_ids(self):
+        """Сквозной id не должен выдаваться дважды под нагрузкой."""
+        n = 10
+        for i in range(n):
+            coach_storage.add_deadline(f"дедлайн {i}", "2026-09-01")
+        ids = [d["id"] for d in coach_storage.list_deadlines()]
+        self.assertEqual(len(ids), len(set(ids)))
+        self.assertEqual(len(ids), n)
+
+
+class ReadDoesNotDestroyTests(StorageBase):
+    """Чтение при любых обстоятельствах не должно уничтожать данные —
+    именно это ломалось на JSON (битый файл → дефолт → сохранение поверх)."""
+
+    def test_reading_empty_storage_is_safe(self):
+        self.assertEqual(coach_storage.read_diary(), [])
+        self.assertEqual(coach_storage.list_goals(), [])
+        self.assertEqual(coach_storage.get_pantry()["items"], [])
+
+    def test_broken_kv_value_does_not_wipe_it(self):
+        db.execute("INSERT INTO kv(key, value, updated) VALUES('mute','{битый','now')")
+        self.assertFalse(coach_storage.muted_now())
+        row = db.query_one("SELECT value FROM kv WHERE key='mute'")
+        self.assertEqual(row["value"], "{битый")
+
+    def test_diary_survives_repeated_reads(self):
+        coach_storage.add_diary_entry("важная запись про экзамен")
+        for _ in range(5):
+            coach_storage.read_diary()
+        self.assertEqual(len(coach_storage.read_diary()), 1)
 
 
 if __name__ == "__main__":
