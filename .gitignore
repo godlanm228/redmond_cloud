@@ -57,3 +57,6 @@ logs/
 *.gguf
 *.pt
 *.safetensors
+
+# Agent guide — local only, project reference lives in docs/ARCHITECTURE.md
+CLAUDE.md
