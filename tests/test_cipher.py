@@ -169,8 +169,8 @@ class SystemPromptTests(unittest.TestCase):
     def test_gives_correct_log_path(self):
         self.assertIn("logs/v2.log", cw.SYSTEM_APPENDIX)
 
-    def test_warns_that_claude_md_is_stale(self):
-        self.assertIn("устарел", cw.SYSTEM_APPENDIX)
+    def test_points_at_the_project_reference(self):
+        self.assertIn("docs/ARCHITECTURE.md", cw.SYSTEM_APPENDIX)
 
     def test_forbids_markdown_tables(self):
         self.assertIn("markdown-таблиц", cw.SYSTEM_APPENDIX)
