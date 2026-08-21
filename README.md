@@ -93,7 +93,7 @@ CI runs the full suite on every push.
 ```bash
 python -m venv .venv
 .venv/Scripts/activate          # Windows
-pip install -r requirements-cloud.txt
+pip install -r requirements.txt
 
 cp .env.example .env            # fill in bot tokens and API keys
 python cloud_main_v2.py
