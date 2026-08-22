@@ -1,11 +1,14 @@
 """
-Недельное расписание Влада: рабочие смены (из скрина графика, парсинг в logic/vision.py)
-+ статичное учебное расписание (SoSe 2026, HRW Campus Bottrop).
+Недельное расписание владельца: рабочие смены (из скрина графика, парсинг в
+logic/vision.py) + учебное расписание.
 
 Смены: таблица shifts (одна строка на дату) + append-only журнал shift_events.
 Метаданные: status/source/confidence/last_confirmed_at/updated/note.
 Форма словаря сохранена как в старом shifts.json — вызывающие не менялись.
-Учёба: константа в коде (меняется раз в семестр — проще править тут, чем JSON).
+
+Учёба: таблица timetable со сроком действия (с 21.08.2026; до этого была
+константой в коде и поэтому не отменялась ничем — см. комментарий у
+_SEED_TIMETABLE). Читать только через study_slots() / is_home_study_day().
 """
 
 from __future__ import annotations
@@ -86,23 +89,128 @@ _DAY_NAMES = ["пн", "вт", "ср", "чт", "пт", "сб", "вс"]
 WORK_COMMUTE_MIN = 20
 UNI_COMMUTE_MIN = 60
 
-# Учебное расписание: weekday (0=пн) → [(start, end, что)]. Ботроп = дорога UNI_COMMUTE_MIN.
-# Среда: туториум 13:15-14:50 Влад скипает осознанно — вместо него домашний блок.
-STUDY_TIMETABLE: Dict[int, List[Tuple[str, str, str]]] = {
-    0: [("14:05", "15:45", "Лекция Grundlagen der Ingenieurmathematik (Ботроп)")],
+# Учебное расписание живёт в таблице `timetable`, НЕ в коде.
+#
+# До 21.08.2026 здесь стояла константа STUDY_TIMETABLE («SoSe 2026»), и именно
+# поэтому её нельзя было отменить: 17.08 владелец сказал, что у него
+# семестрфериен, запись легла в дневник — а бот 17, 18 и 19 августа продолжал
+# звать на пары, потому что источник утверждения лежал вне данных. В промпт
+# при этом попадали оба факта разом, и модель добросовестно пересказывала оба.
+#
+# Ниже — только СИД для разовой миграции. Живые данные читаются через
+# study_slots() / is_home_study_day(), которые уважают срок действия.
+_SEED_TIMETABLE: Dict[int, List[Tuple[str, str, str, str]]] = {
+    0: [("14:05", "15:45", "Лекция Grundlagen der Ingenieurmathematik (Ботроп)", "lecture")],
     1: [
-        ("12:20", "14:00", "Лекция Ingenieurmathematik (Ботроп)"),
-        ("14:05", "15:45", "Практика Ingenieurmathematik (Ботроп)"),
+        ("12:20", "14:00", "Лекция Ingenieurmathematik (Ботроп)", "lecture"),
+        ("14:05", "15:45", "Практика Ingenieurmathematik (Ботроп)", "lecture"),
     ],
-    2: [("13:15", "14:50", "Домашняя учёба (туториум скипается в пользу дома)")],
+    2: [("13:15", "14:50", "Домашняя учёба (туториум скипается в пользу дома)", "home_study")],
+    3: [("", "", "Домашняя учёба (пар нет)", "home_study")],
     4: [
-        ("08:00", "09:35", "Лекция Projektmanagement (Ботроп)"),
-        ("11:30", "13:05", "Практика Projektmanagement (Ботроп)"),
+        ("08:00", "09:35", "Лекция Projektmanagement (Ботроп)", "lecture"),
+        ("11:30", "13:05", "Практика Projektmanagement (Ботроп)", "lecture"),
     ],
 }
 
-# Дни без пар и обычно без смен — кандидаты на «день на себя» (CS/Dota/друзья).
-HOME_STUDY_WEEKDAYS = (2, 3)  # ср (вместо туториума), чт (пар нет)
+
+def _iso(d: date) -> str:
+    return d.strftime("%Y-%m-%d")
+
+
+def _rows_for(d: date, kind: Optional[str] = None) -> List[Dict[str, Any]]:
+    """Строки расписания, ДЕЙСТВУЮЩИЕ на дату d. Вне срока — не существуют."""
+    day = _iso(d)
+    sql = ("SELECT * FROM timetable WHERE weekday=? AND valid_from<=?"
+           " AND (valid_to IS NULL OR valid_to>=?)")
+    params: List[Any] = [d.weekday(), day, day]
+    if kind:
+        sql += " AND kind=?"
+        params.append(kind)
+    return [dict(r) for r in db.query(sql + " ORDER BY start, id", tuple(params))]
+
+
+def study_slots(d: date) -> List[Tuple[str, str, str]]:
+    """Занятия с часами на дату: [(start, end, что)]. Пусто вне срока действия."""
+    return [(r["start"], r["end"], r["title"])
+            for r in _rows_for(d) if r["start"] and r["end"]]
+
+
+def is_home_study_day(d: date) -> bool:
+    """День домашней учёбы — по данным, а не по вшитому кортежу weekday'ев."""
+    return bool(_rows_for(d, kind="home_study"))
+
+
+def set_timetable(entries: List[Tuple[int, str, str, str, str]], valid_from: str,
+                  valid_to: Optional[str] = None, source: str = "manual") -> int:
+    """Записать расписание на интервал. entries: (weekday, start, end, title, kind).
+
+    Старое НЕ удаляем: у него свой интервал, и история «что действовало весной»
+    должна оставаться отвечаемой — ровно как у смен в shift_events.
+    """
+    created = now_local().isoformat(timespec="minutes")
+    n = 0
+    with db.transaction() as conn:
+        for weekday, start, end, title, kind in entries:
+            conn.execute(
+                "INSERT INTO timetable(weekday, start, end, title, kind,"
+                " valid_from, valid_to, source, created) VALUES(?,?,?,?,?,?,?,?,?)",
+                (int(weekday), start or "", end or "", title,
+                 kind or "lecture", valid_from, valid_to, source, created),
+            )
+            n += 1
+    return n
+
+
+def expire_timetable(valid_to: str, source: str = "manual") -> int:
+    """Закрыть всё бессрочно действующее расписание датой valid_to.
+
+    Это «у меня каникулы» на языке данных: строки остаются, но перестают
+    действовать со следующего дня.
+    """
+    cur = db.execute(
+        "UPDATE timetable SET valid_to=?, source=? WHERE valid_to IS NULL",
+        (valid_to, source),
+    )
+    return cur.rowcount or 0
+
+
+def timetable_rows() -> List[Dict[str, Any]]:
+    """Всё расписание целиком (для диагностики и ответа «что у меня записано»)."""
+    return [dict(r) for r in db.query(
+        "SELECT * FROM timetable ORDER BY valid_from, weekday, start")]
+
+
+# Границы семестра, с которыми переносится старая константа. Обе — допущения,
+# и обе правятся одним UPDATE, потому что теперь это данные:
+#   SEED_VALID_FROM — типичное начало SoSe, точная дата не сохранилась нигде;
+#   SEED_VALID_TO   — день перед тем, как владелец сказал «семестрфериен»
+#                     (17.08.2026 12:01, запись в дневнике с тегом «учёба»).
+SEED_VALID_FROM = "2026-04-01"
+SEED_VALID_TO = "2026-08-16"
+
+
+def seed_timetable_if_empty() -> int:
+    """Разовый перенос расписания из кода в данные. Идемпотентен.
+
+    Переносим СРАЗУ закрытым: семестр кончился, владелец в каникулах. Иначе
+    первый же запуск после этой правки снова начал бы звать на пары.
+    """
+    row = db.query_one("SELECT COUNT(*) AS c FROM timetable")
+    if row and int(row["c"]) > 0:
+        return 0
+    entries = [(weekday, start, end, title, kind)
+               for weekday, slots in _SEED_TIMETABLE.items()
+               for start, end, title, kind in slots]
+    n = set_timetable(entries, valid_from=SEED_VALID_FROM,
+                      valid_to=SEED_VALID_TO, source="seed")
+    logger.info(
+        "Расписание перенесено из кода в таблицу timetable: %d строк, "
+        "срок действия %s — %s (закрыто, владелец в каникулах). "
+        "Границы — допущения, правятся через set_timetable/expire_timetable.",
+        n, SEED_VALID_FROM, SEED_VALID_TO,
+    )
+    return n
 
 
 # ---------- смены: storage ----------
@@ -348,7 +456,7 @@ def format_week(days: int = 8) -> str:
             parts.append(f"смена {shift['start']}–{shift['end']} (дорога ~{WORK_COMMUTE_MIN} мин)")
         elif shift_record and shift_record.get("status") == "cancelled":
             parts.append("смена отменена")
-        for start, end, what in STUDY_TIMETABLE.get(d.weekday(), []):
+        for start, end, what in study_slots(d):
             parts.append(f"{start}–{end} {what}")
         label = f"{_DAY_NAMES[d.weekday()]} {d.strftime('%d.%m')}"
         out.append(f"{label}: " + ("; ".join(parts) if parts else "свободен"))

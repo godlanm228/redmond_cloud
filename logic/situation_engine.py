@@ -13,7 +13,7 @@ from datetime import datetime, timedelta
 from typing import Any, Dict, Optional
 
 from logic import coach_storage
-from logic.week_schedule import STUDY_TIMETABLE, get_shift, get_shift_record
+from logic.week_schedule import get_shift, get_shift_record, study_slots
 from utils.time import now_local
 
 
@@ -172,7 +172,7 @@ def _build_shift_situation(now: datetime) -> ShiftSituation:
 
 
 def _in_study_block(now: datetime) -> bool:
-    for start, end, _what in STUDY_TIMETABLE.get(now.weekday(), []):
+    for start, end, _what in study_slots(now.date()):
         s = parse_hm(start, now)
         e = parse_hm(end, now)
         if s and e and (s - timedelta(minutes=30)) <= now <= e:

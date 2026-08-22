@@ -13,7 +13,7 @@ from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional
 
 from logic import coach_storage
-from logic.week_schedule import STUDY_TIMETABLE, get_shift
+from logic.week_schedule import get_shift, study_slots
 from utils.time import now_local
 
 _IMPORTANCE_RANK = {"high": 0, "medium": 1, "low": 2}
@@ -155,7 +155,7 @@ def build_priorities_block() -> str:
     shift = get_shift(today)
     if shift:
         day_parts.append(f"смена {shift['start']}–{shift['end']}")
-    for start, end, what in STUDY_TIMETABLE.get(today.weekday(), []):
+    for start, end, what in study_slots(today):
         day_parts.append(f"{start}–{end} {what}")
     if day_parts:
         label = f"{_DAY_NAMES[today.weekday()]} {today.strftime('%d.%m')}"
