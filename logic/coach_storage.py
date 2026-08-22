@@ -122,20 +122,44 @@ def _deadline_row(r) -> Dict[str, Any]:
 
 
 def list_deadlines(upcoming_days: Optional[int] = None) -> List[Dict[str, Any]]:
+    """Дедлайны. `upcoming_days` — окно вперёд; просроченное из него НЕ выпадает.
+
+    Раньше фильтр был `today <= due <= cutoff`, то есть окно отрезало всё, что
+    раньше сегодня. Этой функцией отвечает инструмент `list_deadlines` — и на
+    вопрос «какие у меня дедлайны» владелец не видел именно тот, который
+    пропустил. Скедулер при этом звал версию без окна и просрочку видел:
+    система знала, а показать не могла.
+
+    Кривая дата больше не проглатывается молча: запись остаётся видимой и
+    сообщает о себе в лог. Прежде она лежала в базе и не показывалась нигде
+    и никогда.
+
+    Порядок: сначала просроченное (самое срочное), потом ближайшее.
+    """
     rows = [_deadline_row(r) for r in db.query("SELECT * FROM deadlines ORDER BY id")]
     if upcoming_days is None:
         return rows
+
     today = now_local().date()
     cutoff = today + timedelta(days=upcoming_days)
-    result = []
+    dated: List[Any] = []
+    undated: List[Dict[str, Any]] = []
     for d in rows:
+        if str(d.get("status") or "pending") != "pending":
+            continue
         try:
             due = datetime.strptime(d.get("due", ""), "%Y-%m-%d").date()
-        except ValueError:
+        except (ValueError, TypeError):
+            logger.warning(
+                "Дедлайн #%s «%s»: дата «%s» не читается — показываю без срока, "
+                "иначе он исчезнет из выдачи насовсем",
+                d.get("id"), d.get("title"), d.get("due"))
+            undated.append(d)
             continue
-        if today <= due <= cutoff:
-            result.append(d)
-    return result
+        if due <= cutoff:            # просроченное тоже проходит: due < today
+            dated.append((due, d))
+    dated.sort(key=lambda pair: pair[0])
+    return [d for _, d in dated] + undated
 
 
 def add_deadline(title: str, due: str, importance: str = "medium") -> Dict[str, Any]:

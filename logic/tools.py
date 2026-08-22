@@ -1127,9 +1127,19 @@ def _tool_list_deadlines(args: Dict[str, Any]) -> str:
     if not deadlines:
         scope = f"в ближайшие {days} дн." if days else ""
         return f"Дедлайнов {scope} нет."
+    from datetime import datetime as _dt
+    from utils.time import now_local
+    today = now_local().date()
     lines = [f"Дедлайны ({len(deadlines)}):"]
     for d in deadlines:
-        lines.append(f"  #{d['id']} {d['due']} — {d['title']} [{d.get('importance', '?')}]")
+        try:
+            left = (_dt.strptime(d.get("due", ""), "%Y-%m-%d").date() - today).days
+            mark = (f"ПРОСРОЧЕН на {-left} дн" if left < 0
+                    else "СЕГОДНЯ" if left == 0 else f"осталось {left} дн")
+        except (ValueError, TypeError):
+            mark = "дата не читается — поправь"
+        lines.append(f"  #{d['id']} {d['due']} — {d['title']} "
+                     f"[{d.get('importance', '?')}] — {mark}")
     return "\n".join(lines)
 
 

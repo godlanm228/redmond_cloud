@@ -34,12 +34,21 @@ def _pending_deadlines() -> List[Dict[str, Any]]:
 
 
 def top_priorities(max_items: int = 4) -> List[Dict[str, Any]]:
-    """Pending-дедлайны по срочности (дата, потом важность).
-    Просроченные не скрываются ещё неделю — наверху, с пометкой."""
-    today = now_local().date()
-    items = [d for d in _pending_deadlines() if d["_due"] >= today - timedelta(days=7)]
+    """Pending-дедлайны по срочности (дата, потом важность), просроченные сверху.
+
+    Отсечки по давности здесь больше нет. Раньше стояло
+    `d["_due"] >= today - timedelta(days=7)`: дедлайн, просроченный больше чем
+    на неделю, исчезал из промпта совсем — то есть чем дольше владелец тянул,
+    тем реже коуч напоминал, а через семь дней замолкал вовсе.
+    """
+    items = list(_pending_deadlines())
     items.sort(key=lambda d: (d["_due"], _IMPORTANCE_RANK.get(d.get("importance"), 1)))
     return items[:max_items]
+
+
+def pending_count() -> int:
+    """Сколько всего pending-дедлайнов — чтобы блок промпта не обрезал молча."""
+    return len(_pending_deadlines())
 
 
 def crunch_deadline(days: int = 3) -> Optional[Dict[str, Any]]:
@@ -141,6 +150,10 @@ def build_priorities_block() -> str:
             lines.append(
                 f"  {i}. {when} — {d['title']} [{d.get('importance', 'medium')}] — {tail}"
             )
+        hidden = pending_count() - len(prios)
+        if hidden > 0:
+            # Молчаливое обрезание читается как «это всё» — а это не всё.
+            lines.append(f"  …и ещё {hidden} незакрытых — спроси list_deadlines")
 
     crunch = crunch_tonight()
     if crunch:
