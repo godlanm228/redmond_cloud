@@ -28,7 +28,7 @@ from logic import coach_storage
 from logic.priorities import crunch_deadline, radar_deadline
 from logic.situation_engine import build_day_situation, parse_hm
 from logic.week_schedule import (
-    HOME_STUDY_WEEKDAYS,
+    is_home_study_day,
     WORK_COMMUTE_MIN,
 )
 from utils.time import now_local
@@ -211,7 +211,7 @@ def _slot_decision(situation, now) -> Optional[Tuple[str, str]]:
 
     # --- 5. Домашняя учёба (ср — вместо туториума, чт — пар нет) ---
     if (
-        now.weekday() in HOME_STUDY_WEEKDAYS
+        is_home_study_day(now.date())
         and "study" not in pings
         and "crunch" not in pings  # crunch уже пинганул про учёбу — не дублируем
         and not ({"работа", "учёба", "учеба"} & tags)

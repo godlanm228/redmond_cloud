@@ -127,7 +127,7 @@ def _ensure_schema_once(conn: sqlite3.Connection, path: Path) -> None:
 # Схема
 # ---------------------------------------------------------------------------
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 
 _SCHEMA = """
 -- Цели и дедлайны: id остаётся сквозным, как в JSON (на него ссылаются tools).
@@ -265,6 +265,27 @@ CREATE TABLE IF NOT EXISTS vision_results (
 );
 CREATE INDEX IF NOT EXISTS idx_vision_ts ON vision_results(ts);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_vision_sha ON vision_results(sha256);
+
+-- Учебное расписание. До 21.08.2026 лежало в коде константой STUDY_TIMETABLE
+-- («SoSe 2026»), и поэтому не отменялось ничем: владелец сказал, что у него
+-- каникулы, запись легла в дневник, а бот 17-19.08 продолжал звать на пары.
+-- Утверждение о жизни владельца обязано жить в данных и иметь срок действия:
+-- вне интервала [valid_from, valid_to] строка не видна никому.
+-- valid_to = NULL — бессрочно (действует, пока не закроют).
+-- kind: lecture — пара с местом и временем; home_study — день домашней учёбы.
+CREATE TABLE IF NOT EXISTS timetable (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    weekday    INTEGER NOT NULL,              -- 0 = понедельник
+    start      TEXT NOT NULL DEFAULT '',      -- HH:MM ('' у home_study без часов)
+    end        TEXT NOT NULL DEFAULT '',
+    title      TEXT NOT NULL,
+    kind       TEXT NOT NULL DEFAULT 'lecture',
+    valid_from TEXT NOT NULL,                 -- YYYY-MM-DD
+    valid_to   TEXT,                          -- YYYY-MM-DD или NULL
+    source     TEXT NOT NULL DEFAULT 'manual',
+    created    TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_timetable_day ON timetable(weekday, valid_from);
 """
 
 
