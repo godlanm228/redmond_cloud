@@ -67,7 +67,9 @@ def test_compression_keeps_record_ids():
     text = "\n".join(lines)
     assert len(text) > 400, "заготовка должна быть длиннее порога сжатия"
 
-    compressed = rg_mod._compress_tool_content(text)
+    # Как в бою: сжатие спрашивает у инструмента, что существенно.
+    compressed = rg_mod._compress_tool_content(
+        text, essentials=tools.OUTPUT_ESSENTIALS["read_diary"])
 
     missing = [i for i in range(80, 90) if f"#{i}" not in compressed]
     assert not missing, (

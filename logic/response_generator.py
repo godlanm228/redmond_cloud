@@ -239,48 +239,57 @@ def _clip(s: str, n: int = 300) -> str:
 _TOOL_COMPRESS_MARKER = "…[compressed — already processed above]"
 
 
-# Строка выдачи, несущая идентификатор записи: «  #88 2026-08-17T12:02 [спорт]: …».
-# Идентификаторы обязаны пережить сжатие — по ним модель ссылается на запись,
-# которую только что прочитала.
+# Обобщённые формы «существенной строки». Здесь только МЕХАНИКА извлечения;
+# решение о том, что существенно, принимает сам инструмент — см.
+# logic.tools.OUTPUT_ESSENTIALS. Компрессор не знает ни про дневники, ни
+# про поиск: раньше он копил это знание у себя (сначала строки URL: ради
+# web_search, потом #id ради дневника), и любой инструмент с иным форматом
+# ссылки ломался бы молча.
 _RECORD_ID_RX = re.compile(r"^\s*#(\d+)\s*(.*)$")
-_KEPT_IDS_LIMIT = 25
-_ID_LABEL_CHARS = 60
+_KEPT_LINES_LIMIT = 25
+_LABEL_CHARS = 60
 
 
-def _compress_tool_content(text: str, head: int = 400) -> str:
+def _essential_lines(tail_lines: List[str], kind: str) -> List[str]:
+    if kind == "ids":
+        out = []
+        for ln in tail_lines:
+            m = _RECORD_ID_RX.match(ln)
+            if m:
+                label = " ".join(m.group(2).split())[:_LABEL_CHARS]
+                out.append(f"#{m.group(1)} {label}".rstrip())
+        return out
+    if kind == "urls":
+        return [ln.strip() for ln in tail_lines if ln.strip().startswith("URL:")]
+    return []
+
+
+def _compress_tool_content(text: str, head: int = 400,
+                           essentials: Optional[str] = None) -> str:
     """
     Сжать tool-результат, который модель уже прочитала на предыдущем хопе.
     Без этого каждый web_fetch/web_search пересылается полностью на КАЖДОМ
-    следующем хопе — расход токенов растёт квадратично. Голову оставляем,
-    URL-строки сохраняем (нужны для цитирования в финальном ответе),
-    идентификаторы записей — тоже. Идемпотентно.
+    следующем хопе — расход токенов растёт квадратично.
 
-    Почему id отдельно. Функция писалась под web_search и хранила только
-    строки `URL:`. Выдача `read_diary(last_n=10)` — до 2000 символов — резалась
-    до 400, номера записей пропадали, и через две реплики модель не могла
-    сослаться на прочитанное. 17.08.2026 она назвала порядковый номер: на
-    просьбу исправить запись про спорт ушло `delete_diary_entry([3])`, и
-    погибла непричастная запись месячной давности, а неверная осталась.
-    Здесь остаётся компактный указатель «#id — о чём запись», по которому
-    сослаться можно, а места он занимает мало.
+    `essentials` — что в выдаче ЭТОГО инструмента обязано пережить сжатие.
+    Значение берётся из его собственной декларации, а не угадывается по виду
+    текста. None — сжимаем только голову, ничего не сохраняя.
+
+    Зачем так. 17.08.2026 выдача `read_diary(last_n=10)` — до 2000 символов —
+    резалась до 400, номера записей пропадали, и через две реплики модель не
+    могла сослаться на прочитанное. Она назвала порядковый номер: ушло
+    `delete_diary_entry([3])`, погибла непричастная запись месячной давности,
+    а ошибочная осталась. Чинить это, доучивая компрессор новым форматам, —
+    та же ошибка в меньшем масштабе: знание о своей выдаче принадлежит
+    инструменту. Идемпотентно.
     """
     if len(text) <= head or _TOOL_COMPRESS_MARKER in text:
         return text
 
-    tail = text[head:].splitlines()
-    kept_urls = [ln.strip() for ln in tail if ln.strip().startswith("URL:")]
-    kept_ids = []
-    for ln in tail:
-        m = _RECORD_ID_RX.match(ln)
-        if m:
-            label = " ".join(m.group(2).split())[:_ID_LABEL_CHARS]
-            kept_ids.append(f"#{m.group(1)} {label}".rstrip())
-
+    kept = _essential_lines(text[head:].splitlines(), essentials or "")
     out = text[:head].rstrip() + "\n" + _TOOL_COMPRESS_MARKER
-    if kept_ids:
-        out += "\n" + "\n".join(kept_ids[:_KEPT_IDS_LIMIT])
-    if kept_urls:
-        out += "\n" + "\n".join(kept_urls[:5])
+    if kept:
+        out += "\n" + "\n".join(kept[:_KEPT_LINES_LIMIT])
     return out
 
 
@@ -729,9 +738,13 @@ class ResponseGenerator:
             # Модель просит tools. Прошлые tool-результаты она уже прочитала
             # на этом вызове — сжимаем их, чтобы не пересылать полные тексты
             # на каждом следующем хопе (квадратичный расход TPM).
+            from logic.tools import OUTPUT_ESSENTIALS
             for m in messages:
                 if m.get("role") == "tool" and m.get("content"):
-                    m["content"] = _compress_tool_content(m["content"])
+                    m["content"] = _compress_tool_content(
+                        m["content"],
+                        essentials=OUTPUT_ESSENTIALS.get(m.get("name") or ""),
+                    )
 
             messages.append({
                 "role": "assistant",
