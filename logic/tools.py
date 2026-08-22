@@ -774,6 +774,80 @@ OUTPUT_ESSENTIALS: Dict[str, str] = {
 # Executors
 # ============================================================================
 
+# Схемы уже объявляют `required` и типы — у 21 инструмента из 34. Проверять
+# их в каждом исполнителе по отдельности значит писать одно и то же 34 раза
+# и забыть в 35-м. Пользуемся декларацией, которая и так есть.
+_PARAMS_BY_TOOL: Dict[str, Dict[str, Any]] = {
+    t["function"]["name"]: (t["function"].get("parameters") or {})
+    for t in TOOL_SCHEMAS
+}
+
+_NUMERIC_TYPES = {"integer": int, "number": float}
+
+
+def _is_blank(value: Any) -> bool:
+    return value is None or (isinstance(value, str) and not value.strip())
+
+
+def _validate_args(name: str, args: Dict[str, Any]) -> Tuple[Dict[str, Any], str, List[str]]:
+    """(нормализованные аргументы, ошибка). Ошибка непустая → не выполнять.
+
+    Закрывает два класса разом:
+      • `add_goal({})` создавал цель с пустым названием, `add_deadline({})` —
+        дедлайн без названия и срока; мусор ложился в базу и показывался
+        владельцу как настоящая запись;
+      • модели регулярно шлют числа словами, и `int("три")` бросал ValueError,
+        который всплывал наверх как «Provider groq failed» — баг инструмента
+        выглядел отказом провайдера.
+
+    Числовую строку («5») принимаем: это не ошибка модели, а её обычная
+    манера. Отказываем только там, где привести нечего.
+    """
+    params = _PARAMS_BY_TOOL.get(name) or {}
+    props = params.get("properties") or {}
+    out = {k: v for k, v in (args or {}).items()}
+
+    required = set(params.get("required") or [])
+    notes: List[str] = []
+
+    missing = [f for f in required if _is_blank(out.get(f))]
+    if missing:
+        return out, (
+            f"Не выполняю {name}: не хватает обязательных полей — "
+            f"{', '.join(missing)}. Заполни и позови снова."
+        ), notes
+
+    for field, spec in props.items():
+        if field not in out:
+            continue
+        if out[field] is None:
+            # Необязательное поле без значения: пусть исполнитель возьмёт
+            # свой дефолт, а не получит None в int().
+            del out[field]
+            continue
+        wanted = spec.get("type")
+        wanted = wanted if isinstance(wanted, list) else [wanted]
+        conv = next((_NUMERIC_TYPES[t] for t in wanted if t in _NUMERIC_TYPES), None)
+        if conv is None or isinstance(out[field], bool):
+            continue
+        if isinstance(out[field], (int, float)):
+            continue
+        try:
+            out[field] = conv(str(out[field]).strip())
+        except (TypeError, ValueError):
+            bad = out.pop(field)
+            if field in required:
+                return out, (
+                    f"Не выполняю {name}: поле {field} должно быть числом, "
+                    f"а пришло «{bad}». Пришли число."
+                ), notes
+            # Необязательное поле: работу не срываем, но и молча подменять
+            # значение нельзя — модель решит, что её аргумент приняли.
+            notes.append(f"(поле {field}: «{bad}» — не число, взял значение "
+                         f"по умолчанию)")
+    return out, "", notes
+
+
 class ToolSession:
     """Что модель РЕАЛЬНО видела в этой генерации.
 
@@ -881,6 +955,17 @@ def execute_tool(name: str, args: Dict[str, Any], rg=None,
     """
     logger.info("Tool: %s(%s)", name, args)
 
+    # Аргументы — по собственной схеме инструмента (required и типы там уже
+    # объявлены). Иначе в базу ложится мусор, а числа словами роняют всю
+    # генерацию и записываются как отказ провайдера.
+    original_args = args
+    args, bad_args, arg_notes = _validate_args(name, args)
+    if bad_args:
+        logger.warning("Tool rejected: %s → %s", name, bad_args)
+        return bad_args
+    for note in arg_notes:
+        logger.info("Tool args: %s %s", name, note)
+
     # Обращение к существующей записи по номеру — только если модель этот
     # номер видела в этой генерации (см. ToolSession).
     if session is not None:
@@ -894,9 +979,13 @@ def execute_tool(name: str, args: Dict[str, Any], rg=None,
     except Exception as e:  # noqa: BLE001
         from utils import failures
         failures.report(f"инструмент {name}", e,
-                        consequence=failures.DEGRADED, args=args)
+                        consequence=failures.DEGRADED, args=original_args)
         return f"Инструмент {name} не отработал: {e}"
 
+    if arg_notes:
+        # Значение подменили дефолтом — говорим об этом прямо в выдаче, иначе
+        # модель решит, что её аргумент приняли как есть.
+        result = " ".join(arg_notes) + "\n" + (result or "")
     logger.info("Tool result: %s → %s", name, _short_result(result))
 
     # Всё, на что инструмент сослался в ответе, модель теперь видела.
