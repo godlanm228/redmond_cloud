@@ -558,7 +558,7 @@ class ResponseGenerator:
         if not api_key:
             return None
 
-        from logic.tools import TOOL_SCHEMAS, execute_tool
+        from logic.tools import TOOL_SCHEMAS, ToolSession, execute_tool
         import json as _json
 
         primary_model = getattr(self.config, "groq_model", "openai/gpt-oss-120b")
@@ -591,6 +591,9 @@ class ResponseGenerator:
         # Per-conversation cache: какие секции досье уже отдавали в этой генерации.
         # Защищает от повторных read_dossier_section, которые сжигают TPM.
         dossier_returned: set = set()
+        # Одна на генерацию: помнит, какие записи модель РЕАЛЬНО видела,
+        # и не даёт менять запись по номеру, взятому наугад (инцидент 17.08).
+        tool_session = ToolSession()
         # Tracker успешно выполненных tool calls — для safety-net когда LLM
         # «молчит» после tools (Qwen 3 часто так делает).
         successful_tool_calls: List[str] = []
@@ -786,9 +789,9 @@ class ResponseGenerator:
                         )
                     else:
                         dossier_returned.add(section)
-                        result = execute_tool(fn_name, fn_args, rg=self)
+                        result = execute_tool(fn_name, fn_args, rg=self, session=tool_session)
                 else:
-                    result = execute_tool(fn_name, fn_args, rg=self)
+                    result = execute_tool(fn_name, fn_args, rg=self, session=tool_session)
 
                 # Делегирование: модель передала задачу другому агенту — её ход
                 # окончен. Маркер уходит наверх до handler'а (handoff-модель).
@@ -910,7 +913,8 @@ class ResponseGenerator:
             (Groq переисполнил бы и продублировал записи), отдаём summary.
         """
         from utils import gemini
-        from logic.tools import TOOL_SCHEMAS, execute_tool, DELEGATION_MARKER
+        from logic.tools import (TOOL_SCHEMAS, ToolSession, execute_tool,
+                                 DELEGATION_MARKER)
 
         api_key = getattr(self.config, "gemini_api_key", "") or gemini.api_key_from_env()
         if not api_key:
@@ -938,6 +942,9 @@ class ResponseGenerator:
         max_tokens = getattr(ctx.agent, "max_tokens", 800) if ctx.agent else 800
 
         dossier_returned: set = set()
+        # Одна на генерацию: помнит, какие записи модель РЕАЛЬНО видела,
+        # и не даёт менять запись по номеру, взятому наугад (инцидент 17.08).
+        tool_session = ToolSession()
         successful_tool_calls: List[str] = []
 
         max_hops = 5
@@ -1009,9 +1016,9 @@ class ResponseGenerator:
                                   f"in this conversation. Do not request it again.)")
                     else:
                         dossier_returned.add(section)
-                        result = execute_tool(fn_name, fn_args, rg=self)
+                        result = execute_tool(fn_name, fn_args, rg=self, session=tool_session)
                 else:
-                    result = execute_tool(fn_name, fn_args, rg=self)
+                    result = execute_tool(fn_name, fn_args, rg=self, session=tool_session)
 
                 # Делегирование: ход агента окончен, маркер наверх до handler'а.
                 if isinstance(result, str) and result.startswith(DELEGATION_MARKER):

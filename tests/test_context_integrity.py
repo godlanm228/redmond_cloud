@@ -101,7 +101,6 @@ def test_delete_reports_what_was_actually_removed():
 #    и уходит непричастная запись месячной давности.
 # --------------------------------------------------------------------------
 
-@pytest.mark.xfail(strict=True, reason="К2: деструктивный инструмент принимает id, который модель не могла узнать")
 def test_stale_index_does_not_destroy_unrelated_entry():
     ids = []
     for n in range(1, 6):
@@ -109,7 +108,10 @@ def test_stale_index_does_not_destroy_unrelated_entry():
         ids.append(e["id"])
     victim = ids[2]  # то, что модель назовёт «3»
 
-    tools._tool_delete_diary_entry({"entry_ids": [3]})
+    # Боевой путь: через диспетчер, с сессией генерации — только он
+    # знает, что модель реально видела в этом разговоре.
+    tools.execute_tool("delete_diary_entry", {"entry_ids": [3]},
+                       None, session=tools.ToolSession())
 
     survived = coach_storage.read_diary(last_n=50)
     assert any(e["id"] == victim for e in survived), (

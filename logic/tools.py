@@ -774,7 +774,99 @@ OUTPUT_ESSENTIALS: Dict[str, str] = {
 # Executors
 # ============================================================================
 
-def execute_tool(name: str, args: Dict[str, Any], rg=None) -> str:
+class ToolSession:
+    """Что модель РЕАЛЬНО видела в этой генерации.
+
+    17.08.2026 модель, потеряв листинг дневника из контекста, назвала
+    порядковый номер: `delete_diary_entry([3])`. Запись #3 — месячной
+    давности, к делу не относившаяся — исчезла, а ошибочная осталась.
+    Причина закрыта (ссылки переживают сжатие), но полагаться только на
+    неё нельзя: модель может назвать номер и просто так.
+
+    Правило: обращаться к существующей записи по номеру можно, только если
+    этот номер пришёл из чтения В ЭТОЙ ЖЕ генерации либо из записи, которую
+    модель сама только что создала.
+    """
+
+    def __init__(self) -> None:
+        self.seen: Dict[str, set] = {}
+
+    def note(self, kind: str, ids: Any) -> None:
+        if not kind:
+            return
+        self.seen.setdefault(kind, set()).update(int(i) for i in ids)
+
+    def saw(self, kind: str, rec_id: int) -> bool:
+        return int(rec_id) in self.seen.get(kind, set())
+
+
+# С какой таблицей работает инструмент. Нужно, чтобы номер #3 из дневника
+# не считался «увиденным» для дедлайнов: нумерация у таблиц своя.
+RECORD_KIND: Dict[str, str] = {
+    "read_diary": "diary", "add_diary_entry": "diary",
+    "delete_diary_entry": "diary", "log_meal": "diary",
+    "list_goals": "goal", "add_goal": "goal", "mark_goal_done": "goal",
+    "list_deadlines": "deadline", "add_deadline": "deadline",
+    "mark_deadline_done": "deadline", "delete_deadline": "deadline",
+    "postpone_deadline": "deadline",
+    "find_photo": "photo",
+}
+
+# Инструменты, которые обращаются к СУЩЕСТВУЮЩЕЙ записи по номеру, и поля,
+# где этот номер лежит. Именно они могут попасть не в ту запись.
+ADDRESSED_RECORDS: Dict[str, Tuple[str, ...]] = {
+    "delete_diary_entry": ("entry_ids", "entry_id"),
+    "delete_deadline": ("deadline_id",),
+    "postpone_deadline": ("deadline_id",),
+    "mark_deadline_done": ("deadline_id",),
+    "mark_goal_done": ("goal_id",),
+}
+
+# Чем модель может получить настоящие номера.
+_READ_HINT = {"diary": "read_diary", "goal": "list_goals",
+              "deadline": "list_deadlines", "photo": "find_photo"}
+
+_REF_RX = re.compile(r"#(\d+)")
+
+
+def _ids_from(value: Any) -> List[int]:
+    """Номера из аргумента в любой форме, которую присылает модель."""
+    if isinstance(value, bool) or value is None:
+        return []
+    if isinstance(value, (int, float)):
+        return [int(value)]
+    if isinstance(value, str):
+        return [int(p) for p in value.replace("#", " ").replace(",", " ").split()
+                if p.isdigit()]
+    if isinstance(value, (list, tuple)):
+        out: List[int] = []
+        for item in value:
+            out.extend(_ids_from(item))
+        return out
+    return []
+
+
+def _refuse_unseen(name: str, args: Dict[str, Any], session: "ToolSession") -> str:
+    """'' — можно выполнять. Иначе текст отказа для модели."""
+    fields = ADDRESSED_RECORDS.get(name)
+    if not fields:
+        return ""
+    kind = RECORD_KIND.get(name, "")
+    asked: List[int] = []
+    for f in fields:
+        asked.extend(_ids_from(args.get(f)))
+    unseen = [i for i in asked if not session.saw(kind, i)]
+    if not unseen:
+        return ""
+    hint = _READ_HINT.get(kind, "чтение")
+    plural = "этих записей" if len(unseen) > 1 else "этой записи"
+    return (f"Не трогаю {', '.join('#' + str(i) for i in unseen)} — "
+            f"{plural} я в этом разговоре не видел, а номер мог быть назван "
+            f"наугад. Сначала {hint}, потом обращайся по настоящему id.")
+
+
+def execute_tool(name: str, args: Dict[str, Any], rg=None,
+                 session: Optional["ToolSession"] = None) -> str:
     """Диспетчер tool-вызовов с записью ИСХОДА, а не только вызова.
 
     Раньше в лог уходила одна строка «Tool: name(args)», и что из этого
@@ -788,6 +880,15 @@ def execute_tool(name: str, args: Dict[str, Any], rg=None) -> str:
     отчитывается там, где случился, и по своему последствию).
     """
     logger.info("Tool: %s(%s)", name, args)
+
+    # Обращение к существующей записи по номеру — только если модель этот
+    # номер видела в этой генерации (см. ToolSession).
+    if session is not None:
+        refusal = _refuse_unseen(name, args, session)
+        if refusal:
+            logger.warning("Tool refused: %s(%s) → %s", name, args, refusal)
+            return refusal
+
     try:
         result = _dispatch_tool(name, args, rg)
     except Exception as e:  # noqa: BLE001
@@ -795,7 +896,15 @@ def execute_tool(name: str, args: Dict[str, Any], rg=None) -> str:
         failures.report(f"инструмент {name}", e,
                         consequence=failures.DEGRADED, args=args)
         return f"Инструмент {name} не отработал: {e}"
+
     logger.info("Tool result: %s → %s", name, _short_result(result))
+
+    # Всё, на что инструмент сослался в ответе, модель теперь видела.
+    # Формат ссылки единый (#N), поэтому разбор общий и про дневники
+    # с дедлайнами ничего не знает.
+    if session is not None:
+        session.note(RECORD_KIND.get(name, ""),
+                     _REF_RX.findall(result or ""))
     return result
 
 
