@@ -179,7 +179,10 @@ class SystemPromptTests(unittest.TestCase):
         # Переносы строк в тексте промпта не должны ломать проверку смысла.
         flat = " ".join(cw.SYSTEM_APPENDIX.split())
         self.assertIn("memory.sqlite", flat)
-        self.assertIn("замороженный архив", flat)
+        # Проверяем СМЫСЛ, а не формулировку: Cipher обязан знать, что
+        # единственный источник живых данных — база, а JSON ими не является.
+        self.assertIn("живых данных", flat)
+        self.assertNotIn("data/coach", flat)  # каталог убран 22.08
 
 
 class LockTests(unittest.TestCase):
