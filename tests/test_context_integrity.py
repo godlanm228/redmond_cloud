@@ -8,7 +8,8 @@
 что оно совпало с намерением.
 
 Незакрытые помечены xfail(strict=True) (по мере починки метки снимаются —
-22.08 сняты две: сбои памяти стали слышны, см. utils/failures). Это не «отключено», а зафиксировано:
+22.08 сняты четыре: сбои памяти стали слышны и отказ перестал
+выдавать минутный лимит за суточный). Это не «отключено», а зафиксировано:
 тест выполняется, его падение ожидаемо и не красит прогон, но как только
 дефект починят — XPASS уронит набор и заставит снять метку. Забыть про них
 нельзя по построению.
@@ -217,7 +218,6 @@ TPD_ERROR = (
 )
 
 
-@pytest.mark.xfail(strict=True, reason="К9: поминутный лимит выдаётся владельцу за суточный")
 def test_minute_limit_is_not_reported_as_daily():
     classify = getattr(rg_mod, "_is_daily_limit_error", None)
     assert classify is not None, (
@@ -231,7 +231,6 @@ def test_minute_limit_is_not_reported_as_daily():
     )
 
 
-@pytest.mark.xfail(strict=True, reason="К9: время ожидания из тела ошибки не читается")
 def test_retry_delay_is_extracted_from_the_error():
     extract = getattr(rg_mod, "_retry_after_seconds", None)
     assert extract is not None, (

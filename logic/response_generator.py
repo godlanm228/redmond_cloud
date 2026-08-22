@@ -1,6 +1,7 @@
 import logging
 import os
 import random
+import math
 import re
 import threading
 from dataclasses import dataclass, field
@@ -55,6 +56,68 @@ def _is_rate_limit_error(err: str) -> bool:
     """429 / исчерпание лимита Groq (в т.ч. дневной TPD)."""
     low = (err or "").lower()
     return "rate_limit" in low or "429" in low or "tokens per day" in low or "tpd" in low
+
+
+# Поминутный лимит и суточный — разные события, и владельцу их путать нельзя.
+# До 22.08.2026 любой 429 объявлялся дневным: в чат уходило «Дневной лимит
+# Groq исчерпан, сброс в полночь по UTC», хотя провайдер в том же теле писал
+# «Please try again in 16.45s». Заглушка длиной ровно 108 символов ушла в чат
+# трижды — 19.06, 21.06 и 15.08 вместо вечернего итога.
+_DAILY_MARKERS = ("tokens per day", "requests per day", "tpd", "rpd",
+                  "per day", "daily limit")
+_RETRY_RX = re.compile(
+    r"try again in\s+(?:(\d+)h)?\s*(?:(\d+)m)?\s*(?:([\d.]+)s)?", re.IGNORECASE)
+
+
+def _is_daily_limit_error(err: str) -> bool:
+    """Суточный лимит — ждать до сброса. Поминутный сюда НЕ попадает."""
+    low = (err or "").lower()
+    if "tokens per minute" in low or "requests per minute" in low or "tpm" in low:
+        return False
+    return any(m in low for m in _DAILY_MARKERS)
+
+
+def _retry_after_seconds(err: str) -> Optional[float]:
+    """Сколько ждать по словам самого провайдера. None — он не сказал.
+
+    Groq пишет «Please try again in 16.454999999s» для минутного лимита
+    и «in 3h21m» для суточного. Это поле никто не читал.
+    """
+    m = _RETRY_RX.search(err or "")
+    if not m or not any(m.groups()):
+        return None
+    hours, minutes, seconds = m.groups()
+    total = (int(hours or 0) * 3600) + (int(minutes or 0) * 60) + float(seconds or 0)
+    return total or None
+
+
+def _rate_limit_reply(err: str) -> str:
+    """Текст владельцу по ФАКТИЧЕСКОЙ причине, а не по худшему предположению."""
+    wait = _retry_after_seconds(err)
+    if _is_daily_limit_error(err):
+        when = f" Сброс примерно через {_human_wait(wait)}." if wait else ""
+        return ("Дневной лимит Groq исчерпан (бесплатный тариф)." + when +
+                " Чуть позже смогу ответить нормально.")
+    if wait:
+        return (f"Упёрся в минутный лимит — модели сейчас перегружены. "
+                f"Повтори через {_human_wait(wait)}.")
+    return "Модели сейчас перегружены. Повтори через полминуты."
+
+
+def _human_wait(seconds: Optional[float]) -> str:
+    """Ожидание словами. Секунды и минуты округляем ВВЕРХ: сказать «16 сек»
+    на 16.45 значит отправить владельца повторять раньше, чем провайдер
+    разрешит. Длинные интервалы показываем с минутами — «~4 ч» вместо
+    3ч21м врёт на сорок минут."""
+    if not seconds:
+        return "какое-то время"
+    if seconds < 90:
+        return f"~{math.ceil(seconds)} сек"
+    minutes = math.ceil(seconds / 60)
+    if minutes < 90:
+        return f"~{minutes} мин"
+    hours, rest = divmod(minutes, 60)
+    return f"~{hours} ч" + (f" {rest} мин" if rest else "")
 
 
 def _is_oversize_error(err: str) -> bool:
@@ -601,12 +664,9 @@ class ResponseGenerator:
                     if fallback:
                         return fallback
                     if rate_limited:
-                        # Формулировка без рода: строку шлют и Iris (она), и
-                        # Redmond/Newser (он) — «Упёрся…» от Айрис резало глаз.
-                        return (
-                            "Дневной лимит Groq исчерпан (бесплатный тариф, сброс в "
-                            "полночь по UTC). Чуть позже смогу ответить нормально."
-                        )
+                        # Причина берётся из тела ошибки, а не угадывается:
+                        # минутный лимит — это полминуты ожидания, а не сутки.
+                        return _rate_limit_reply(" | ".join(hop_errors))
                     return None
                 # Прочие отказы (снятая модель, сеть, 400). Если рисёрч уже собран —
                 # дособираем ответ на Gemini из накопленных messages, иначе он уйдёт
