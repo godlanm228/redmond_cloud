@@ -736,6 +736,40 @@ TOOL_SCHEMAS = [
 ]
 
 
+# Что в выдаче инструмента обязано пережить сжатие на следующих хопах.
+#
+# Знание принадлежит ИНСТРУМЕНТУ, а не компрессору. Раньше компрессор
+# догадывался по виду текста: сначала умел строки `URL:` (писался под
+# web_search), потом его доучили `#id` ради дневника. Любой инструмент с
+# другим форматом ссылки ломался бы молча — ровно так 17.08.2026 модель,
+# потеряв номера записей, назвала порядковый и снесла непричастную.
+#
+# "ids"  — выдача содержит ссылки вида `#N`, по ним модель адресует записи
+# "urls" — выдача содержит строки `URL:`, они нужны для цитирования
+# отсутствие ключа — сжимать без сохранений
+OUTPUT_ESSENTIALS: Dict[str, str] = {
+    # читающие — отдают списки записей, по которым модель потом адресует
+    "read_diary": "ids",
+    "list_goals": "ids",
+    "list_deadlines": "ids",
+    "find_photo": "ids",
+    # пишущие — отдают ссылку на только что созданную или изменённую запись
+    "add_goal": "ids",
+    "mark_goal_done": "ids",
+    "add_deadline": "ids",
+    "mark_deadline_done": "ids",
+    "delete_deadline": "ids",
+    "postpone_deadline": "ids",
+    "add_diary_entry": "ids",
+    "delete_diary_entry": "ids",
+    "log_meal": "ids",
+    # поисковые — ссылки на источники нужны для цитирования
+    "web_search": "urls",
+    "web_fetch": "urls",
+    "get_news_headlines": "urls",
+}
+
+
 # ============================================================================
 # Executors
 # ============================================================================
@@ -1140,7 +1174,7 @@ def _tool_find_photo(args: Dict[str, Any]) -> str:
         label = f" «{r['label']}»" if r["label"] else ""
         applied = f" · записано: {r['applied']}" if r["applied"] else ""
         gone = "" if r["exists"] else " · файл уже удалён по сроку, остался разбор"
-        lines.append(f"[{r['id']}] {when}{label} — {r['description'][:110]}{applied}{gone}")
+        lines.append(f"#{r['id']} {when}{label} — {r['description'][:110]}{applied}{gone}")
     return "Нашла в архиве:\n" + "\n".join(lines)
 
 
