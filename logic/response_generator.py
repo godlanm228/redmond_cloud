@@ -239,20 +239,46 @@ def _clip(s: str, n: int = 300) -> str:
 _TOOL_COMPRESS_MARKER = "…[compressed — already processed above]"
 
 
+# Строка выдачи, несущая идентификатор записи: «  #88 2026-08-17T12:02 [спорт]: …».
+# Идентификаторы обязаны пережить сжатие — по ним модель ссылается на запись,
+# которую только что прочитала.
+_RECORD_ID_RX = re.compile(r"^\s*#(\d+)\s*(.*)$")
+_KEPT_IDS_LIMIT = 25
+_ID_LABEL_CHARS = 60
+
+
 def _compress_tool_content(text: str, head: int = 400) -> str:
     """
     Сжать tool-результат, который модель уже прочитала на предыдущем хопе.
     Без этого каждый web_fetch/web_search пересылается полностью на КАЖДОМ
     следующем хопе — расход токенов растёт квадратично. Голову оставляем,
-    URL-строки сохраняем (нужны для цитирования в финальном ответе).
-    Идемпотентно (повторный вызов ничего не меняет).
+    URL-строки сохраняем (нужны для цитирования в финальном ответе),
+    идентификаторы записей — тоже. Идемпотентно.
+
+    Почему id отдельно. Функция писалась под web_search и хранила только
+    строки `URL:`. Выдача `read_diary(last_n=10)` — до 2000 символов — резалась
+    до 400, номера записей пропадали, и через две реплики модель не могла
+    сослаться на прочитанное. 17.08.2026 она назвала порядковый номер: на
+    просьбу исправить запись про спорт ушло `delete_diary_entry([3])`, и
+    погибла непричастная запись месячной давности, а неверная осталась.
+    Здесь остаётся компактный указатель «#id — о чём запись», по которому
+    сослаться можно, а места он занимает мало.
     """
     if len(text) <= head or _TOOL_COMPRESS_MARKER in text:
         return text
-    kept_urls = [
-        ln.strip() for ln in text[head:].splitlines() if ln.strip().startswith("URL:")
-    ]
+
+    tail = text[head:].splitlines()
+    kept_urls = [ln.strip() for ln in tail if ln.strip().startswith("URL:")]
+    kept_ids = []
+    for ln in tail:
+        m = _RECORD_ID_RX.match(ln)
+        if m:
+            label = " ".join(m.group(2).split())[:_ID_LABEL_CHARS]
+            kept_ids.append(f"#{m.group(1)} {label}".rstrip())
+
     out = text[:head].rstrip() + "\n" + _TOOL_COMPRESS_MARKER
+    if kept_ids:
+        out += "\n" + "\n".join(kept_ids[:_KEPT_IDS_LIMIT])
     if kept_urls:
         out += "\n" + "\n".join(kept_urls[:5])
     return out

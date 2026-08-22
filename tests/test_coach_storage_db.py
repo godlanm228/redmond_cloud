@@ -200,7 +200,10 @@ class DiaryTests(unittest.TestCase):
         a = coach_storage.add_diary_entry("первая запись")
         coach_storage.add_diary_entry("вторая запись")
         removed = coach_storage.delete_diary_entries([a["id"], 999])
-        self.assertEqual(removed, [a["id"]])
+        # Контракт И2: возвращаются УДАЛЁННЫЕ ЗАПИСИ, а не их номера —
+        # иначе отчёт владельцу нечем наполнить, и подмену не заметить.
+        self.assertEqual([e["id"] for e in removed], [a["id"]])
+        self.assertIn("text", removed[0])
         self.assertEqual(len(coach_storage.read_diary()), 1)
 
     def test_delete_empty_list_is_noop(self):
