@@ -115,17 +115,39 @@ class DeadlineTests(unittest.TestCase):
     def test_update_missing_returns_none(self):
         self.assertIsNone(coach_storage.update_deadline(404, due="2026-09-08"))
 
-    def test_upcoming_window_filters_by_date(self):
+    def test_upcoming_window_keeps_the_overdue(self):
+        """Просроченный — самое важное, что можно показать. Раньше окно его
+        отрезало, и на вопрос «какие у меня дедлайны» владелец не видел
+        именно тот, который пропустил."""
         today = datetime.now().date()
         coach_storage.add_deadline("скоро", (today + timedelta(days=2)).isoformat())
         coach_storage.add_deadline("нескоро", (today + timedelta(days=90)).isoformat())
         coach_storage.add_deadline("прошлый", (today - timedelta(days=5)).isoformat())
         near = coach_storage.list_deadlines(upcoming_days=7)
-        self.assertEqual([d["title"] for d in near], ["скоро"])
+        titles = [d["title"] for d in near]
+        self.assertIn("прошлый", titles, "просроченный дедлайн скрыт от владельца")
+        self.assertIn("скоро", titles)
+        self.assertNotIn("нескоро", titles, "окно всё ещё должно отсекать далёкое")
 
-    def test_broken_date_does_not_break_window(self):
-        coach_storage.add_deadline("кривая дата", "не-дата")
+    def test_overdue_comes_first(self):
+        today = datetime.now().date()
+        coach_storage.add_deadline("скоро", (today + timedelta(days=2)).isoformat())
+        coach_storage.add_deadline("прошлый", (today - timedelta(days=5)).isoformat())
+        near = coach_storage.list_deadlines(upcoming_days=7)
+        self.assertEqual(near[0]["title"], "прошлый")
+
+    def test_closed_deadlines_stay_out_of_the_window(self):
+        today = datetime.now().date()
+        d = coach_storage.add_deadline("сдал", (today - timedelta(days=5)).isoformat())
+        coach_storage.mark_deadline_done(d["id"])
         self.assertEqual(coach_storage.list_deadlines(upcoming_days=7), [])
+
+    def test_broken_date_is_visible_not_swallowed(self):
+        """Кривая дата раньше означала «лежит в базе и не показывается
+        никогда» — молча, без строчки в логе."""
+        coach_storage.add_deadline("кривая дата", "не-дата")
+        window = coach_storage.list_deadlines(upcoming_days=7)
+        self.assertEqual([d["title"] for d in window], ["кривая дата"])
         self.assertEqual(len(coach_storage.list_deadlines()), 1)
 
     def test_deleting_middle_id_does_not_cause_reuse(self):
