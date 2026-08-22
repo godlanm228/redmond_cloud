@@ -31,6 +31,52 @@ NOISY_LOGGERS = (
 )
 
 
+# Сетевая рябь long-polling'а: библиотека переподключается сама, владелец
+# ничего не теряет. Пока она пишется как ERROR, настоящих ошибок в логе не
+# видно — за три месяца из 244 строк уровня ERROR 242 были именно ею, и 180
+# из них ровно в 01:00 UTC (окно обслуживания Telegram).
+_TRANSIENT_NETWORK = (
+    "bad gateway",
+    "readerror",
+    "timed out",
+    "remoteprotocolerror",
+    "server disconnected",
+    "connection reset",
+    "temporary failure in name resolution",
+)
+
+# Логгеры, чью сетевую рябь понижаем. Только они: «Bad Gateway» из нашего
+# кода — не рябь polling'а, и глушить его нельзя.
+_POLLING_LOGGERS = ("telegram.ext.Updater", "telegram.ext._updater")
+
+
+class TransientNetworkFilter(logging.Filter):
+    """Понижает транзиентный сетевой сбой polling'а до INFO (инвариант И1:
+    уровень определяется последствием для владельца).
+
+    Запись НЕ выбрасывается: шум нужен для диагностики, он просто перестаёт
+    занимать уровень, зарезервированный за настоящими поломками.
+    """
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        try:
+            if record.levelno < logging.ERROR:
+                return True
+            if record.name not in _POLLING_LOGGERS:
+                return True
+            text = record.getMessage()
+            exc = getattr(record, "exc_info", None)
+            if exc and exc[1] is not None:
+                text += " " + str(exc[1])
+            low = text.lower()
+            if any(marker in low for marker in _TRANSIENT_NETWORK):
+                record.levelno = logging.INFO
+                record.levelname = "INFO"
+        except Exception:  # noqa: BLE001 — фильтр не имеет права ронять логирование
+            pass
+        return True
+
+
 class RedactingFormatter(logging.Formatter):
     """Маскирует известные секреты в КАЖДОЙ строке лога, включая traceback'и.
 
@@ -80,6 +126,18 @@ def setup_logging(level: str = "INFO") -> None:
         handler = logging.StreamHandler(sys.stdout)
         handler.setFormatter(formatter)
         root.addHandler(handler)
+    else:
+        # Обработчик уже кто-то поставил (импорт библиотеки, тестовый раннер).
+        # Без этого маскировка секретов не применялась бы вообще: формат
+        # ставится только на СВОЙ handler, а пишет чужой.
+        for existing in root.handlers:
+            existing.setFormatter(formatter)
+
+    # Уровень по последствию — в том числе для чужих логгеров (см. И1).
+    noise_filter = TransientNetworkFilter()
+    for handler in root.handlers:
+        if not any(isinstance(f, TransientNetworkFilter) for f in handler.filters):
+            handler.addFilter(noise_filter)
 
     for name in NOISY_LOGGERS:
         logging.getLogger(name).setLevel(logging.WARNING)

@@ -1,0 +1,28 @@
+# Ротация лога хаба.
+#
+# На 21.08.2026 logs/v2.log был одним файлом с 09.06 — 936 КБ и растущий,
+# без единой ротации. Читать его целиком приходилось каждый раз, а место
+# на VM (45 ГБ, занято 17%) не бесконечное.
+#
+# copytruncate обязателен: файл пишет systemd через
+#   StandardOutput=append:/home/ubuntu/redmond-hub/logs/v2.log
+# то есть держит дескриптор открытым. Обычное переименование оставило бы
+# сервис писать в уже отвязанный inode, и лог просто исчез бы из виду
+# до следующего рестарта.
+#
+# Установка (один раз, на VM):
+#   sudo cp ~/redmond-hub/deploy/logrotate-redmond-hub /etc/logrotate.d/redmond-hub
+#   sudo logrotate -d /etc/logrotate.d/redmond-hub    # проверка вхолостую
+#   sudo logrotate -f /etc/logrotate.d/redmond-hub    # первый прогон
+
+/home/ubuntu/redmond-hub/logs/v2.log {
+    monthly
+    rotate 6
+    size 20M
+    compress
+    delaycompress
+    missingok
+    notifempty
+    copytruncate
+    create 0640 root ubuntu
+}
