@@ -34,6 +34,8 @@ from typing import Any, Dict, List, Optional
 
 import requests
 
+from utils import failures
+
 from logic.agents import (AGENTS, REDMOND, AgentConfig, agent_by_name,
                           agent_by_username, default_agent, find_by_trigger)
 
@@ -274,7 +276,7 @@ def _ask_gemini(system: str, user_msg: str) -> str:
             temperature=0.0, max_tokens=20,
         ).strip()
     except Exception as e:
-        logger.debug("Router Gemini failed: %s", e)
+        failures.report("роутер Gemini", e, consequence=failures.DEGRADED)
         return ""
 
 
@@ -295,7 +297,7 @@ def _ask_groq(system: str, user_msg: str, api_key: str) -> str:
         )
         return (completion.choices[0].message.content or "").strip()
     except Exception as e:
-        logger.debug("Router Groq failed: %s", e)
+        failures.report("роутер Groq", e, consequence=failures.DEGRADED)
         return ""
 
 

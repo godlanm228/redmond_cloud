@@ -7,7 +7,8 @@
 Общий класс дефекта у всех: действие рапортует об успехе, и никто не сверяет,
 что оно совпало с намерением.
 
-Все они помечены xfail(strict=True). Это не «отключено», а зафиксировано:
+Незакрытые помечены xfail(strict=True) (по мере починки метки снимаются —
+22.08 сняты две: сбои памяти стали слышны, см. utils/failures). Это не «отключено», а зафиксировано:
 тест выполняется, его падение ожидаемо и не красит прогон, но как только
 дефект починят — XPASS уронит набор и заставит снять метку. Забыть про них
 нельзя по построению.
@@ -168,7 +169,6 @@ def test_user_words_survive_a_run_of_bot_pings():
 #    и в логе не будет ни строки.
 # --------------------------------------------------------------------------
 
-@pytest.mark.xfail(strict=True, reason="К11: сбой поиска по памяти уходит в DEBUG при уровне INFO")
 def test_memory_search_failure_is_audible(caplog):
     class DeadMemory:
         def search(self, *a, **kw):
@@ -184,7 +184,6 @@ def test_memory_search_failure_is_audible(caplog):
     )
 
 
-@pytest.mark.xfail(strict=True, reason="К11: провал записи в память уходит в DEBUG при уровне INFO")
 def test_memory_persist_failure_is_audible(caplog):
     class UnwritableMemory:
         def add(self, *a, **kw):

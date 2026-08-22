@@ -406,7 +406,9 @@ class ResponseGenerator:
                     f"{r['user']} => {r['bot']}" for r in results if r.get("score", 0) > 0.5
                 ]
             except Exception as e:
-                logger.debug("Memory search failed: %s", e)
+                # Ответ уйдёт без контекста памяти — владелец должен узнать (И1).
+                from utils import failures
+                failures.report("поиск по памяти", e, consequence=failures.DEGRADED)
 
         # Решаем нужен ли web-поиск через LLM-router (видит факты владельца).
         # Router сам формулирует query с учётом контекста — если владелец
@@ -1498,7 +1500,10 @@ class ResponseGenerator:
             try:
                 self.mem.add(user_text, response)
             except Exception as e:
-                logger.debug("Failed to persist memory: %s", e)
+                # Факт потерян навсегда — это потеря данных, а не шум (И1).
+                from utils import failures
+                failures.report("запись в долгую память", e,
+                                consequence=failures.DATA_LOSS, chat_id=chat_id)
 
         # Per-chat history — изоляция между chat_id (Iris не путается с Newser
         # когда у Влада параллельно идут диалоги в разных меншенах).

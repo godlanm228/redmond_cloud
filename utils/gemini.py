@@ -30,6 +30,8 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import requests
 
+from utils import failures
+
 logger = logging.getLogger(__name__)
 
 _API_BASE = "https://generativelanguage.googleapis.com/v1beta"
@@ -65,29 +67,51 @@ def _bump_usage() -> None:
 
 
 def _post_generate(key: str, body: Dict[str, Any], model: str, timeout: float) -> Optional[dict]:
-    """POST generateContent с одним ретраем. Засчитывает запрос в RPD-гард при успехе.
-    Один ретрай: транзиентный 429/timeout не должен рушить fallback/поиск."""
+    """POST generateContent. Засчитывает запрос в RPD-гард при успехе.
+
+    Ретрай только там, где он может помочь: 429 и 5xx проходят со второй
+    попытки, сеть тоже. На 4xx (кроме 429) повтор бессмысленен по определению —
+    запрос не станет валиднее, а секунда сна и лишний запрос тратятся впустую.
+
+    Тело ответа НЕ теряется (инвариант И1, utils/failures): раньше здесь стоял
+    `raise_for_status()`, и от ошибки оставалась одна строка статуса. Из-за
+    этого восемь 400-х, ронявших основного провайдера Iris в августе 2026,
+    разобрать было нечем — причина написана как раз в теле.
+    """
     import time
-    last_err = None
-    for _attempt in range(2):
+
+    url = f"{_API_BASE}/models/{model or DEFAULT_MODEL}:generateContent"
+    last: Any = None
+    for attempt in range(2):
         try:
             # Ключ в заголовке, НЕ в query-параметре: requests включает полный URL
             # в текст исключения, и ?key=… месяцами светился в v2.log плейнтекстом.
             resp = requests.post(
-                f"{_API_BASE}/models/{model or DEFAULT_MODEL}:generateContent",
-                headers={"x-goog-api-key": key},
-                json=body,
-                timeout=timeout,
+                url, headers={"x-goog-api-key": key}, json=body, timeout=timeout,
             )
-            resp.raise_for_status()
-            _bump_usage()
-            return resp.json()
-        except Exception as e:
-            last_err = e
-            if _attempt == 0:
-                time.sleep(1.0)
-    logger.warning("Gemini call failed (2 attempts): %s", last_err)
+            failure = failures.check(resp)
+            if failure is None:
+                _bump_usage()
+                return resp.json()
+            last = failure
+            if not _worth_retrying(failure.status):
+                break
+        except Exception as e:  # noqa: BLE001 — сеть/таймаут/битый JSON
+            last = e
+        if attempt == 0:
+            time.sleep(1.0)
+
+    failures.report(
+        "Gemini generateContent", last,
+        consequence=failures.DEGRADED,
+        model=model or DEFAULT_MODEL,
+    )
     return None
+
+
+def _worth_retrying(status: int) -> bool:
+    """429 и 5xx — транзиентны. Прочие 4xx повтором не лечатся."""
+    return status == 429 or status >= 500
 
 
 def generate(
