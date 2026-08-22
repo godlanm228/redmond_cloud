@@ -741,12 +741,40 @@ TOOL_SCHEMAS = [
 # ============================================================================
 
 def execute_tool(name: str, args: Dict[str, Any], rg=None) -> str:
-    """
-    Диспетчер tool-вызовов. Возвращает строку для tool-response.
-    rg — ResponseGenerator (для доступа к searcher/owner_profile).
+    """Диспетчер tool-вызовов с записью ИСХОДА, а не только вызова.
+
+    Раньше в лог уходила одна строка «Tool: name(args)», и что из этого
+    вышло — нигде. Поэтому инцидент 17.08.2026 (удалили не ту запись
+    дневника) пришлось раскапывать запросами к базе: в логе было видно
+    `delete_diary_entry({'entry_ids': [3]})` и ничего о том, что удалилось.
+
+    Исключение инструмента здесь же и остаётся. Без этого оно всплывало
+    в `_generate_with_providers` и записывалось как `Provider groq failed` —
+    баг инструмента выглядел отказом провайдера (инвариант И1: сбой
+    отчитывается там, где случился, и по своему последствию).
     """
     logger.info("Tool: %s(%s)", name, args)
+    try:
+        result = _dispatch_tool(name, args, rg)
+    except Exception as e:  # noqa: BLE001
+        from utils import failures
+        failures.report(f"инструмент {name}", e,
+                        consequence=failures.DEGRADED, args=args)
+        return f"Инструмент {name} не отработал: {e}"
+    logger.info("Tool result: %s → %s", name, _short_result(result))
+    return result
 
+
+def _short_result(result: Any, limit: int = 160) -> str:
+    """Исход в лог — коротко, но узнаваемо: по нему должно быть видно,
+    что именно произошло с данными владельца."""
+    text = " ".join(str(result or "").split())
+    return text[:limit] + ("…" if len(text) > limit else "")
+
+
+def _dispatch_tool(name: str, args: Dict[str, Any], rg=None) -> str:
+    """Собственно разбор имени. Возвращает строку для tool-response.
+    rg — ResponseGenerator (для доступа к searcher/owner_profile)."""
     if name == "get_weather":
         return _tool_get_weather(args.get("city", ""))
     if name == "web_search":
