@@ -264,18 +264,28 @@ def read_diary(last_n: int = 10, tag: Optional[str] = None) -> List[Dict[str, An
     return rows[-last_n:] if last_n else rows
 
 
-def delete_diary_entries(ids: List[int]) -> List[int]:
-    """Удалить записи дневника по id. Возвращает РЕАЛЬНО удалённые id
-    (чтобы Iris отчитывалась только о фактически снесённом, а не врала)."""
+def delete_diary_entries(ids: List[int]) -> List[Dict[str, Any]]:
+    """Удалить записи дневника по id. Возвращает УДАЛЁННЫЕ ЗАПИСИ целиком.
+
+    Раньше возвращались только номера, и Iris отчитывалась «Удалила записи:
+    #3» — правду о неверном действии. 17.08.2026 так погибла непричастная
+    запись месячной давности, а ошибочная осталась на месте, и заметить это
+    было нечем. Инвариант И2: изменяющее действие сообщает, ЧТО стало, а не
+    «ок» — тогда подмена видна сразу, в том же сообщении.
+
+    Чтение и удаление под одной транзакцией: между SELECT и DELETE запись
+    могла исчезнуть, и отчёт разошёлся бы с фактом.
+    """
     id_set = {int(i) for i in ids}
     if not id_set:
         return []
     marks = ",".join("?" * len(id_set))
-    existing = [r["id"] for r in
-                db.query(f"SELECT id FROM diary WHERE id IN ({marks})", tuple(id_set))]
-    if existing:
-        db.execute(f"DELETE FROM diary WHERE id IN ({marks})", tuple(id_set))
-    return existing
+    with db.transaction() as conn:
+        rows = [_diary_row(r) for r in
+                conn.execute(f"SELECT * FROM diary WHERE id IN ({marks})", tuple(id_set))]
+        if rows:
+            conn.execute(f"DELETE FROM diary WHERE id IN ({marks})", tuple(id_set))
+    return rows
 
 
 def last_entry_per_tag(tags: List[str]) -> Dict[str, Dict[str, Any]]:

@@ -58,7 +58,6 @@ def _bare_rg(**attrs):
 #    id пропали, модель назвала порядковый номер.
 # --------------------------------------------------------------------------
 
-@pytest.mark.xfail(strict=True, reason="К3: сжатие выдачи инструмента уничтожает id записей")
 def test_compression_keeps_record_ids():
     lines = ["Последние записи (10):"]
     for i in range(80, 90):
@@ -82,7 +81,6 @@ def test_compression_keeps_record_ids():
 #    17.08 Айрис сказала «Удалила записи: #3» — правду о неверном действии.
 # --------------------------------------------------------------------------
 
-@pytest.mark.xfail(strict=True, reason="К2: изменяющее действие отчитывается номером, а не содержимым")
 def test_delete_reports_what_was_actually_removed():
     entry = coach_storage.add_diary_entry("Позанимался спортом, начал креатин")
     assert entry, "запись должна была создаться"

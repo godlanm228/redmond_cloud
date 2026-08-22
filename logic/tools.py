@@ -1187,8 +1187,15 @@ def _tool_delete_diary_entry(args: Dict[str, Any]) -> str:
         return "Не указано какие записи удалять (нужны id из read_diary)."
     removed = coach_storage.delete_diary_entries(ids)
     if not removed:
-        return f"Записи {ids} не найдены — нечего удалять."
-    return "Удалила записи: " + ", ".join(f"#{r}" for r in removed) + "."
+        return (f"Записи {ids} не найдены — нечего удалять. "
+                f"Прочитай дневник заново (read_diary) и возьми id оттуда.")
+    # Отчитываемся ТЕКСТОМ удалённого, а не номером: номер владельцу ничего
+    # не говорит, и подмену («снесли не ту») по нему не заметить. 17.08.2026
+    # ответ «Удалила записи: #3» был правдой о неверном действии.
+    lines = [f"#{e['id']}: {(e.get('text') or '').strip()[:90]}" for e in removed]
+    missing = sorted(set(ids) - {e["id"] for e in removed})
+    tail = f" Не найдены и не тронуты: {missing}." if missing else ""
+    return "Удалила — " + "; ".join(lines) + "." + tail
 
 
 _PLACE_ALIASES = {"home": "дом", "work": "работа", "out": "вне"}
