@@ -85,20 +85,23 @@ def add_goal(title: str, why: str = "", target_date: Optional[str] = None) -> Di
 
 
 def mark_goal_done(goal_id: int, note: str = "") -> Optional[Dict[str, Any]]:
-    row = db.query_one("SELECT * FROM goals WHERE id=?", (goal_id,))
-    if row is None:
-        return None
-    goal = _goal_row(row)
-    goal["status"] = "done"
-    goal["closed"] = now_local().strftime("%Y-%m-%d")
-    if note:
-        goal["progress_log"].append(
-            {"date": now_local().strftime("%Y-%m-%d"), "note": note})
-    db.execute(
-        "UPDATE goals SET status=?, closed=?, progress_log=? WHERE id=?",
-        (goal["status"], goal["closed"],
-         json.dumps(goal["progress_log"], ensure_ascii=False), goal_id),
-    )
+    # Под транзакцией: без неё два параллельных вызова читали один и тот же
+    # progress_log и второй затирал заметку первого.
+    with db.transaction() as conn:
+        row = conn.execute("SELECT * FROM goals WHERE id=?", (goal_id,)).fetchone()
+        if row is None:
+            return None
+        goal = _goal_row(row)
+        goal["status"] = "done"
+        goal["closed"] = now_local().strftime("%Y-%m-%d")
+        if note:
+            goal["progress_log"].append(
+                {"date": now_local().strftime("%Y-%m-%d"), "note": note})
+        conn.execute(
+            "UPDATE goals SET status=?, closed=?, progress_log=? WHERE id=?",
+            (goal["status"], goal["closed"],
+             json.dumps(goal["progress_log"], ensure_ascii=False), goal_id),
+        )
     return goal
 
 
@@ -185,12 +188,14 @@ def add_deadline(title: str, due: str, importance: str = "medium") -> Dict[str, 
 def mark_deadline_done(deadline_id: int) -> Optional[Dict[str, Any]]:
     """Закрыть дедлайн (сдал/прошло). Без этого сданный тест вечно висит
     в TOP PRIORITIES и Iris продолжает пушить."""
-    row = db.query_one("SELECT * FROM deadlines WHERE id=?", (deadline_id,))
-    if row is None:
-        return None
-    closed = now_local().strftime("%Y-%m-%d")
-    db.execute("UPDATE deadlines SET status='done', closed=? WHERE id=?",
-               (closed, deadline_id))
+    with db.transaction() as conn:
+        row = conn.execute("SELECT * FROM deadlines WHERE id=?",
+                           (deadline_id,)).fetchone()
+        if row is None:
+            return None
+        closed = now_local().strftime("%Y-%m-%d")
+        conn.execute("UPDATE deadlines SET status='done', closed=? WHERE id=?",
+                     (closed, deadline_id))
     out = _deadline_row(row)
     out["status"] = "done"
     out["closed"] = closed
@@ -202,10 +207,12 @@ def delete_deadline(deadline_id: int) -> Optional[Dict[str, Any]]:
     mark_deadline_done: done = «сдал/прошло», остаётся в истории; delete —
     ошибочный/неактуальный исчезает и статистику не портит (кейс 02.08:
     «Удали его» превратился в done, потому что удалять было нечем)."""
-    row = db.query_one("SELECT * FROM deadlines WHERE id=?", (deadline_id,))
-    if row is None:
-        return None
-    db.execute("DELETE FROM deadlines WHERE id=?", (deadline_id,))
+    with db.transaction() as conn:
+        row = conn.execute("SELECT * FROM deadlines WHERE id=?",
+                           (deadline_id,)).fetchone()
+        if row is None:
+            return None
+        conn.execute("DELETE FROM deadlines WHERE id=?", (deadline_id,))
     return _deadline_row(row)
 
 
@@ -218,18 +225,23 @@ def update_deadline(
     """Правка существующего дедлайна (перенос даты и т.п.). «Перенесём на неделю»
     = ЭТО, а не add_deadline: новый рядом со старым pending = дубль, и Iris
     долбит по обоим (кейс #3/#4/#5 «Матан», июль 2026)."""
-    row = db.query_one("SELECT * FROM deadlines WHERE id=?", (deadline_id,))
-    if row is None:
-        return None
-    out = _deadline_row(row)
-    if due:
-        out["due"] = due
-    if title:
-        out["title"] = title.strip()
-    if importance:
-        out["importance"] = importance
-    db.execute("UPDATE deadlines SET due=?, title=?, importance=? WHERE id=?",
-               (out["due"], out["title"], out["importance"], deadline_id))
+    # Под транзакцией: функция пишет ВСЕ три поля, поэтому без неё
+    # параллельная правка заголовка и срока теряла одну из двух.
+    with db.transaction() as conn:
+        row = conn.execute("SELECT * FROM deadlines WHERE id=?",
+                           (deadline_id,)).fetchone()
+        if row is None:
+            return None
+        out = _deadline_row(row)
+        if due:
+            out["due"] = due
+        if title:
+            out["title"] = title.strip()
+        if importance:
+            out["importance"] = importance
+        conn.execute(
+            "UPDATE deadlines SET due=?, title=?, importance=? WHERE id=?",
+            (out["due"], out["title"], out["importance"], deadline_id))
     return out
 
 
@@ -260,9 +272,6 @@ def add_diary_entry(
     text = (text or "").strip()
     if len(text) < 3:
         return None
-    last = db.query_one("SELECT * FROM diary ORDER BY id DESC LIMIT 1")
-    if last is not None and str(last["text"]).strip().lower() == text.lower():
-        return _diary_row(last)
     entry = {
         "id": None,
         "timestamp": now_local().isoformat(timespec="minutes"),
@@ -271,13 +280,21 @@ def add_diary_entry(
     }
     if data:
         entry["data"] = data
-    cur = db.execute(
-        "INSERT INTO diary(id, ts, text, tags, data) VALUES(NULL,?,?,?,?)",
-        (entry["timestamp"], entry["text"],
-         json.dumps(entry["tags"], ensure_ascii=False),
-         json.dumps(data, ensure_ascii=False) if data else None),
-    )
-    entry["id"] = cur.lastrowid
+    # Проверка на дубль и вставка — под одной транзакцией. Без неё два
+    # параллельных вызова видели одну и ту же «последнюю запись», антидубль
+    # не срабатывал ни у одного, и в дневник ложился двойник.
+    with db.transaction() as conn:
+        last = conn.execute(
+            "SELECT * FROM diary ORDER BY id DESC LIMIT 1").fetchone()
+        if last is not None and str(last["text"]).strip().lower() == text.lower():
+            return _diary_row(last)
+        cur = conn.execute(
+            "INSERT INTO diary(id, ts, text, tags, data) VALUES(NULL,?,?,?,?)",
+            (entry["timestamp"], entry["text"],
+             json.dumps(entry["tags"], ensure_ascii=False),
+             json.dumps(data, ensure_ascii=False) if data else None),
+        )
+        entry["id"] = cur.lastrowid
     return entry
 
 
