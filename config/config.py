@@ -24,13 +24,18 @@ class AppConfig(BaseModel):
     groq_api_key: str = Field(default="", description="env: REDMOND_GROQ_API_KEY")
     groq_model: str = Field(default="openai/gpt-oss-120b")
     groq_fallback_model: str = Field(
-        default="qwen/qwen3.6-27b",
+        default="qwen/qwen3.8-27b",
         description="Используется при rate_limit / tool_use_failed на primary модели",
     )
     groq_api_base: str = Field(default="https://api.groq.com")
 
     gemini_api_key: str = Field(default="", description="env: REDMOND_GEMINI_API_KEY")
     gemini_model: str = Field(default="gemini-3.6-flash")
+    gemini_thinking_level: str = Field(
+        default="minimal",
+        description="Сколько Gemini 3.x думает в диалоге: minimal/low/medium/high. "
+                    "Запас выходных токенов под размышления добавляется автоматически.",
+    )
 
     # ---------- ASR ----------
     # Голосовые в TG транскрибируются через Groq Whisper API (free tier) —

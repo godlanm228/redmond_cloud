@@ -55,6 +55,20 @@ def _thinking_config(model: str) -> Dict[str, Any]:
             else {"thinkingBudget": 0})
 
 
+# Сколько выходных токенов добавить сверх ответа, если модели разрешено думать.
+# Размышления тратят тот же maxOutputTokens: без запаса ответ приходит пустым
+# (finish=MAX_TOKENS), что 13.08.2026 и заставило выключить думание совсем.
+THINKING_ALLOWANCE = {"minimal": 0, "low": 1024, "medium": 2048, "high": 4096}
+
+
+def _thinking_for(model: str, level: str) -> Tuple[Dict[str, Any], int]:
+    """(thinkingConfig, доп. токены). Уровень применим только к 3.x."""
+    level = (level or "").strip().lower()
+    if level in THINKING_ALLOWANCE and (model or DEFAULT_MODEL).startswith("gemini-3"):
+        return {"thinkingLevel": level}, THINKING_ALLOWANCE[level]
+    return _thinking_config(model), 0
+
+
 def _bump_usage() -> None:
     """Инкремент дневного счётчика запросов Gemini (RPD-гард free-tier:
     1500/день на проект, пул общий с vision/поиском/дайджестом/Iris). Единый
@@ -186,18 +200,21 @@ def generate_contents(
     max_tokens: int = 1024,
     timeout: float = 45.0,
     api_key: str = "",
+    thinking_level: str = "",
 ) -> Optional[dict]:
     """generateContent с полным списком contents (multi-turn function calling).
-    contents — список {'role': 'user'|'model', 'parts': [...]}. None при ошибке."""
+    contents — список {'role': 'user'|'model', 'parts': [...]}. None при ошибке.
+    thinking_level — minimal/low/medium/high для 3.x; пусто = минимум."""
     key = api_key or api_key_from_env()
     if not key:
         return None
+    thinking, extra = _thinking_for(model, thinking_level)
     body: Dict[str, Any] = {
         "contents": contents,
         "generationConfig": {
             "temperature": temperature,
-            "maxOutputTokens": max_tokens,
-            "thinkingConfig": _thinking_config(model),
+            "maxOutputTokens": max_tokens + extra,
+            "thinkingConfig": thinking,
         },
     }
     if system:
@@ -207,6 +224,24 @@ def generate_contents(
     if tool_config:
         body["toolConfig"] = tool_config
     return _post_generate(key, body, model, timeout)
+
+
+def model_turn(data: Optional[dict]) -> Optional[Dict[str, Any]]:
+    """Ход модели из ответа — ровно в том виде, в каком его прислал Gemini.
+
+    Модели 3.x кладут рядом с functionCall непрозрачную `thoughtSignature` и
+    требуют вернуть её на следующем шаге. Ход, пересобранный из имени и
+    аргументов, её теряет, и следующий запрос получает 400 «Function call is
+    missing a thought_signature». С 15.08 по 28.09.2026 так падал каждый второй
+    шаг цикла Iris, а владелец получал заглушку вместо ответа. Поэтому ход не
+    пересобираем, а возвращаем целиком, со всеми частями.
+    """
+    try:
+        content = data["candidates"][0]["content"]
+        parts = content["parts"]
+    except (KeyError, IndexError, TypeError):
+        return None
+    return {"role": content.get("role") or "model", "parts": [dict(p) for p in parts]}
 
 
 def extract_function_calls(data: Optional[dict]) -> List[Dict[str, Any]]:

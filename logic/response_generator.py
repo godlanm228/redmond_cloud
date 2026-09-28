@@ -1,6 +1,5 @@
 import logging
 import os
-import random
 import math
 import re
 import threading
@@ -170,25 +169,10 @@ _STATE_CHANGING_TOOLS = frozenset({
     "add_diary_entry", "delete_diary_entry",
     "log_meal", "update_pantry",
     "save_week_plan", "save_work_shift", "set_work_shift_status",
+    "resolve_shift_conflict", "postpone_deadline", "mute_notifications",
     "handoff_to_iris",
 })
 
-_TOOL_HUMAN_LABEL = {
-    "update_profile": "обновила профиль",
-    "add_goal": "записала цель",
-    "mark_goal_done": "закрыла цель",
-    "add_deadline": "поставила дедлайн",
-    "mark_deadline_done": "закрыла дедлайн",
-    "delete_deadline": "удалила дедлайн",
-    "add_diary_entry": "записала в дневник",
-    "delete_diary_entry": "удалила запись",
-    "log_meal": "записала еду",
-    "update_pantry": "обновила запас",
-    "save_week_plan": "сохранила план недели",
-    "save_work_shift": "записала смену",
-    "set_work_shift_status": "обновила смену",
-    "handoff_to_iris": "передал Айрис",
-}
 
 
 def _tool_status_label(name: str, args: Dict[str, Any]) -> Optional[str]:
@@ -293,19 +277,119 @@ def _compress_tool_content(text: str, head: int = 400,
     return out
 
 
-def _summarize_actions(tool_names: List[str]) -> str:
+# ---------- совершённые действия: квитанция и честный отказ ----------
+#
+# До 28.09.2026 здесь была `_summarize_actions`: если модель не дала текст после
+# инструментов, владелец получал «Готово: записала в дневник.». С 15.08 по 14.09
+# это был ответ на 14 из 34 его сообщений — включая сообщение о том, что ему
+# очень плохо. Заглушка выдавала провал модели за успех и не говорила даже,
+# ЧТО записано.
+#
+# Теперь два правила:
+#   • квитанция о действиях строится кодом из РЕЗУЛЬТАТОВ инструментов и
+#     прикладывается под ответ модели. Модель может сказать «до 21 сентября»,
+#     когда инструмент поставил тишину навсегда (14.09) — квитанция не может;
+#   • если модель не ответила, делается ещё один вызов только на составление
+#     ответа. Не вышло и он — владелец получает честный отказ и квитанцию,
+#     а не «Готово».
+
+_RECEIPT_ICON = {
+    "add_diary_entry": "📝", "delete_diary_entry": "🗑",
+    "add_goal": "🎯", "mark_goal_done": "✅",
+    "add_deadline": "⏰", "mark_deadline_done": "✅", "delete_deadline": "🗑",
+    "postpone_deadline": "⏰",
+    "update_profile": "👤", "log_meal": "🍽", "update_pantry": "🧺",
+    "save_week_plan": "🗓", "save_work_shift": "🗓", "set_work_shift_status": "🗓",
+    "resolve_shift_conflict": "🗓",
+    "mute_notifications": "🔕",
+}
+
+_RECEIPT_LINE_LIMIT = 170
+
+
+def _receipt(actions: List[Tuple[str, Dict[str, Any], str]]) -> str:
+    """Квитанция: по строке на действие, текст — первая строка результата."""
+    lines: List[str] = []
+    for name, _args, result in actions:
+        icon = _RECEIPT_ICON.get(name)
+        if not icon:
+            continue
+        first = " ".join(str(result or "").split("\n", 1)[0].split())
+        if len(first) > _RECEIPT_LINE_LIMIT:
+            first = first[:_RECEIPT_LINE_LIMIT].rstrip() + "…"
+        lines.append(f"{icon} {first}")
+    return "\n".join(dict.fromkeys(lines))
+
+
+def _honest_failure(actions: List[Tuple[str, Dict[str, Any], str]]) -> str:
+    """Модели не ответили, а действия уже совершены: сказать это прямо."""
+    receipt = _receipt(actions)
+    head = "Модели не ответили — нормальный ответ собрать не смог."
+    return f"{head} Что уже сделано:\n{receipt}" if receipt else head
+
+
+class Reply(str):
+    """Ответ генерации + признак того, что модель на самом деле не ответила.
+
+    Строка остаётся строкой для всех вызывающих. Признак нужен скедулеру:
+    проактивное сообщение об отказе владельцу не нужно, его надо не отправить
+    и залогировать (раньше скедулер писал «Scheduled job done» на заглушку).
     """
-    Краткое summary совершённых действий — используется когда LLM
-    не выдала текст после успешных tool calls. Безопаснее чем None
-    (handler не упадёт в generic "Понял уточните").
-    """
-    from collections import Counter
-    counts = Counter(tool_names)
-    parts = []
-    for name, n in counts.items():
-        label = _TOOL_HUMAN_LABEL.get(name, name)
-        parts.append(f"{label}" + (f" ×{n}" if n > 1 else ""))
-    return "Готово: " + ", ".join(parts) + "."
+
+    failed: bool = False
+
+    def __new__(cls, text: str, failed: bool = False) -> "Reply":
+        obj = super().__new__(cls, text)
+        obj.failed = failed
+        return obj
+
+
+_COMPOSE_INSTRUCTION = (
+    "Compose your final answer to the owner now, in his language, following your "
+    "FORMAT rules. You have no tools in this step. Everything already done is in "
+    "the tool results above; a factual receipt of those actions is appended under "
+    "your reply automatically, so do not list them again and never claim an action "
+    "that is not in the tool results."
+)
+
+
+def _flatten_openai(messages: List[Dict[str, Any]]) -> str:
+    """OpenAI-формат беседы → плоский текст для вызова без инструментов."""
+    flat: List[str] = []
+    for m in messages:
+        role = m.get("role", "")
+        content = (m.get("content") or "").strip()
+        if not content:
+            continue
+        if role == "tool":
+            flat.append(f"[Tool result: {m.get('name') or 'tool'}]\n{content}")
+        elif role == "user":
+            flat.append(f"[User]\n{content}")
+        elif role == "assistant":
+            flat.append(f"[You said]\n{content}")
+        else:
+            flat.append(content)
+    return "\n\n".join(flat)
+
+
+def _flatten_gemini(system: str, contents: List[Dict[str, Any]]) -> str:
+    """Беседа Gemini (contents) → плоский текст для вызова без инструментов."""
+    import json as _json
+    flat: List[str] = [system] if system else []
+    for c in contents:
+        for p in c.get("parts", []):
+            if p.get("text") and not p.get("thought"):
+                label = "[User]" if c.get("role") == "user" else "[You said]"
+                flat.append(f"{label}\n{p['text'].strip()}")
+            elif p.get("functionCall"):
+                fc = p["functionCall"]
+                flat.append(f"[You called {fc.get('name')}] "
+                            f"{_json.dumps(fc.get('args') or {}, ensure_ascii=False)}")
+            elif p.get("functionResponse"):
+                fr = p["functionResponse"]
+                result = (fr.get("response") or {}).get("result", "")
+                flat.append(f"[Tool result: {fr.get('name')}]\n{result}")
+    return "\n\n".join(flat)
 
 
 def _repair_tool_args(raw: str, fn_name: str) -> Dict[str, Any]:
@@ -363,6 +447,13 @@ class GenerationContext:
     # Принудительный tool на первом хопе (tool_choice forced) — классификатор
     # решил «research» и Redmond ОБЯЗАН делегировать, не на воле модели.
     force_tool: Optional[str] = None
+    # Совершённые действия (имя, аргументы, результат) — из них код строит
+    # квитанцию под ответом и честный отказ, если модель не ответила.
+    actions: List[Tuple[str, Dict[str, Any], str]] = field(default_factory=list)
+    # Модель так и не ответила: владелец получает честный отказ.
+    failed: bool = False
+    # Сигнал острой ситуации (logic/distress): сначала спросить, что случилось.
+    distress: bool = False
 
 
 class ResponseGenerator:
@@ -459,6 +550,7 @@ class ResponseGenerator:
         # Per-chat история (изолирует контексты Iris/Newser/Redmond в multi-bot)
         chat_history = self.chat_history(chat_id)
 
+        from logic import distress
         ctx = GenerationContext(
             intent=intent,
             user_text=user_text,
@@ -468,7 +560,13 @@ class ResponseGenerator:
             agent=agent,
             status_cb=status_cb,
             force_tool=force_tool,
+            # Скедулерные промпты пишет код, а не владелец — сигнал ищем только
+            # в его собственных репликах.
+            distress=include_history and distress.detect(user_text),
         )
+        if ctx.distress:
+            logger.warning("Сигнал острой ситуации в сообщении владельца — "
+                           "ответ: сначала спросить, что случилось")
 
         try:
             if intent.name == "chat":
@@ -483,15 +581,30 @@ class ResponseGenerator:
                 return response
 
             if not response:
-                response = self._generate_fallback(ctx)
+                ctx.failed = True
+                response = (_honest_failure(ctx.actions) if ctx.actions
+                            else self._generate_fallback(ctx))
+
+            if ctx.failed and ctx.distress:
+                # Вопрос «что случилось» не зависит от лимитов провайдера.
+                response = distress.FALLBACK_REPLY
+            elif not ctx.failed and ctx.actions and not ctx.distress:
+                receipt = _receipt(ctx.actions)
+                if receipt:
+                    response = f"{response.rstrip()}\n\n{receipt}"
 
             response = self._postprocess(response, ctx)
-            self._save_interaction(user_text, response, chat_id)
+            # Отказ — не реплика разговора: в памяти и истории он потом всплывает
+            # как «так было» и учит модель отвечать отказами.
+            if not ctx.failed:
+                self._save_interaction(user_text, response, chat_id)
             self.last_response = response
-            return response
+            return Reply(response, failed=ctx.failed)
         except Exception:
             logger.exception("Generation error")
-            return self._error_response()
+            if ctx.distress:
+                return Reply(distress.FALLBACK_REPLY, failed=True)
+            return Reply(self._error_response(), failed=True)
 
     # ---------- enhancement ----------
 
@@ -587,6 +700,9 @@ class ResponseGenerator:
             forced = [t for t in tools_for_agent if t["function"]["name"] == ctx.force_tool]
             if forced:
                 tools_for_agent = forced
+        # Острая ситуация: в этом ответе только вопрос, никаких действий.
+        if ctx.distress:
+            tools_for_agent = []
 
         # Per-conversation cache: какие секции досье уже отдавали в этой генерации.
         # Защищает от повторных read_dossier_section, которые сжигают TPM.
@@ -594,9 +710,6 @@ class ResponseGenerator:
         # Одна на генерацию: помнит, какие записи модель РЕАЛЬНО видела,
         # и не даёт менять запись по номеру, взятому наугад (инцидент 17.08).
         tool_session = ToolSession()
-        # Tracker успешно выполненных tool calls — для safety-net когда LLM
-        # «молчит» после tools (Qwen 3 часто так делает).
-        successful_tool_calls: List[str] = []
         # Имена инструментов, которые оставил бы теневой отбор (см. prompt_budget).
         # Пустое множество = отбор не считался, промахи не логируем.
         shadow_tools: set = set()
@@ -624,7 +737,7 @@ class ResponseGenerator:
                         "missing, and give the best link(s) you have."
                     ),
                 })
-            hop_tools = None if final_hop else tools_for_agent
+            hop_tools = None if final_hop else (tools_for_agent or None)
             hop_tool_choice = None
             if ctx.force_tool and hop == 0 and hop_tools:
                 hop_tool_choice = {"type": "function", "function": {"name": ctx.force_tool}}
@@ -694,8 +807,10 @@ class ResponseGenerator:
                 # Gemini-compose (без tools), и только потом честный отказ.
                 rate_limited = chain_has(hop_errors, _is_rate_limit_error)
                 if rate_limited or chain_has(hop_errors, _is_oversize_error):
-                    if successful_tool_calls:
-                        return _summarize_actions(successful_tool_calls)
+                    if ctx.actions:
+                        # Groq в лимите — составлять ответ идём в Gemini, не сюда же.
+                        return self._finish_after_tools(ctx, _flatten_openai(messages),
+                                                        groq_ok=False)
                     # Gemini-compose: огромный контекст, бесплатно — единственный
                     # рабочий путь и при TPD/429, и при 413 (промпт > qwen TPM 6000).
                     fallback = self._compose_with_gemini(messages, ctx)
@@ -704,13 +819,17 @@ class ResponseGenerator:
                     if rate_limited:
                         # Причина берётся из тела ошибки, а не угадывается:
                         # минутный лимит — это полминуты ожидания, а не сутки.
+                        ctx.failed = True
                         return _rate_limit_reply(" | ".join(hop_errors))
                     return None
                 # Прочие отказы (снятая модель, сеть, 400). Если рисёрч уже собран —
                 # дособираем ответ на Gemini из накопленных messages, иначе он уйдёт
                 # в мусор: провайдерный цикл начнёт Gemini с чистого листа и потеряет
                 # результаты tools (так 12.08 пропала выдача веб-поиска).
-                if successful_tool_calls or any(m.get("role") == "tool" for m in messages):
+                if ctx.actions:
+                    return self._finish_after_tools(ctx, _flatten_openai(messages),
+                                                    groq_ok=False)
+                if any(m.get("role") == "tool" for m in messages):
                     composed = self._compose_with_gemini(messages, ctx)
                     if composed:
                         return composed
@@ -729,13 +848,10 @@ class ResponseGenerator:
                     if choice.get("finish_reason") == "length":
                         content += "\n\n…(обрезалось по лимиту — скажи «продолжи»)"
                     return content
-                # LLM молчит. Safety net: если в этой генерации уже были
-                # успешные tool calls (например update_profile / add_goal /
-                # mark_goal_done), сгенерируем краткое резюме вместо None.
-                # Без этого handler выдаст generic "Понял уточните" что
-                # вводит в заблуждение — действия-то совершились.
-                if successful_tool_calls:
-                    return _summarize_actions(successful_tool_calls)
+                # Модель промолчала. Действия уже совершены — отдельный вызов на
+                # составление ответа, а не «Готово» (см. _finish_after_tools).
+                if ctx.actions:
+                    return self._finish_after_tools(ctx, _flatten_openai(messages))
                 return None
 
             # Модель просит tools. Прошлые tool-результаты она уже прочитала
@@ -805,14 +921,14 @@ class ResponseGenerator:
                     "name": fn_name,
                     "content": result,
                 })
-                # Учитываем только tools которые меняют состояние (для safety net),
-                # и только если результат НЕ сигналит отказ — иначе ложное «Готово».
+                # Действия, которые реально что-то поменяли: для квитанции и
+                # для того, чтобы другой провайдер не выполнил их второй раз.
                 if fn_name in _STATE_CHANGING_TOOLS and not _tool_result_failed(result):
-                    successful_tool_calls.append(fn_name)
+                    ctx.actions.append((fn_name, fn_args, str(result)))
 
         logger.warning("Groq tool-loop hit limit (%d hops)", max_hops)
-        if successful_tool_calls:
-            return _summarize_actions(successful_tool_calls)
+        if ctx.actions:
+            return self._finish_after_tools(ctx, _flatten_openai(messages))
         return None
 
     def _groq_chat(
@@ -883,6 +999,8 @@ class ResponseGenerator:
             return resp.json(), ""
         except Exception as e:
             err = str(e)
+            from utils import failures
+            failures.remember(f"Groq {model}", err)
             # Снятая провайдером модель — не транзиент, чинится только правкой
             # конфига. Отдельный уровень, чтобы не тонуло среди 429-шума.
             if _is_model_gone_error(err):
@@ -907,10 +1025,11 @@ class ResponseGenerator:
         (TPM 1M против Groq 8K). Primary для Iris.
 
         Возвращает:
-          • текст / DELEGATION_MARKER / summary действий — успех (наверх, не на Groq);
+          • текст / DELEGATION_MARKER — успех (наверх, не на Groq);
           • '' — Gemini не дал ответа БЕЗ совершённых записей → провайдер-петля
             падает на Groq. Если state-changing tool уже отработал — НЕ возвращаем ''
-            (Groq переисполнил бы и продублировал записи), отдаём summary.
+            (Groq переисполнил бы и продублировал записи): ответ составляется
+            отдельным вызовом по уже собранным результатам (_finish_after_tools).
         """
         from utils import gemini
         from logic.tools import (TOOL_SCHEMAS, ToolSession, execute_tool,
@@ -932,7 +1051,9 @@ class ResponseGenerator:
             forced = [t for t in tools_for_agent if t["function"]["name"] == ctx.force_tool]
             if forced:
                 tools_for_agent = forced
-        gemini_tools = gemini.tool_schemas_to_gemini(tools_for_agent)
+        # Острая ситуация: в этом ответе только вопрос, никаких действий.
+        gemini_tools = (None if ctx.distress
+                        else gemini.tool_schemas_to_gemini(tools_for_agent))
 
         system = self._build_system_prompt(ctx)
         contents: List[Dict[str, Any]] = [
@@ -945,7 +1066,6 @@ class ResponseGenerator:
         # Одна на генерацию: помнит, какие записи модель РЕАЛЬНО видела,
         # и не даёт менять запись по номеру, взятому наугад (инцидент 17.08).
         tool_session = ToolSession()
-        successful_tool_calls: List[str] = []
 
         max_hops = 5
         for hop in range(max_hops):
@@ -965,19 +1085,23 @@ class ResponseGenerator:
             data = gemini.generate_contents(
                 contents, system=system, tools=hop_tools, tool_config=tool_config,
                 temperature=temperature, max_tokens=max_tokens, model=model, api_key=api_key,
+                thinking_level=getattr(self.config, "gemini_thinking_level", ""),
             )
             if data is None:
-                # Gemini не ответил (RPD/RPM/timeout). Уже что-то записали → summary
-                # (не на Groq — переисполнит); иначе '' → провайдер-петля даст Groq.
-                return _summarize_actions(successful_tool_calls) if successful_tool_calls else ""
+                # Gemini не ответил (RPD/RPM/5xx/timeout). Уже что-то записали →
+                # ответ составляем по собранному (не на Groq с нуля — переисполнит);
+                # иначе '' → провайдер-петля даст Groq.
+                if ctx.actions:
+                    return self._finish_after_tools(ctx, _flatten_gemini(system, contents))
+                return ""
 
             calls = gemini.extract_function_calls(data)
             if not calls:
                 text = gemini.extract_text(data)
                 if text:
                     return text
-                if successful_tool_calls:
-                    return _summarize_actions(successful_tool_calls)
+                if ctx.actions:
+                    return self._finish_after_tools(ctx, _flatten_gemini(system, contents))
                 return ""
 
             # Модель просит tools: сжимаем уже отработанные functionResponse (как Groq),
@@ -989,13 +1113,8 @@ class ResponseGenerator:
                             and isinstance(fr["response"].get("result"), str):
                         fr["response"]["result"] = _compress_tool_content(fr["response"]["result"])
 
-            contents.append({"role": "model", "parts": [
-                {"functionCall": dict(
-                    {"name": c["name"], "args": c["args"]},
-                    **({"id": c["id"]} if c["id"] else {}),
-                )}
-                for c in calls
-            ]})
+            # Ход модели — как прислан, с thoughtSignature (см. gemini.model_turn).
+            contents.append(gemini.model_turn(data))
 
             response_parts: List[Dict[str, Any]] = []
             for c in calls:
@@ -1029,49 +1148,73 @@ class ResponseGenerator:
                     **({"id": c["id"]} if c["id"] else {}),
                 )})
                 if fn_name in _STATE_CHANGING_TOOLS and not _tool_result_failed(result):
-                    successful_tool_calls.append(fn_name)
+                    ctx.actions.append((fn_name, fn_args, str(result)))
 
             contents.append({"role": "user", "parts": response_parts})
 
-        return _summarize_actions(successful_tool_calls) if successful_tool_calls else ""
+        if ctx.actions:
+            return self._finish_after_tools(ctx, _flatten_gemini(system, contents))
+        return ""
 
     def _compose_with_gemini(self, messages: list, ctx: GenerationContext) -> Optional[str]:
         """Аварийный compose при исчерпании Groq TPD: беседа этой генерации
         (вкл. уже собранные tool-результаты) сплющивается в plain-prompt для
         Gemini. Без tools — хуже рисёрч, но живой ответ вместо «жди полуночи»."""
-        from utils import gemini
-        api_key = getattr(self.config, "gemini_api_key", "") or gemini.api_key_from_env()
-        if not api_key:
-            return None
-
-        flat: List[str] = []
-        for m in messages:
-            role = m.get("role", "")
-            content = (m.get("content") or "").strip()
-            if not content:
-                continue
-            if role == "tool":
-                flat.append(f"[Tool result]\n{content}")
-            elif role == "user":
-                flat.append(f"[User]\n{content}")
-            elif role == "assistant":
-                flat.append(f"[You said]\n{content}")
-            else:
-                flat.append(content)
-        flat.append(
-            "Compose your final answer to the user now, in the user's language, "
-            "following your FORMAT rules. You have no tools available."
-        )
-
-        text = gemini.generate_text(
-            "\n\n".join(flat),
-            temperature=getattr(ctx.agent, "temperature", 0.5) if ctx.agent else 0.5,
-            max_tokens=getattr(ctx.agent, "max_tokens", 800) if ctx.agent else 800,
-            api_key=api_key,
-        )
+        text = self._compose_text(ctx, _flatten_openai(messages), groq_ok=False)
         if text:
             logger.warning("Groq исчерпан — ответ сгенерирован Gemini-fallback'ом")
-        return text or None
+        return text
+
+    def _compose_text(self, ctx: GenerationContext, flat_prompt: str,
+                      groq_ok: bool = True) -> Optional[str]:
+        """Один вызов без инструментов: составить ответ по уже собранной беседе.
+
+        Сначала Gemini, потом Groq (если он не в лимите — groq_ok). Каждый
+        провайдер по своей цепочке моделей. None — не ответил никто.
+        """
+        from utils import gemini
+        prompt = f"{flat_prompt}\n\n{_COMPOSE_INSTRUCTION}"
+        temperature = getattr(ctx.agent, "temperature", 0.5) if ctx.agent else 0.5
+        max_tokens = getattr(ctx.agent, "max_tokens", 800) if ctx.agent else 800
+
+        gemini_key = getattr(self.config, "gemini_api_key", "") or gemini.api_key_from_env()
+        if gemini_key:
+            text = gemini.generate_text(prompt, temperature=temperature,
+                                        max_tokens=max_tokens, api_key=gemini_key)
+            if text:
+                return text
+
+        groq_key = getattr(self.config, "groq_api_key", "")
+        if groq_ok and groq_key:
+            chain = [m for m in (getattr(self.config, "groq_model", ""),
+                                 getattr(self.config, "groq_fallback_model", "")) if m]
+            for model in dict.fromkeys(chain):
+                completion, _err = self._groq_chat(
+                    groq_key, model, [{"role": "user", "content": prompt}], tools=None,
+                    temperature=temperature, max_tokens=max_tokens,
+                )
+                if completion is not None:
+                    content = (completion["choices"][0]["message"].get("content") or "").strip()
+                    if content:
+                        return content
+        return None
+
+    def _finish_after_tools(self, ctx: GenerationContext, flat_prompt: str,
+                            groq_ok: bool = True) -> str:
+        """Инструменты отработали, а модель не дала текста.
+
+        Ещё один вызов — только на составление ответа по собранному. Не
+        ответил и он — честный отказ с квитанцией. Никакого «Готово».
+        """
+        text = self._compose_text(ctx, flat_prompt, groq_ok=groq_ok)
+        if text:
+            logger.warning("Ответ составлен отдельным вызовом после %d действий "
+                           "(модель не дала текста в цикле инструментов)", len(ctx.actions))
+            return text
+        ctx.failed = True
+        logger.error("Ответ не составлен ни одной моделью после %d действий — "
+                     "владелец получит честный отказ с квитанцией", len(ctx.actions))
+        return _honest_failure(ctx.actions)
 
     # ---------- построение промпта ----------
 
@@ -1081,14 +1224,21 @@ class ResponseGenerator:
         Cipher через generate() не идёт — у него subprocess executor;
         если всё-таки сюда попал — отвечает базовым Redmond-промптом.
         """
-        if ctx.agent is None:
-            return self._build_redmond_system_prompt(ctx)
-        name = ctx.agent.name
+        name = ctx.agent.name if ctx.agent is not None else "Redmond"
         if name == "Iris":
-            return self._build_iris_system_prompt(ctx)
-        if name == "Newser":
-            return self._build_newser_system_prompt(ctx)
-        return self._build_redmond_system_prompt(ctx)
+            prompt = self._build_iris_system_prompt(ctx)
+        elif name == "Newser":
+            prompt = self._build_newser_system_prompt(ctx)
+        else:
+            prompt = self._build_redmond_system_prompt(ctx)
+
+        # Общее для всех агентов: правила про факты и квитанцию + сами факты.
+        from logic import system_facts
+        prompt = f"{prompt}\n\n{system_facts.block()}"
+        if ctx.distress:
+            from logic import distress
+            prompt = f"{prompt}\n\n{distress.DIRECTIVE}"
+        return prompt
 
     def _compact_owner_facts(self) -> List[str]:
         """
@@ -1636,8 +1786,6 @@ class ResponseGenerator:
 
     @staticmethod
     def _error_response() -> str:
-        return random.choice([
-            "Произошла ошибка при обработке запроса. Попробуйте переформулировать.",
-            "Не удалось обработать запрос. Проверьте входные данные.",
-            "Временная ошибка системы. Повторите попытку позже.",
-        ])
+        # Раньше тут была случайная из трёх фраз вида «попробуйте
+        # переформулировать» — баг кода выдавался за ошибку владельца.
+        return "Внутренняя ошибка на моей стороне — это баг, не твой запрос. Он записан в лог."

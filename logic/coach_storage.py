@@ -527,6 +527,9 @@ def mark_ping(ping_id: str) -> None:
 # Кросс-день, в отличие от per-day day_state.
 # ============================================================================
 
+_WEEKDAYS_SHORT = ("пн", "вт", "ср", "чт", "пт", "сб", "вс")
+
+
 def set_mute(mode: str = "today", hours: float = 0, scope: str = "pings") -> str:
     """Выключить проактивные сообщения. mode: 'today' (до конца дня, дефолт) /
     'forever' (пока явно не снимут) / часы через hours>0. scope: 'pings'/'all'.
@@ -539,14 +542,15 @@ def set_mute(mode: str = "today", hours: float = 0, scope: str = "pings") -> str
     if mode == "forever":
         data["until"] = "forever"
         db.kv_set("mute", data)
-        return "пока не скажешь «пиши»"
+        return "без срока — пока не скажешь «пиши»"
     if mode != "today" and hours and hours > 0:
-        until = now + timedelta(hours=max(0.5, min(float(hours), 168.0)))
+        # Потолок 30 дней: раньше было 168 ч, и «на 10 дней» молча резалось до 7.
+        until = now + timedelta(hours=max(0.5, min(float(hours), 720.0)))
         data["until"] = until.isoformat(timespec="minutes")
         db.kv_set("mute", data)
-        return ("до " + until.strftime("%H:%M")
-                if until.date() == now.date()
-                else "до " + until.strftime("%H:%M %d.%m"))
+        if until.date() == now.date():
+            return "до " + until.strftime("%H:%M")
+        return f"до {_WEEKDAYS_SHORT[until.weekday()]} {until.strftime('%d.%m %H:%M')}"
     until = now.replace(hour=23, minute=59, second=59, microsecond=0)
     data["until"] = until.isoformat(timespec="minutes")
     db.kv_set("mute", data)
@@ -569,6 +573,12 @@ def _mute_record_active() -> Optional[Dict[str, Any]]:
         return data if now_local() < datetime.fromisoformat(until) else None
     except (ValueError, TypeError):
         return None
+
+
+def mute_info() -> Optional[Dict[str, Any]]:
+    """Действующая тишина ({scope, until, set}) или None."""
+    rec = _mute_record_active()
+    return dict(rec) if rec else None
 
 
 def muted_now() -> bool:

@@ -501,19 +501,24 @@ TOOL_SCHEMAS = [
                 "day-ticker check-ins (meal/training/study/checkin) — morning digest, "
                 "deadline reminders and evening summary KEEP arriving. scope='all' = "
                 "total silence, use ONLY when owner explicitly wants everything off "
-                "(«вообще ничего не присылай», «полная тишина»). Replies to his OWN "
-                "messages always work. «отстань/не сейчас/занят» → hours=2; «не пиши "
-                "сегодня/стоп» → mode='today'; «вообще не пиши/отключись» → "
-                "mode='forever' + scope='all'; «пиши/можешь писать» → mode='off'."
+                "(«вообще ничего не присылай», «полная тишина», «фул мут»). Replies to "
+                "his OWN messages always work. DURATION RULE: if the owner names ANY "
+                "duration («на 7 дней», «до понедельника», «на пару часов») you MUST pass "
+                "it as days or hours — also with scope='all'. mode='forever' ONLY when "
+                "no duration is named at all. «отстань/не сейчас/занят» → hours=2; «не "
+                "пиши сегодня/стоп» → mode='today'; «мут на 7 дней, фул» → days=7 + "
+                "scope='all'; «пиши/можешь писать» → mode='off'. Tell the owner exactly "
+                "the end time from the tool result."
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
                     "mode": {
                         "type": ["string", "null"],
-                        "description": "today (till end of day) / forever / off (resume). Omit if using hours.",
+                        "description": "today (till end of day) / forever / off (resume). Omit if using days or hours.",
                     },
-                    "hours": {"type": "number", "description": "Hours of silence, 0.5-168."},
+                    "days": {"type": "number", "description": "Days of silence, 1-30."},
+                    "hours": {"type": "number", "description": "Hours of silence, 0.5-720."},
                     "scope": {
                         "type": ["string", "null"],
                         "description": "'pings' (default: only ticker check-ins) or 'all' (total silence incl. digests).",
@@ -1043,7 +1048,12 @@ def _dispatch_tool(name: str, args: Dict[str, Any], rg=None) -> str:
                 return "Тишина и не была включена — всё работает."
             unmute()
             return "Тишина снята — проактивные сообщения снова включены."
-        hours = float(args.get("hours") or 0)
+        hours = float(args.get("hours") or 0) + 24.0 * float(args.get("days") or 0)
+        if hours:
+            # Срок назван — он главнее режима. 14.09.2026 на «не разговаривай со
+            # мной 7 дней, фул мут» модель поставила mode='forever', и тишина
+            # простояла две недели вместо семи дней.
+            mode = "" if mode in ("forever", "today") else mode
         if not mode and not hours:
             hours = 2.0  # голое «отстань» = как старый snooze
         scope = str(args.get("scope") or "pings").strip().lower()
@@ -1240,7 +1250,13 @@ def _tool_add_diary_entry(args: Dict[str, Any]) -> str:
     )
     if not e or not e.get("id"):
         return "Пустая/служебная заметка — в дневник не пишу."
-    return f"Запись #{e['id']} в дневник добавлена ({len(e.get('tags') or [])} тегов)."
+    # Результат называет, ЧТО записано, а не только номер: из этой строки код
+    # собирает квитанцию для владельца (см. response_generator._receipt).
+    text = " ".join(str(e.get("text") or "").split())
+    if len(text) > 120:
+        text = text[:120].rstrip() + "…"
+    tags = ", ".join(e.get("tags") or [])
+    return f"Запись #{e['id']} в дневник: «{text}»" + (f" [{tags}]" if tags else "") + "."
 
 
 def _tool_read_diary(args: Dict[str, Any]) -> str:

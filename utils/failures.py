@@ -28,10 +28,38 @@ Google — где написано, ЧТО именно не так с запр�
 
 from __future__ import annotations
 
+import collections
 import logging
-from typing import Any, Optional
+import threading
+import time
+from typing import Any, Deque, List, Optional, Tuple
 
 logger = logging.getLogger("failures")
+
+# Последние сбои процесса — для блока фактов о системе в промпте агентов.
+# Без него на вопрос «почему он не ответил» модели нечем ответить, и она
+# сочиняет («фоновый фоллбэк-блок выплюнул лог», 10.09.2026). Держим
+# немного и коротко: это подсказка агенту, а не второй лог.
+_RECENT: Deque[Tuple[float, str, str]] = collections.deque(maxlen=20)
+_RECENT_GUARD = threading.Lock()
+
+
+def remember(where: str, what: Any) -> None:
+    """Запомнить сбой для блока фактов. Никогда не бросает."""
+    try:
+        text = " ".join(detail(what).split())[:160]
+        with _RECENT_GUARD:
+            _RECENT.append((time.time(), where, text))
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def recent(hours: float = 24.0, limit: int = 3) -> List[Tuple[float, str, str]]:
+    """Последние сбои за `hours` часов, новые в конце."""
+    cutoff = time.time() - hours * 3600
+    with _RECENT_GUARD:
+        items = [r for r in _RECENT if r[0] >= cutoff]
+    return items[-limit:]
 
 DATA_LOSS = "data_loss"
 DEGRADED = "degraded"
@@ -103,6 +131,8 @@ def report(where: str, err: Any, *, consequence: str, **context: Any) -> None:
         level = _LEVELS.get(consequence, logging.ERROR)
         tail = " ".join(f"{k}={v}" for k, v in context.items() if v not in (None, ""))
         logger.log(level, "%s: %s%s", where, detail(err), f" [{tail}]" if tail else "")
+        if level >= logging.WARNING:
+            remember(where, err)
     except Exception:  # noqa: BLE001
         try:
             logger.error("%s: сбой, причину записать не удалось", where)
