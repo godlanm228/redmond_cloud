@@ -24,5 +24,9 @@
     missingok
     notifempty
     copytruncate
+    # logs/ is group-writable (ubuntu), and logrotate skips a log in such a
+    # directory unless su is set. systemd creates v2.log as root:ubuntu 0640,
+    # so rotation runs as root with the ubuntu group.
+    su root ubuntu
     create 0640 root ubuntu
 }
