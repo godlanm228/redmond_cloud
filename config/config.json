@@ -8,6 +8,7 @@
   "groq_api_base": "https://api.groq.com",
 
   "gemini_model": "gemini-3.6-flash",
+  "gemini_thinking_level": "low",
 
   "groq_whisper_model": "whisper-large-v3-turbo",
 
