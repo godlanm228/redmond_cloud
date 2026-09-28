@@ -34,7 +34,9 @@ logger = logging.getLogger(__name__)
 _API = "https://generativelanguage.googleapis.com/v1beta"
 MODELS = (os.getenv("REDMOND_EMBED_MODEL", "gemini-embedding-2"), "gemini-embedding-001")
 DIM = 768
-_BATCH = 100
+# The free tier counts every text of a batch against a per-minute quota of
+# about 100 (measured Sep 28, 2026: 50 passed, the next 100 got 429).
+_BATCH = 50
 _TIMEOUT = 20.0
 
 QUERY = "query"
@@ -178,6 +180,13 @@ def sync(kind: str, items: Iterable[Tuple[str, str]], limit: int = 500) -> int:
         )
     logger.info("Эмбеддинги %s: посчитано %d", kind, len(todo))
     return len(todo)
+
+
+def pending(kind: str, items: Iterable[Tuple[str, str]]) -> int:
+    """How many (ref, text) still need a vector."""
+    have = load(kind)
+    return sum(1 for ref, text in items
+               if text and (ref not in have or have[ref][0] != text_hash(text)))
 
 
 def nearest(kind: str, query_vec: Sequence[float], k: int = 5,

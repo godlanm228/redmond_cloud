@@ -44,15 +44,28 @@ def _rows(limit: Optional[int] = None) -> List[Tuple[str, str]]:
     return [(str(r["id"]), _doc(r["user"], r["bot"])) for r in rows]
 
 
-def backfill(batch: int = 200) -> int:
-    """Index every memory row that has no fresh vector yet. Safe to repeat."""
+def backfill(batch: int = 50, pause: float = 35.0, sleep=None, max_stalls: int = 5) -> int:
+    """Index every memory row that has no fresh vector yet. Safe to repeat.
+
+    Paced for the free tier (about 100 texts a minute): a batch, a pause, the
+    next batch. A 429 or an outage stalls a round; after a longer wait the
+    work resumes, and after `max_stalls` stalled rounds in a row it stops -
+    the next start picks up where this one ended.
+    """
+    import time
     from utils import embeddings
-    total = 0
-    while True:
+    sleep = sleep or time.sleep
+    total, stalls = 0, 0
+    while embeddings.pending("memory", _rows()) and stalls < max_stalls:
         done = embeddings.sync("memory", _rows(), limit=batch)
         total += done
-        if done < batch:
-            return total
+        if done:
+            stalls = 0
+            sleep(pause)
+        else:
+            stalls += 1
+            sleep(pause * 2)
+    return total
 
 
 def recall(mem: Any, text: str, query_vec: Optional[Sequence[float]],

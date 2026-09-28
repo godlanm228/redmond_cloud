@@ -148,7 +148,7 @@ def _mem_rows():
 def test_bot_output_is_not_indexed(monkeypatch):
     _seed_memory()
     _fake_vectors(monkeypatch)
-    recall.backfill()
+    recall.backfill(sleep=lambda s: None)
     assert set(embeddings.load("memory")) == {"1", "2"}
 
 
@@ -156,7 +156,7 @@ def test_meaning_finds_what_words_miss(monkeypatch):
     """'у меня боль, к доктору?' shares no word with 'болит живот, к врачу'."""
     _seed_memory()
     _fake_vectors(monkeypatch)
-    recall.backfill()
+    recall.backfill(sleep=lambda s: None)
     q = embeddings.embed_query("у меня боль, к доктору?")
     docs = recall.recall(FakeMem(_mem_rows()), "у меня боль, к доктору?", q)
     assert docs and "болит живот" in docs[0]
@@ -166,7 +166,7 @@ def test_word_overlap_alone_no_longer_pulls_in_unrelated_memories(monkeypatch):
     """K10: sharing the word 'потом' with a leisure exchange is not relevance."""
     _seed_memory()
     _fake_vectors(monkeypatch)
-    recall.backfill()
+    recall.backfill(sleep=lambda s: None)
     q = embeddings.embed_query("болит живот, что делать потом")
     docs = recall.recall(FakeMem(_mem_rows()), "болит живот, что делать потом", q)
     assert all("кальян" not in d for d in docs)
@@ -176,3 +176,25 @@ def test_without_vectors_the_old_full_text_path_is_kept():
     _seed_memory()
     docs = recall.recall(FakeMem(_mem_rows()), "кальян потом", None)
     assert docs and "кальян" in docs[0].lower()
+
+
+def test_backfill_is_paced_and_survives_a_quota_hit(monkeypatch):
+    """Sep 28, 2026: the first backfill sent 200 texts at once and got 429."""
+    _seed_memory()
+    monkeypatch.setenv("REDMOND_GEMINI_API_KEY", "k")
+    answers = iter([429, 200, 200, 200])
+    calls = []
+
+    def post(url, headers=None, json=None, timeout=None):
+        status = next(answers)
+        calls.append(len(json["requests"]))
+        if status != 200:
+            return FakeResponse(status, {"error": {"message": "quota"}})
+        return FakeResponse(200, {"embeddings": [{"values": [1.0, 0.0]} for _ in json["requests"]]})
+
+    monkeypatch.setattr(embeddings.requests, "post", post)
+    sleeps = []
+    done = recall.backfill(batch=1, pause=10, sleep=sleeps.append)
+    assert done == 2 and set(embeddings.load("memory")) == {"1", "2"}
+    assert max(calls) == 1, "batches larger than asked for"
+    assert sleeps[0] == 20, "no longer wait after a quota hit"
