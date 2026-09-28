@@ -127,7 +127,7 @@ def _ensure_schema_once(conn: sqlite3.Connection, path: Path) -> None:
 # Схема
 # ---------------------------------------------------------------------------
 
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 
 _SCHEMA = """
 -- Цели и дедлайны: id остаётся сквозным, как в JSON (на него ссылаются tools).
@@ -286,6 +286,18 @@ CREATE TABLE IF NOT EXISTS timetable (
     created    TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_timetable_day ON timetable(weekday, valid_from);
+
+-- Векторы текста для смыслового поиска (память, дневник, инструменты). v8.
+-- Кэш, а не данные: пересчитывается, если текст (hash) или модель сменились.
+CREATE TABLE IF NOT EXISTS embeddings (
+    kind   TEXT NOT NULL,          -- memory | diary | tool
+    ref    TEXT NOT NULL,          -- id записи или имя инструмента
+    model  TEXT NOT NULL,
+    hash   TEXT NOT NULL,          -- sha1 исходного текста
+    dim    INTEGER NOT NULL,
+    vec    BLOB NOT NULL,          -- float32, array('f')
+    PRIMARY KEY (kind, ref, model)
+);
 """
 
 

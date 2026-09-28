@@ -69,6 +69,22 @@ def main() -> None:
     from utils.model_healthcheck import run_and_log  # noqa: E402
     run_and_log(config)
 
+    # Векторы памяти досчитываются в фоне: первый прогон — ~700 записей,
+    # дальше только новые. Старт ботов не ждёт; без векторов поиск работает
+    # по полному тексту, как раньше (logic/recall).
+    import threading  # noqa: E402
+
+    def _index_memory() -> None:
+        try:
+            from logic import recall
+            done = recall.backfill()
+            logger.info("Память: векторов досчитано %d", done)
+        except Exception:  # noqa: BLE001
+            logger.warning("Индексация памяти не удалась — поиск по полному тексту",
+                           exc_info=True)
+
+    threading.Thread(target=_index_memory, name="memory-index", daemon=True).start()
+
     # Один Dispatcher на всех — содержит response_generator, intent_recognizer,
     # safety, auth. State в нём stateless или защищён shared dict.
     dispatcher = Dispatcher(config)
