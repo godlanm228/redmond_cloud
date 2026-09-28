@@ -328,6 +328,49 @@ def _honest_failure(actions: List[Tuple[str, Dict[str, Any], str]]) -> str:
     return f"{head} Что уже сделано:\n{receipt}" if receipt else head
 
 
+# ---------- запись в дневник только по словам владельца ----------
+#
+# Правило владельца (28.09.2026): то, чего он не говорил и что не следует из
+# разговора, — мусор. Скан дневника в тот же день нашёл такие записи: «Поел»
+# на «мут на 7 дней» (14.09), «Поел.» на «я уже потренировался» (15.06),
+# «Напомнила о необходимости поесть…» — собственное действие бота (12.06).
+# Поэтому запись в дневник обязана опираться на его слова: общий корень слова
+# или число с его репликой в этом разговоре. Промпты кода (скедулер, разбор
+# фото) опорой не считаются — это не слова владельца.
+
+_GROUND_WORD_RX = re.compile(r"[a-zа-яё]{2,}|\d+", re.IGNORECASE)
+_GROUND_STOP = frozenset({
+    "на", "по", "до", "за", "из", "от", "не", "но", "же", "ли", "бы", "то", "во", "со",
+    "ко", "мы", "вы", "он", "ты", "да", "ну", "уж", "же", "ещё", "еще", "это", "как",
+    "что", "так", "там", "тут", "был", "была", "было", "уже", "для", "его", "её", "мне",
+})
+
+
+def _ground_tokens(text: str) -> set:
+    out = set()
+    for w in _GROUND_WORD_RX.findall((text or "").lower().replace("ё", "е")):
+        if w in _GROUND_STOP:
+            continue
+        out.add(w if w.isdigit() else w[:4])
+    return out
+
+
+def _ungrounded_write(fn_name: str, fn_args: Dict[str, Any], ctx: "GenerationContext") -> str:
+    """Отказ, если запись в дневник не опирается на слова владельца. '' — можно."""
+    if fn_name != "add_diary_entry":
+        return ""
+    owner_said = [] if _is_system_prompt(ctx.user_text) else [ctx.user_text]
+    owner_said += [h.get("user", "") for h in (ctx.history or [])[-2:]
+                   if not _is_system_prompt(h.get("user", ""))]
+    entry = _ground_tokens(str(fn_args.get("text", "")))
+    if entry and entry & set().union(*map(_ground_tokens, owner_said or [""])):
+        return ""
+    logger.warning("Запись в дневник отклонена: не опирается на слова владельца (%r)",
+                   str(fn_args.get("text", ""))[:80])
+    return ("Не записано: в дневник идёт только то, что владелец сам сказал в этом "
+            "разговоре. Если он это говорил — запиши его же словами; если нет — не пиши.")
+
+
 def _is_system_prompt(text: str) -> bool:
     """Промпт, написанный кодом, а не владельцем: «(scheduled…)», «(фото еды)»."""
     return (text or "").lstrip().startswith("(")
@@ -888,6 +931,7 @@ class ResponseGenerator:
                 # Групповой вызов → исходный инструмент: дальше всё (проверки,
                 # квитанция, статус) работает по исходному имени.
                 fn_name, fn_args, bad_call = toolbox.resolve(called, fn_args)
+                bad_call = bad_call or _ungrounded_write(fn_name, fn_args, ctx)
                 legacy_by_call[tc.get("id", "")] = fn_name
 
                 if called == tool_select.LOAD_TOOLS:
@@ -1152,6 +1196,7 @@ class ResponseGenerator:
                     )})
                     continue
                 fn_name, fn_args, bad_call = toolbox.resolve(called, c["args"])
+                bad_call = bad_call or _ungrounded_write(fn_name, fn_args, ctx)
                 if ctx.status_cb:
                     status = _tool_status_label(fn_name, fn_args)
                     if status:
