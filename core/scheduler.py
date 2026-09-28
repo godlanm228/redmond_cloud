@@ -234,8 +234,8 @@ async def evening_summary(
         return
     today = now_local().strftime("%Y-%m-%d")
     prompt = (
-        f"(scheduled, 22:30, вечерний итог) Сегодня {today}. Прочитай дневник (read_diary, "
-        "last_n=15) и возьми только записи за сегодня, плюс цели (list_goals, active). "
+        f"(scheduled, 22:30, вечерний итог) Сегодня {today}. Прочитай дневник (diary, action=read, "
+        "last_n=15) и возьми только записи за сегодня, плюс цели (goals, action=list, status=active). "
         "Итог дня в двух частях: (1) коротко факты — что зафиксировано "
         "(сон/питание/спорт/работа/учёба/решения), что с целями; отдельно отметь "
         "наблюдения от Redmond, если есть (записи с тегом «от Redmond»: "

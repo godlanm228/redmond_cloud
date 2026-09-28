@@ -546,7 +546,7 @@ async def redmond_photo_handler(update: Update, context: ContextTypes.DEFAULT_TY
             prompt = (
                 f"(фото продуктов) Влад пополнил запас: {', '.join(items)}.{bc_hint} "
                 f"Я уже добавила это в его запас продуктов (сейчас {n} позиций) — в запас "
-                "повторно НЕ добавляй. Можешь вызвать lookup_food (штрихкод или название) для "
+                "повторно НЕ добавляй. Можешь вызвать food(action=lookup) (штрихкод или название) для "
                 "точной нутриции, затем тёпло и коротко подтвердить + ОДНУ идею что приготовить. "
                 "Без лекций."
             )
@@ -563,7 +563,7 @@ async def redmond_photo_handler(update: Update, context: ContextTypes.DEFAULT_TY
                         + ", ".join(est) + ".") if est else ""
             prompt = (
                 f"(фото еды) Влад прислал фото еды: «{desc}».{est_line} "
-                "Запиши через log_meal (dish + эти оценки; place определи по STATE: смена "
+                "Запиши через food(action=log_meal) (dish + эти оценки; place определи по STATE: смена "
                 "сейчас → 'работа', иначе 'дом'). Дай короткую тёплую реакцию — без лекций о диете."
             )
 

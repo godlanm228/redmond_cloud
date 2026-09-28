@@ -115,10 +115,28 @@ def select_tools(user_text: str, tools: Sequence[dict],
     return picked
 
 
+def log_size(agent_name: str, messages: Sequence[dict], tools: Sequence[dict]) -> int:
+    """Записать в лог размер промпта по статьям. Возвращает оценку в токенах."""
+    parts = describe(messages, tools)
+    total = parts["total"]
+    line = (f"Prompt [{agent_name}]: ~{total} ток "
+            f"(схемы {parts['tool_schemas']}, system {parts['system']}, "
+            f"user {parts['user']}, tools-out {parts['tool_results']})")
+    if total > GROQ_TPM_LIMIT * WARN_RATIO:
+        logger.warning("%s — больше %d%% лимита TPM (%d)",
+                       line, int(WARN_RATIO * 100), GROQ_TPM_LIMIT)
+    else:
+        logger.info(line)
+    return total
+
+
 def log_shadow(agent_name: str, user_text: str, messages: Sequence[dict],
                tools: Sequence[dict]) -> Set[str]:
     """Записать в лог размер промпта и что дал бы отбор. Возвращает имена
-    отобранных инструментов — вызывающий сверяет с тем, что модель запросила."""
+    отобранных инструментов — вызывающий сверяет с тем, что модель запросила.
+
+    Отбор с 28.09.2026 настоящий (logic/tool_select); теневой прогон остался
+    для сравнения селекторов в тестах."""
     parts = describe(messages, tools)
     total = parts["total"]
     line = (f"Prompt [{agent_name}]: ~{total} ток "

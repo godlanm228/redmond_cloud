@@ -328,6 +328,11 @@ def _honest_failure(actions: List[Tuple[str, Dict[str, Any], str]]) -> str:
     return f"{head} Что уже сделано:\n{receipt}" if receipt else head
 
 
+def _is_system_prompt(text: str) -> bool:
+    """Промпт, написанный кодом, а не владельцем: «(scheduled…)», «(фото еды)»."""
+    return (text or "").lstrip().startswith("(")
+
+
 class Reply(str):
     """Ответ генерации + признак того, что модель на самом деле не ответила.
 
@@ -454,6 +459,9 @@ class GenerationContext:
     failed: bool = False
     # Сигнал острой ситуации (logic/distress): сначала спросить, что случилось.
     distress: bool = False
+    # Вектор сообщения владельца: один на генерацию, общий для отбора
+    # инструментов и поиска по памяти. None — ещё не считали; [] — не вышло.
+    query_vec: Optional[List[float]] = None
 
 
 class ResponseGenerator:
@@ -609,17 +617,16 @@ class ResponseGenerator:
     # ---------- enhancement ----------
 
     def _enhance_context(self, ctx: GenerationContext) -> GenerationContext:
-        # Память — релевантные предыдущие диалоги
-        if self.mem is not None:
-            try:
-                results = self.mem.search(ctx.user_text, top_k=self.top_k)
-                ctx.retrieved_docs = [
-                    f"{r['user']} => {r['bot']}" for r in results if r.get("score", 0) > 0.5
-                ]
-            except Exception as e:
-                # Ответ уйдёт без контекста памяти — владелец должен узнать (И1).
-                from utils import failures
-                failures.report("поиск по памяти", e, consequence=failures.DEGRADED)
+        # Память — релевантные предыдущие диалоги: полнотекстовый + векторный
+        # поиск, слитые вместе (logic/recall). Без векторов — как раньше.
+        from logic import recall
+        try:
+            ctx.retrieved_docs = recall.recall(
+                self.mem, ctx.user_text, self._query_vec(ctx), top_k=self.top_k)
+        except Exception as e:
+            # Ответ уйдёт без контекста памяти — владелец должен узнать (И1).
+            from utils import failures
+            failures.report("поиск по памяти", e, consequence=failures.DEGRADED)
 
         # Решаем нужен ли web-поиск через LLM-router (видит факты владельца).
         # Router сам формулирует query с учётом контекста — если владелец
@@ -671,7 +678,8 @@ class ResponseGenerator:
         if not api_key:
             return None
 
-        from logic.tools import TOOL_SCHEMAS, ToolSession, execute_tool
+        from logic import tool_select, toolbox
+        from logic.tools import ToolSession, execute_tool
         import json as _json
 
         primary_model = getattr(self.config, "groq_model", "openai/gpt-oss-120b")
@@ -686,13 +694,10 @@ class ResponseGenerator:
             {"role": "user", "content": self._build_user_message(ctx)},
         ]
 
-        # Фильтрация tools по агенту
+        # Инструменты агента в том виде, в каком их видит модель (logic/toolbox:
+        # сгруппированные с action; allowed_tools — по исходным именам).
         allowed = getattr(ctx.agent, "allowed_tools", None) if ctx.agent else None
-        if allowed:
-            allowed_set = set(allowed)
-            tools_for_agent = [t for t in TOOL_SCHEMAS if t["function"]["name"] in allowed_set]
-        else:
-            tools_for_agent = TOOL_SCHEMAS
+        tools_for_agent = toolbox.model_tools(allowed or None)
 
         # Принудительный tool (классификатор решил «research» → делегирование
         # гарантируется кодом): оставляем только его + tool_choice forced на хопе 0.
@@ -703,6 +708,9 @@ class ResponseGenerator:
         # Острая ситуация: в этом ответе только вопрос, никаких действий.
         if ctx.distress:
             tools_for_agent = []
+        # Какой исходный инструмент стоит за каждым tool-сообщением: сжатие
+        # берёт «что существенно» по исходному имени, а в истории — групповое.
+        legacy_by_call: Dict[str, str] = {}
 
         # Per-conversation cache: какие секции досье уже отдавали в этой генерации.
         # Защищает от повторных read_dossier_section, которые сжигают TPM.
@@ -710,10 +718,12 @@ class ResponseGenerator:
         # Одна на генерацию: помнит, какие записи модель РЕАЛЬНО видела,
         # и не даёт менять запись по номеру, взятому наугад (инцидент 17.08).
         tool_session = ToolSession()
-        # Имена инструментов, которые оставил бы теневой отбор (см. prompt_budget).
-        # Пустое множество = отбор не считался, промахи не логируем.
-        shadow_tools: set = set()
         agent_name = getattr(ctx.agent, "name", "?") if ctx.agent else "?"
+        # Не все инструменты сразу: ядро + ближайшие по смыслу, остальное через
+        # load_tools (logic/tool_select). Принудительный вызов не трогаем.
+        deferred: List[dict] = []
+        if tools_for_agent and not ctx.force_tool:
+            tools_for_agent, deferred = self._select_tools(ctx, agent_name, tools_for_agent)
 
         temperature = getattr(ctx.agent, "temperature", 0.5) if ctx.agent else 0.5
         max_tokens = getattr(ctx.agent, "max_tokens", 800) if ctx.agent else 800
@@ -737,22 +747,17 @@ class ResponseGenerator:
                         "missing, and give the best link(s) you have."
                     ),
                 })
-            hop_tools = None if final_hop else (tools_for_agent or None)
+            hop_tools = None if final_hop else (self._offer(tools_for_agent, deferred) or None)
             hop_tool_choice = None
             if ctx.force_tool and hop == 0 and hop_tools:
                 hop_tool_choice = {"type": "function", "function": {"name": ctx.force_tool}}
 
-            # Замер бюджета + теневой отбор инструментов. Ничего не отключает:
-            # только считает размер промпта (раньше он вообще не логировался) и
-            # проверяет, не отрезал ли бы отбор инструмент, который модель
-            # реально запросит. См. logic/prompt_budget.py.
+            # Размер промпта по статьям — видно, куда уходит бюджет TPM.
             if hop == 0 and hop_tools:
                 try:
-                    shadow_tools = prompt_budget.log_shadow(
-                        agent_name, ctx.user_text, messages, hop_tools,
-                    )
+                    prompt_budget.log_size(agent_name, messages, hop_tools)
                 except Exception:
-                    logger.debug("prompt_budget shadow failed", exc_info=True)
+                    logger.debug("prompt_budget size failed", exc_info=True)
 
             # Пробуем модели по цепочке: primary, потом fallback.
             # Fallback включается при rate_limit / tool_use_failed / любой transient ошибке.
@@ -860,9 +865,10 @@ class ResponseGenerator:
             from logic.tools import OUTPUT_ESSENTIALS
             for m in messages:
                 if m.get("role") == "tool" and m.get("content"):
+                    legacy = legacy_by_call.get(m.get("tool_call_id") or "", m.get("name") or "")
                     m["content"] = _compress_tool_content(
                         m["content"],
-                        essentials=OUTPUT_ESSENTIALS.get(m.get("name") or ""),
+                        essentials=OUTPUT_ESSENTIALS.get(legacy),
                     )
 
             messages.append({
@@ -872,15 +878,23 @@ class ResponseGenerator:
             })
             for tc in tool_calls:
                 fn = tc.get("function", {})
-                fn_name = fn.get("name", "")
-                # Теневая метрика: отбор инструментов оставил бы модель без этого?
-                prompt_budget.log_selection_miss(agent_name, fn_name, shadow_tools)
+                called = fn.get("name", "")
                 try:
                     fn_args = _json.loads(fn.get("arguments") or "{}")
                 except _json.JSONDecodeError:
                     # Битый JSON (prose/незакрытые кавычки) — не выполнять tool с
                     # пустыми args молча: пробуем восстановить (иначе теряем план/запись).
-                    fn_args = _repair_tool_args(fn.get("arguments") or "", fn_name)
+                    fn_args = _repair_tool_args(fn.get("arguments") or "", called)
+                # Групповой вызов → исходный инструмент: дальше всё (проверки,
+                # квитанция, статус) работает по исходному имени.
+                fn_name, fn_args, bad_call = toolbox.resolve(called, fn_args)
+                legacy_by_call[tc.get("id", "")] = fn_name
+
+                if called == tool_select.LOAD_TOOLS:
+                    result = self._load_tools(agent_name, fn_args, deferred, tools_for_agent)
+                    messages.append({"role": "tool", "tool_call_id": tc.get("id", ""),
+                                     "name": called, "content": result})
+                    continue
 
                 # Cache dossier: если ту же секцию уже отдавали — возвращаем
                 # короткий маркер. Экономия ~1500-3000 токенов на повторном вызове.
@@ -906,6 +920,8 @@ class ResponseGenerator:
                     else:
                         dossier_returned.add(section)
                         result = execute_tool(fn_name, fn_args, rg=self, session=tool_session)
+                elif bad_call:
+                    result = bad_call
                 else:
                     result = execute_tool(fn_name, fn_args, rg=self, session=tool_session)
 
@@ -918,7 +934,7 @@ class ResponseGenerator:
                 messages.append({
                     "role": "tool",
                     "tool_call_id": tc.get("id", ""),
-                    "name": fn_name,
+                    "name": called,
                     "content": result,
                 })
                 # Действия, которые реально что-то поменяли: для квитанции и
@@ -1032,7 +1048,8 @@ class ResponseGenerator:
             отдельным вызовом по уже собранным результатам (_finish_after_tools).
         """
         from utils import gemini
-        from logic.tools import (TOOL_SCHEMAS, ToolSession, execute_tool,
+        from logic import tool_select, toolbox
+        from logic.tools import (OUTPUT_ESSENTIALS, ToolSession, execute_tool,
                                  DELEGATION_MARKER)
 
         api_key = getattr(self.config, "gemini_api_key", "") or gemini.api_key_from_env()
@@ -1040,20 +1057,22 @@ class ResponseGenerator:
             return ""
         model = getattr(self.config, "gemini_model", "") or gemini.DEFAULT_MODEL
 
-        # Фильтрация tools по агенту (как в Groq-пути)
+        # Инструменты агента в том виде, в каком их видит модель (как в Groq-пути).
         allowed = getattr(ctx.agent, "allowed_tools", None) if ctx.agent else None
-        if allowed:
-            allowed_set = set(allowed)
-            tools_for_agent = [t for t in TOOL_SCHEMAS if t["function"]["name"] in allowed_set]
-        else:
-            tools_for_agent = TOOL_SCHEMAS
+        tools_for_agent = toolbox.model_tools(allowed or None)
+        # Исходный инструмент за каждым functionResponse — для сжатия.
+        legacy_by_part: Dict[int, str] = {}
         if ctx.force_tool:
             forced = [t for t in tools_for_agent if t["function"]["name"] == ctx.force_tool]
             if forced:
                 tools_for_agent = forced
         # Острая ситуация: в этом ответе только вопрос, никаких действий.
-        gemini_tools = (None if ctx.distress
-                        else gemini.tool_schemas_to_gemini(tools_for_agent))
+        if ctx.distress:
+            tools_for_agent = []
+        agent_name = getattr(ctx.agent, "name", "?") if ctx.agent else "?"
+        deferred: List[dict] = []
+        if tools_for_agent and not ctx.force_tool:
+            tools_for_agent, deferred = self._select_tools(ctx, agent_name, tools_for_agent)
 
         system = self._build_system_prompt(ctx)
         contents: List[Dict[str, Any]] = [
@@ -1070,7 +1089,8 @@ class ResponseGenerator:
         max_hops = 5
         for hop in range(max_hops):
             final_hop = hop == max_hops - 1
-            hop_tools = None if final_hop else gemini_tools
+            offer = [] if final_hop else self._offer(tools_for_agent, deferred)
+            hop_tools = gemini.tool_schemas_to_gemini(offer) if offer else None
             tool_config = None
             if final_hop:
                 contents.append({"role": "user", "parts": [{"text": (
@@ -1106,19 +1126,32 @@ class ResponseGenerator:
 
             # Модель просит tools: сжимаем уже отработанные functionResponse (как Groq),
             # затем добавляем model-ход с вызовами и user-ход с результатами.
+            # «Что существенно» — по исходному инструменту. До 28.09.2026 здесь
+            # декларация не передавалась вовсе, и после сжатия номера записей
+            # (#id) на пути Gemini терялись — тот же класс, что инцидент 17.08.
             for c in contents:
                 for p in c.get("parts", []):
                     fr = p.get("functionResponse")
                     if fr and isinstance(fr.get("response"), dict) \
                             and isinstance(fr["response"].get("result"), str):
-                        fr["response"]["result"] = _compress_tool_content(fr["response"]["result"])
+                        legacy = legacy_by_part.get(id(p), fr.get("name") or "")
+                        fr["response"]["result"] = _compress_tool_content(
+                            fr["response"]["result"], essentials=OUTPUT_ESSENTIALS.get(legacy))
 
             # Ход модели — как прислан, с thoughtSignature (см. gemini.model_turn).
             contents.append(gemini.model_turn(data))
 
             response_parts: List[Dict[str, Any]] = []
             for c in calls:
-                fn_name, fn_args = c["name"], c["args"]
+                called = c["name"]
+                if called == tool_select.LOAD_TOOLS:
+                    result = self._load_tools(agent_name, c["args"], deferred, tools_for_agent)
+                    response_parts.append({"functionResponse": dict(
+                        {"name": called, "response": {"result": result}},
+                        **({"id": c["id"]} if c["id"] else {}),
+                    )})
+                    continue
+                fn_name, fn_args, bad_call = toolbox.resolve(called, c["args"])
                 if ctx.status_cb:
                     status = _tool_status_label(fn_name, fn_args)
                     if status:
@@ -1136,6 +1169,8 @@ class ResponseGenerator:
                     else:
                         dossier_returned.add(section)
                         result = execute_tool(fn_name, fn_args, rg=self, session=tool_session)
+                elif bad_call:
+                    result = bad_call
                 else:
                     result = execute_tool(fn_name, fn_args, rg=self, session=tool_session)
 
@@ -1143,10 +1178,13 @@ class ResponseGenerator:
                 if isinstance(result, str) and result.startswith(DELEGATION_MARKER):
                     return result
 
-                response_parts.append({"functionResponse": dict(
-                    {"name": fn_name, "response": {"result": result}},
+                # Имя в ответе обязано совпадать с именем вызова (групповым).
+                part = {"functionResponse": dict(
+                    {"name": called, "response": {"result": result}},
                     **({"id": c["id"]} if c["id"] else {}),
-                )})
+                )}
+                legacy_by_part[id(part)] = fn_name
+                response_parts.append(part)
                 if fn_name in _STATE_CHANGING_TOOLS and not _tool_result_failed(result):
                     ctx.actions.append((fn_name, fn_args, str(result)))
 
@@ -1199,6 +1237,60 @@ class ResponseGenerator:
                         return content
         return None
 
+    # ---------- отбор инструментов (logic/tool_select) ----------
+
+    @staticmethod
+    def _query_vec(ctx: GenerationContext) -> Optional[List[float]]:
+        """Вектор сообщения владельца, один раз на генерацию. Скедулерные
+        промпты (без истории) не векторизуем: их инструменты и так узкие."""
+        if ctx.query_vec is None:
+            vec = None
+            if ctx.user_text and not _is_system_prompt(ctx.user_text):
+                try:
+                    from utils import embeddings
+                    vec = embeddings.embed_query(ctx.user_text)
+                except Exception:  # noqa: BLE001 — без вектора работаем по словам
+                    logger.warning("Вектор сообщения не посчитан", exc_info=True)
+            ctx.query_vec = vec or []
+        return ctx.query_vec or None
+
+    def _select_tools(self, ctx: GenerationContext, agent_name: str,
+                      tools: List[dict]) -> Tuple[List[dict], List[dict]]:
+        from logic import tool_select
+        # Промпты, которые пишет код (скедулер, разбор фото), называют нужный
+        # инструмент прямо и бывают редко — им отдаём весь набор агента.
+        if _is_system_prompt(ctx.user_text):
+            return tools, []
+        try:
+            offered, deferred, how = tool_select.select(
+                agent_name, ctx.user_text, tools, self._query_vec(ctx))
+        except Exception:  # noqa: BLE001 — отбор не имеет права оставить без инструментов
+            logger.warning("Отбор инструментов упал — даю все", exc_info=True)
+            return tools, []
+        if deferred:
+            logger.info("Отбор [%s, %s]: %s; в запасе %d",
+                        agent_name, how, ", ".join(s["function"]["name"] for s in offered),
+                        len(deferred))
+        return offered, deferred
+
+    @staticmethod
+    def _offer(offered: List[dict], deferred: List[dict]) -> List[dict]:
+        from logic import tool_select
+        return offered + ([tool_select.load_tools_schema(deferred)] if deferred else [])
+
+    @staticmethod
+    def _load_tools(agent_name: str, args: Dict[str, Any], deferred: List[dict],
+                    offered: List[dict]) -> str:
+        from logic import tool_select
+        names = args.get("names") or []
+        if isinstance(names, str):
+            names = [n.strip() for n in names.split(",")]
+        loaded, unknown = tool_select.apply_load(names, deferred, offered)
+        # Промах отбора — главная метрика для его настройки.
+        logger.warning("Отбор [%s] промахнулся: модель подгрузила %s%s", agent_name,
+                       ", ".join(loaded) or "—", f" (неизвестные: {unknown})" if unknown else "")
+        return tool_select.load_result(loaded, unknown)
+
     def _finish_after_tools(self, ctx: GenerationContext, flat_prompt: str,
                             groq_ok: bool = True) -> str:
         """Инструменты отработали, а модель не дала текста.
@@ -1231,6 +1323,11 @@ class ResponseGenerator:
             prompt = self._build_newser_system_prompt(ctx)
         else:
             prompt = self._build_redmond_system_prompt(ctx)
+
+        # Промпты писались под исходные имена инструментов; модель видит
+        # сгруппированные (logic/toolbox) — переводим упоминания в одном месте.
+        from logic import toolbox
+        prompt = toolbox.rename_refs(prompt)
 
         # Общее для всех агентов: правила про факты и квитанцию + сами факты.
         from logic import system_facts
