@@ -26,8 +26,13 @@ from utils import db
 logger = logging.getLogger(__name__)
 
 # Below this cosine a memory is not relevant. Calibrated on the production
-# database (see tests/test_recall.py for the values it was set from).
-MIN_COSINE = 0.62
+# database on Sep 28, 2026 (311 exchanges, gemini-embedding-2, 768 dims):
+# top hits of real questions lie in 0.70-0.85, and so do some unrelated short
+# replies - short chat texts sit close together. An absolute cut cannot
+# separate them, so ranking and top_k do the selecting; 0.70 only drops what
+# is clearly foreign. Examples: "у меня опять болит живот" found the Sep 3
+# exchange about stomach pain and the doctor (0.72-0.79), with no shared words.
+MIN_COSINE = 0.70
 _RRF_K = 60
 _CANDIDATES = 8
 _BOT_CHARS = 300
