@@ -4,6 +4,7 @@ The real account state on Sep 28, 2026 is the starting point: every AD in
 Frankfurt reported OUT_OF_HOST_CAPACITY for A1.Flex, even at 1 OCPU / 2 GB.
 """
 
+import pathlib
 import random
 
 
@@ -15,9 +16,10 @@ OUT = "OUT_OF_HOST_CAPACITY"
 
 
 def settings(**kw):
+    import tempfile
     base = dict(compartment_id="c", subnet_id="s", ssh_public_key="ssh-rsa AAA",
                 availability_domains=ADS, probe_every=480, jitter=90, blind_every=2700,
-                state_file="unused")
+                state_file=str(pathlib.Path(tempfile.mkdtemp()) / "state.json"))
     base.update(kw)
     return h.Settings(**base)
 
@@ -153,8 +155,7 @@ def test_never_creates_a_second_instance():
 def test_run_stops_after_success():
     compute = FakeCompute(reports={ADS[0]: {(2, 12): "AVAILABLE", (1, 6): OUT}},
                           launch_results=[{"id": "i1", "public_ip": "198.51.100.7"}])
-    hu, _sent, _ = hunter(compute, state_file=str(__import__("pathlib").Path(
-        __import__("tempfile").mkdtemp()) / "state.json"))
+    hu, _sent, _ = hunter(compute)
     sleeps = []
     hu.run(sleep=sleeps.append)
     assert hu.done and sleeps == []
@@ -191,3 +192,16 @@ def test_importing_the_hunter_does_not_import_the_oci_sdk():
                           "import sys, ops.a1_hunter; print('oci' in sys.modules)"],
                          capture_output=True, text=True, cwd=root, stdin=subprocess.DEVNULL)
     assert out.stdout.strip() == "False", out.stderr
+
+
+def test_all_three_ads_free_at_once_still_means_one_instance():
+    """We need exactly one machine: capacity in every AD must not turn into three."""
+    free = {(2, 12): "AVAILABLE", (1, 6): "AVAILABLE"}
+    compute = FakeCompute(reports={ad: free for ad in ADS},
+                          launch_results=[{"id": "i1", "public_ip": "198.51.100.7"},
+                                          {"id": "i2", "public_ip": "198.51.100.8"},
+                                          {"id": "i3", "public_ip": "198.51.100.9"}])
+    hu, sent, _ = hunter(compute)
+    hu.run(sleep=lambda s: None)
+    assert len(compute.launched) == 1
+    assert len(sent) == 1
