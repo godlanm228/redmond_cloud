@@ -15,6 +15,7 @@
     "groq_api_base": {"type": "string", "format": "uri"},
     "gemini_api_key": {"type": "string"},
     "gemini_model": {"type": "string"},
+    "gemini_thinking_level": {"type": "string", "enum": ["minimal", "low", "medium", "high"]},
 
     "groq_whisper_model": {"type": "string", "minLength": 1},
 
