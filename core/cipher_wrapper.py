@@ -29,6 +29,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import re
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -81,14 +82,49 @@ CREDENTIALS_PATH = Path.home() / ".claude" / ".credentials.json"
 REFRESH_WARN_DAYS = 5
 
 
+# The CLI prefers a long-lived token from the environment (created with
+# `claude setup-token`) over the credentials file. The service gets it from
+# .env, so when it is set the file says nothing about whether Cipher works.
+TOKEN_ENV = "CLAUDE_CODE_OAUTH_TOKEN"
+_HEALTH_KEY = "cipher_health"
+
+
+def record_run(ok: bool, reason: str = "") -> None:
+    """Remember how the last real Cipher run ended. Never raises."""
+    try:
+        db.kv_set(_HEALTH_KEY, {"ok": ok, "reason": reason[:200],
+                                "at": now_local().isoformat(timespec="minutes")})
+    except Exception:  # noqa: BLE001
+        logger.warning("Cipher: не удалось записать исход запуска", exc_info=True)
+
+
+def _last_run() -> Dict[str, Any]:
+    try:
+        return db.kv_get(_HEALTH_KEY, {}) or {}
+    except Exception:  # noqa: BLE001
+        return {}
+
+
 def auth_status() -> Dict[str, Any]:
     """Состояние авторизации CLI. Читаем ТОЛЬКО метаданные, не токены.
 
     13–15.08.2026 Cipher был мёртв, и узнали об этом случайно: файла
     credentials не было вообще (не «протух» — исчез). Пользователь замечает
     такое только когда сам обратится к Cipher и получит отказ.
+
+    Если CLI авторизован токеном из окружения, файл ни о чём не говорит:
+    25–28.09.2026 сторож кричал «refresh-токен истёк» при рабочем Cipher, а
+    10.09, когда подписку отключили и Cipher реально умер, молчал. В этом
+    режиме судим по исходу последнего настоящего запуска.
     """
     out: Dict[str, Any] = {"ok": False, "reason": "", "expires_in_days": None}
+    if os.environ.get(TOKEN_ENV):
+        last = _last_run()
+        if last and not last.get("ok"):
+            out["reason"] = f"последний запуск {last.get('at', '?')}: {last.get('reason') or 'отказ'}"
+            return out
+        out["ok"] = True
+        return out
     if not CREDENTIALS_PATH.exists():
         out["reason"] = "нет файла авторизации — нужен /login на VM"
         return out
@@ -321,6 +357,7 @@ async def run_cipher(task: str, chat_id: int = 0,
     text, new_session, is_error = _parse_output(raw)
 
     if text and not is_error and proc.returncode == 0:
+        record_run(True)
         if new_session:
             remember_session(chat_id, new_session, topic=task)
         return text, new_session
@@ -332,7 +369,15 @@ async def run_cipher(task: str, chat_id: int = 0,
                  combined, re.I):
         until = _set_lock(_parse_reset_hours(combined))
         return f"Упёрся в лимит Pro (общий с десктопом Влада) — на КД до {until}.", ""
+    # 10.09.2026: подписку отключили, и в чат ушла сырая строка CLI, потому что
+    # она не похожа на «нужен логин». Это та же поломка доступа, другими словами.
+    if re.search(r"disabled .*subscription|subscription access|organization has disabled",
+                 combined, re.I):
+        record_run(False, "подписка Claude не активна")
+        return ("Подписка Claude сейчас не активна — без неё я не работаю. "
+                "Продлишь — заработаю сам, /login не нужен.", "")
     if re.search(r"log ?in|login|authenticat|credentials|setup-token", combined, re.I):
+        record_run(False, "нет авторизации")
         return ("Я не авторизован на VM. Влад: `ssh` на сервер → команда `claude` → "
                 "`/login` под Pro-аккаунтом (один раз).", "")
     # Сессия могла протухнуть на стороне CLI — пробуем один раз с чистого листа,

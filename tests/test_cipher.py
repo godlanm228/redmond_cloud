@@ -6,6 +6,7 @@
 вместо полного @username.
 """
 
+import os
 import sys
 import unittest
 from datetime import timedelta
@@ -220,9 +221,13 @@ class AuthStatusTests(unittest.TestCase):
         self.path = Path(self.tmp.name) / ".credentials.json"
         self._orig = cw.CREDENTIALS_PATH
         cw.CREDENTIALS_PATH = self.path
+        # These tests are about the credentials file: no env token here.
+        self._env = os.environ.pop(cw.TOKEN_ENV, None)
 
     def tearDown(self):
         cw.CREDENTIALS_PATH = self._orig
+        if self._env is not None:
+            os.environ[cw.TOKEN_ENV] = self._env
         self.tmp.cleanup()
 
     def _write(self, payload):
@@ -292,3 +297,59 @@ class AuthStatusTests(unittest.TestCase):
         status = cw.auth_status()
         self.assertNotIn("СЕКРЕТ", repr(status))
         self.assertNotIn("ТОЖЕ-СЕКРЕТ", repr(status))
+
+
+class TokenAuthTests(unittest.TestCase):
+    """Sep 2026: the CLI logs in with CLAUDE_CODE_OAUTH_TOKEN from .env, so the
+    credentials file says nothing. The watch cried "refresh token expired" while
+    Cipher worked, and stayed silent on Sep 10 when the subscription was
+    disabled and Cipher really died."""
+
+    def setUp(self):
+        self._env = os.environ.get(cw.TOKEN_ENV)
+        os.environ[cw.TOKEN_ENV] = "test-token"
+
+    def tearDown(self):
+        if self._env is None:
+            os.environ.pop(cw.TOKEN_ENV, None)
+        else:
+            os.environ[cw.TOKEN_ENV] = self._env
+
+    def test_token_mode_ignores_an_expired_credentials_file(self):
+        self.assertTrue(cw.auth_status()["ok"])
+
+    def test_a_failed_real_run_is_reported(self):
+        cw.record_run(False, "подписка Claude не активна")
+        status = cw.auth_status()
+        self.assertFalse(status["ok"])
+        self.assertIn("подписка", status["reason"])
+
+    def test_a_later_success_clears_the_failure(self):
+        cw.record_run(False, "подписка Claude не активна")
+        cw.record_run(True)
+        self.assertTrue(cw.auth_status()["ok"])
+
+    def test_disabled_subscription_gets_a_human_reply(self):
+        """The raw CLI line went straight into the chat on Sep 10."""
+        line = ("Your organization has disabled Claude subscription access for Claude Code "
+                "· Use an Anthropic API key instead, or ask your admin to enable access")
+
+        class Proc:
+            returncode = 1
+
+            async def communicate(self):
+                return line.encode(), b""
+
+        async def fake_exec(*a, **kw):
+            return Proc()
+
+        import asyncio as _asyncio
+        orig = cw.asyncio.create_subprocess_exec
+        cw.asyncio.create_subprocess_exec = fake_exec
+        try:
+            reply, _ = _asyncio.run(cw.run_cipher("чек логи", chat_id=1))
+        finally:
+            cw.asyncio.create_subprocess_exec = orig
+        self.assertNotIn("Your organization", reply)
+        self.assertIn("Подписка", reply)
+        self.assertFalse(cw.auth_status()["ok"])
