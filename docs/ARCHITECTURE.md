@@ -51,7 +51,7 @@ entry points. The deployed tree is a `git clone` plus the gitignored runtime fil
 | Position | Model |
 |---|---|
 | Primary | Groq `openai/gpt-oss-120b` |
-| Fallback | Groq `qwen/qwen3.6-27b` |
+| Fallback | Groq `qwen/qwen3.8-27b` (снятый резерв заменяется преемником автоматически, см. `utils/model_catalog.py`) |
 | Provider fallback | Google `gemini-3.6-flash` |
 | Router | `gemini-3.1-flash-lite`, falling back to Groq `llama-3.1-8b-instant` |
 

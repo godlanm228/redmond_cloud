@@ -37,6 +37,8 @@ logger = logging.getLogger(__name__)
 
 MAX_PINGS_PER_DAY = 5
 MIN_GAP_MIN = 90
+# Окно пинга «обед» в часах [с, до). Вечером про обед не спрашиваем.
+MEAL_WINDOW = (14, 17)
 
 # Стилевые инструкции ротируются кросс-день (coach_storage.next_style_index) —
 # Iris не должна открывать сообщения одинаково два раза подряд.
@@ -162,11 +164,13 @@ def _slot_decision(situation, now) -> Optional[Tuple[str, str]]:
         ))
 
     # --- 2. Обед в день без смены (или смена поздно вечером) ---
+    # Окно ограничено сверху: без границы 26.08.2026 владелец впервые написал
+    # в 20:21, и в 20:30 ему пришло «Время к обеду».
     if (
         (shift_start is None or shift_start.hour >= 19)
         and "питание" not in tags
         and "meal" not in pings
-        and now.hour >= 14
+        and MEAL_WINDOW[0] <= now.hour < MEAL_WINDOW[1]
     ):
         return ("meal", (
             "Время к обеду, а записей о еде за день нет. Пингани коротко: поел ли, "

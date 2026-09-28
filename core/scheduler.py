@@ -42,7 +42,10 @@ _JOB_TIMEOUT_SEC = 200.0
 # пересылаются в КАЖДОМ Groq-запросе. Режем до минимума задачи.
 # ВАЖНО: пустой allowed_tools=[] нельзя — он falsy и означает «все tools» (см. RG).
 IRIS_EVENING = replace(IRIS, allowed_tools=["read_diary", "list_goals"])
-IRIS_TICKER = replace(IRIS, allowed_tools=["add_diary_entry", "mute_notifications"])
+# Пинг тикера пишет код, а не владелец — записывать из него в дневник нечего.
+# С add_diary_entry здесь 10.09.2026 пинг записал в дневник сам себя
+# («Дневной пинг после подъёма») и отправил владельцу «Готово: записала в дневник.»
+IRIS_TICKER = replace(IRIS, allowed_tools=["mute_notifications"])
 IRIS_DEADLINES = replace(IRIS, allowed_tools=["list_deadlines", "mark_deadline_done",
                                               "postpone_deadline"])
 
@@ -98,6 +101,13 @@ async def _generate_and_send(
             )
         if not response:
             logger.warning("Scheduled job for %s: empty response, nothing sent", agent.name)
+            return
+        if getattr(response, "failed", False):
+            # Проактивное сообщение об отказе владельцу не нужно: он ни о чём
+            # не просил. Раньше сюда проходила заглушка, и в лог писалось
+            # «Scheduled job done» — провал выглядел успехом.
+            logger.warning("Scheduled job for %s: модели не ответили, в чат не отправляю "
+                           "(%r)", agent.name, str(response)[:120])
             return
         await coordinator.respond_as(agent.name, chat_id, response, agent.emoji, agent.output_format)
         _set_sticky(router_states, chat_id, agent.name, response)
@@ -270,13 +280,50 @@ async def cipher_auth_watch(
         text = f"🧠 Cipher скоро отвалится: {detail}."
         logger.warning("Cipher auth watch: %s", detail)
 
-    # Это не проактивный пинг «как дела», а сообщение о сломанном инструменте —
-    # шлём даже при мягком mute. Полную тишину (scope='all') всё же уважаем.
+    # Это не пинг «как дела», а сообщение о сломанном инструменте. Раньше полная
+    # тишина его глушила, и с 10.09.2026 Cipher лежал две недели молча: в логе
+    # каждый день ERROR, в чате — ничего. Теперь проходит и сквозь тишину,
+    # но одна и та же авария не чаще раза в несколько дней (core/alerts).
+    await _send_alert(coordinator, chat_id, "cipher_auth", "Cipher", "🧠", text)
+
+
+async def _send_alert(coordinator: Coordinator, chat_id: int, kind: str,
+                      agent_name: str, emoji: str, text: str) -> None:
+    from core import alerts
     from logic.coach_storage import hard_muted_now
-    if hard_muted_now():
-        logger.info("Cipher auth watch: полная тишина, сообщение не отправляю")
+    muted = hard_muted_now()
+    if not alerts.should_send(kind, text, muted):
+        logger.info("Авария «%s» уже отправлялась недавно — не повторяю", kind)
         return
-    await coordinator.respond_as("Cipher", chat_id, text, "🧠", "plain")
+    await coordinator.respond_as(agent_name, chat_id, text, emoji, "plain")
+    alerts.mark_sent(kind, text)
+    logger.info("Авария «%s» отправлена владельцу%s", kind, " (сквозь тишину)" if muted else "")
+
+
+async def model_watch(
+    dispatcher: Dispatcher,
+    coordinator: Coordinator,
+    chat_id: int,
+    router_states: Optional[dict] = None,
+) -> None:
+    """Раз в неделю: сверить наши модели с каталогами провайдеров.
+
+    Снятая резервная модель заменяется преемником сразу (до правки конфига),
+    о снятой основной и о вышедших новых версиях — сообщение владельцу.
+    Без этого о снятии `qwen/qwen3.6-27b` (14.09.2026) узнали через две недели.
+    """
+    from utils.model_healthcheck import describe_findings, review_catalog
+    config = dispatcher.response_generator.config
+    try:
+        findings = await asyncio.to_thread(review_catalog, config)
+    except Exception:
+        logger.exception("Model watch: сверка с каталогом упала")
+        return
+    text = describe_findings(findings)
+    if not text:
+        logger.info("Model watch: все модели на месте, новее нет")
+        return
+    await _send_alert(coordinator, chat_id, "model_watch", "Redmond", "🦞", text)
 
 
 # ---------- сборка ----------
@@ -312,6 +359,10 @@ def setup_scheduler(
     # сломается — чтобы это не выяснялось в момент, когда он реально нужен.
     sched.add_job(cipher_auth_watch, CronTrigger(hour=9, minute=10, timezone=tz), args=args,
                   id="cipher_auth_watch", coalesce=True, misfire_grace_time=3600)
+    # Провайдеры меняют модели раз в несколько недель — сверяемся раз в неделю
+    # (плюс на каждом старте, см. model_healthcheck.run_and_log).
+    sched.add_job(model_watch, CronTrigger(day_of_week="mon", hour=9, minute=15, timezone=tz),
+                  args=args, id="model_watch", coalesce=True, misfire_grace_time=3600)
 
     # Диагностика: явно логируем выполнение/пропуск/ошибку джоб. Раньше misfire
     # был невидим (apscheduler-логгер подавлен), причину сбоя нельзя было понять.

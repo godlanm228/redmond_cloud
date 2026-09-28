@@ -15,7 +15,7 @@
 from __future__ import annotations
 
 import logging
-from typing import Any, List, Tuple
+from typing import Any, Dict, List, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -112,8 +112,76 @@ def check_cipher_auth() -> Tuple[str, str]:
     return (OK, status["reason"]) if status["reason"] else (OK, "")
 
 
+def configured_models(config: Any) -> Dict[str, Tuple[str, str]]:
+    """Роль → (провайдер, модель) для всех моделей, на которых стоит хаб."""
+    from logic import agent_router
+    from utils import gemini
+    return {
+        "groq_model": ("groq", getattr(config, "groq_model", "")),
+        "groq_fallback_model": ("groq", getattr(config, "groq_fallback_model", "")),
+        "gemini_model": ("gemini", getattr(config, "gemini_model", "") or gemini.DEFAULT_MODEL),
+        "роутер": ("gemini", agent_router._ROUTER_MODEL),
+        "поиск (grounding)": ("gemini", gemini.GROUNDING_MODEL),
+    }
+
+
+# Какие роли можно менять на преемника автоматически. Резервная модель
+# Groq: пока она снята, резерва нет вообще, и любой вариант лучше. Основные
+# модели сами не меняем — смена основной меняет поведение всех агентов, это
+# решение владельца.
+_AUTO_REPLACE_ROLES = {"groq_fallback_model"}
+
+
+def review_catalog(config: Any) -> List[Any]:
+    """Сверить наши модели с живыми каталогами; снятый резерв заменить преемником.
+
+    Возвращает находки (utils.model_catalog.Finding). Замена действует до
+    рестарта процесса и пишется в лог ERROR-ом: правка config.json остаётся
+    за человеком, но хаб не стоит без резерва до этой правки.
+    """
+    from utils import gemini, model_catalog
+    live = {
+        "groq": model_catalog.list_groq(getattr(config, "groq_api_key", "")),
+        "gemini": model_catalog.list_gemini(
+            getattr(config, "gemini_api_key", "") or gemini.api_key_from_env()),
+    }
+    findings = model_catalog.review(configured_models(config), live)
+    for f in findings:
+        if f.gone and f.newer and f.role in _AUTO_REPLACE_ROLES:
+            setattr(config, f.role, f.newer)
+            logger.error("Модель %s снята провайдером — %s временно переключена на "
+                         "преемника %s. Поправь config.json.", f.model, f.role, f.newer)
+        elif f.gone:
+            logger.error("Модель %s (%s) снята провайдером%s", f.model, f.role,
+                         f", преемник: {f.newer}" if f.newer else ", преемника в каталоге нет")
+        else:
+            logger.info("Для %s (%s) есть новее: %s", f.role, f.model, f.newer)
+    return findings
+
+
+def describe_findings(findings: List[Any]) -> str:
+    """Текст для владельца. Пусто — сообщать нечего."""
+    lines = []
+    for f in findings:
+        if f.gone and f.newer and f.role in _AUTO_REPLACE_ROLES:
+            lines.append(f"• {f.model} снята {f.provider} — резерв сам переключился на "
+                         f"{f.newer}. Надо закрепить в config.json.")
+        elif f.gone:
+            lines.append(f"• {f.model} ({f.role}) снята {f.provider}"
+                         + (f" — есть преемник {f.newer}." if f.newer else " — преемника нет."))
+        else:
+            lines.append(f"• {f.role}: у нас {f.model}, вышла {f.newer}. Проверить и перейти?")
+    if not lines:
+        return ""
+    return "🔧 Модели изменились у провайдеров:\n" + "\n".join(lines)
+
+
 def run_and_log(config: Any) -> List[Tuple[str, str, str, str]]:
     """Прогнать проверку и написать итог в лог. Никогда не бросает."""
+    try:
+        review_catalog(config)
+    except Exception:  # noqa: BLE001
+        logger.warning("Сверка с каталогом моделей упала — пропускаем", exc_info=True)
     auth, detail = check_cipher_auth()
     if auth == GONE:
         logger.error("Cipher НЕ АВТОРИЗОВАН: %s. Пока это так, он не отвечает "
