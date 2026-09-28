@@ -1,0 +1,33 @@
+# A1 capacity hunter (ops/a1_hunter.py) - runs next to the hub, not inside it.
+#
+# Install on the VM:
+#   python3 -m venv ~/a1-hunter-venv && ~/a1-hunter-venv/bin/pip install oci requests
+#   cp deploy/a1-hunter.env.example ~/.a1-hunter.env   # fill in the values
+#   ~/a1-hunter-venv/bin/python -m ops.a1_hunter --check   # permissions, no launch
+#   sudo cp deploy/a1-hunter.service /etc/systemd/system/
+#   sudo systemctl daemon-reload && sudo systemctl enable --now a1-hunter
+#
+# It exits by itself once an instance exists, so Restart= is on-failure only.
+
+[Unit]
+Description=Redmond A1 capacity hunter
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/redmond-hub
+# TELEGRAM_BOT_TOKEN and MAIN_CHAT_ID for the "caught it" message.
+EnvironmentFile=/home/ubuntu/redmond-hub/.env
+EnvironmentFile=/home/ubuntu/.a1-hunter.env
+ExecStart=/home/ubuntu/a1-hunter-venv/bin/python -m ops.a1_hunter
+Restart=on-failure
+RestartSec=300
+Nice=10
+MemoryMax=200M
+StandardOutput=append:/home/ubuntu/a1-hunter.log
+StandardError=append:/home/ubuntu/a1-hunter.log
+
+[Install]
+WantedBy=multi-user.target
