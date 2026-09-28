@@ -88,3 +88,21 @@ def test_user_question_is_always_last():
         user_text="так что с планом на вечер?",
     ))
     assert rendered.strip().endswith("так что с планом на вечер?")
+
+
+def test_study_work_and_job_search_reach_the_prompt():
+    """Until Sep 28, 2026 the profile had them, but the prompt never showed them."""
+    rg = _rg()
+    rg.owner_profile = {"core": {"name": "Vladyslav"}, "current": {
+        "study": "Wirtschaftsinformatik (NRW)", "work": "Cafe Extrablatt, Minijob",
+        "job_search": "ищет Werkstudent"}}
+    facts = "\n".join(rg._compact_owner_facts())
+    assert "Wirtschaftsinformatik" in facts and "Extrablatt" in facts and "Werkstudent" in facts
+
+
+def test_what_the_owner_wants_reaches_the_prompt_too():
+    rg = _rg()
+    rg.owner_profile = {"communication_preferences": {
+        "wants": ["поддержка подколками, когда он на спаде"], "avoids": ["pep-talk"]}}
+    prefs = "\n".join(rg._compact_comm_prefs())
+    assert "WANTS:" in prefs and "подколками" in prefs and "AVOID:" in prefs

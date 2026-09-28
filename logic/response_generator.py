@@ -1402,6 +1402,12 @@ class ResponseGenerator:
         loc = ", ".join(filter(None, [current.get("city", ""), current.get("country", "")]))
         if loc:
             lines.append(f"Location: {loc}")
+        # Учёба, работа, поиск работы: до 28.09.2026 в профиле было только
+        # education_status, и в промпт оно не выводилось вовсе — бот не знал,
+        # где владелец учится и работает.
+        for key, label in (("study", "Study"), ("work", "Work"), ("job_search", "Job search")):
+            if current.get(key):
+                lines.append(f"{label}: {current[key]}")
 
         projects = current.get("active_projects") or []
         if projects:
@@ -1420,10 +1426,14 @@ class ResponseGenerator:
     def _compact_comm_prefs(self) -> List[str]:
         """Что НЕ делать в общении (одной строкой)."""
         prefs = self.owner_profile.get("communication_preferences") or {}
+        wants = prefs.get("wants") or []
         avoids = prefs.get("avoids") or []
-        if not avoids:
-            return []
-        return ["AVOID:"] + [f"  - {a}" for a in avoids[:5]]
+        out: List[str] = []
+        if wants:
+            out += ["WANTS:"] + [f"  - {w}" for w in wants[:6]]
+        if avoids:
+            out += ["AVOID:"] + [f"  - {a}" for a in avoids[:5]]
+        return out
 
     def _build_redmond_system_prompt(self, ctx: GenerationContext) -> str:
         """
