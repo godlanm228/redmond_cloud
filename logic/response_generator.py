@@ -1469,6 +1469,23 @@ class ResponseGenerator:
     def _select_tools(self, ctx: GenerationContext, agent_name: str,
                       tools: List[dict]) -> Tuple[List[dict], List[dict]]:
         from logic import tool_select
+        if ctx.understanding is not None and not _is_system_prompt(ctx.user_text):
+            # Какие инструменты нужны, говорит прочтение (оно уже читало сообщение
+            # сильной моделью). Векторный отбор всегда давал топ-3, даже на
+            # «привет»: похожести сжаты в 0.50–0.69 и не разделяют (замер
+            # 30.09.2026), а каждая лишняя группа — ~500 токенов схемы плюс её
+            # правила на КАЖДОМ шаге. Остальное — через load_tools.
+            from logic import understanding as understanding_mod
+            # Обязательные инструменты агента остаются (поиск у Newser, передача
+            # Iris у Redmond); дневник у Iris — только если он нужен ответу.
+            core = set(tool_select.CORE.get(agent_name, {"get_current_time"})) - {"diary"}
+            want = understanding_mod.tools_needed(ctx.understanding) | core
+            offered = [s for s in tools if s["function"]["name"] in want]
+            deferred = [s for s in tools if s["function"]["name"] not in want]
+            logger.info("Отбор [%s, прочтение: %s]: %s; в запасе %d", agent_name,
+                        ", ".join(ctx.understanding.needs) or "ничего",
+                        ", ".join(s["function"]["name"] for s in offered), len(deferred))
+            return offered, deferred
         # Промпты, которые пишет код (скедулер, разбор фото), называют нужный
         # инструмент прямо и бывают редко — им отдаём весь набор агента.
         if _is_system_prompt(ctx.user_text):

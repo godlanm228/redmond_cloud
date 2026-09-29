@@ -150,3 +150,25 @@ def test_nothing_goes_to_the_diary_in_a_crisis(rg, at_1644):
     before = len(coach_storage.read_diary(last_n=50))
     _ask(rg, "Суисайд", u)
     assert len(coach_storage.read_diary(last_n=50)) == before
+
+
+def test_the_reading_names_the_tools_the_answer_needs():
+    raw = ('{"addressee": "Iris", "needs": ["diary", "nonsense", "diary"], "facts": [], '
+           '"commands": [], "urgency": "none"}')
+    u = und.parse(raw, "покажи последние 10 записей")
+    assert u.needs == ["diary"]
+    assert und.tools_needed(u) == {"diary"}
+
+
+def test_a_chat_message_gets_no_tool_schemas_but_the_agents_core():
+    from logic import toolbox
+    g = object.__new__(rgm.ResponseGenerator)
+    tools = toolbox.model_tools(None)
+    ctx = SimpleNamespace(understanding=_u("Это как?"), user_text="Это как?", query_vec=None)
+    offered, deferred = g._select_tools(ctx, "Iris", tools)
+    assert [s["function"]["name"] for s in offered] == ["get_current_time"]
+    ctx.understanding.needs = ["food"]
+    offered, _ = g._select_tools(ctx, "Iris", tools)
+    assert {s["function"]["name"] for s in offered} == {"get_current_time", "food"}
+    offered, _ = g._select_tools(ctx, "Newser", tools)
+    assert "web_search" in {s["function"]["name"] for s in offered}, "Newser keeps his search"

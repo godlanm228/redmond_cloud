@@ -39,6 +39,19 @@ NOBODY = "Никто"
 WHEN = ("done", "now", "plan", "habit")
 URGENCY = ("none", "attention", "crisis")
 COMMANDS = ("mute", "unmute")
+# What the answer may need beyond what code does itself → tools offered to the agent.
+NEEDS = {
+    "diary": {"diary"},
+    "food": {"food"},
+    "schedule": {"schedule"},
+    "deadlines": {"deadlines"},
+    "goals": {"goals"},
+    "search": {"delegate_research", "web_search", "web_fetch", "get_news_headlines"},
+    "photo": {"find_photo"},
+    "profile": {"update_profile"},
+    "weather": {"get_weather"},
+    "crypto": {"get_crypto_market"},
+}
 
 PROMPT = """\
 Ты — шаг понимания в личном Telegram-хабе Влада. Четыре агента:
@@ -56,7 +69,8 @@ PROMPT = """\
  "facts": [{"quote": "...", "fact": "...", "when": "done|now|plan|habit", "topic": "..."}],
  "commands": [{"quote": "...", "type": "mute|unmute", "until": "", "hours": null, "scope": "all|pings"}],
  "urgency": "none|attention|crisis",
- "urgency_quote": ""
+ "urgency_quote": "",
+ "needs": ["..."]
 }
 
 Правила:
@@ -68,6 +82,7 @@ PROMPT = """\
 - urgency: crisis — только явная угроза жизни или острая ситуация прямо сейчас (суицид, «не могу дышать», «вызови скорую», сильная боль сейчас). attention — серьёзное, но не острое: больница, болезнь, обследования, плохие новости. none — всё остальное. Нахождение в больнице само по себе — attention, не crisis. Для attention и crisis urgency_quote — дословный фрагмент.
 - addressee: обращение — это имя агента в начале сообщения, через запятую или @ («Айрис, …», «@newser»). Имя внутри текста как тема — НЕ обращение (проект «Redmond Cloud», «шифр отвечал»). Если последняя реплика в разговоре — вопрос агента, а новое сообщение на него отвечает, — тому агенту. Жалоба на ответ агента — тому агенту. Иначе — чья это зона по смыслу. Сообщение о тяжёлом состоянии, боли, больнице — Iris. «Никто» — только если Влад явно думает вслух и не ждёт ответа; вопрос, просьба или рассказ о себе — всегда агенту.
 - research: true — если нужен свежий веб-поиск по нескольким источникам (новости, рынки, обзоры); одиночный факт — false.
+- needs — какие данные или действия понадобятся агенту, чтобы ОТВЕТИТЬ (факты и команды выполнит код, для них ничего не нужно): diary — прочитать, удалить или исправить записи дневника; food — еда, продукты дома, калории, что приготовить; schedule — смены, пары, план недели; deadlines — дедлайны, экзамены, сроки; goals — цели; search — свежие факты из интернета; photo — найти его фото; profile — изменить факт о нём в профиле; weather — погода; crypto — курсы крипты. Ответ по разговору, реакция, рассказ о себе — пустой список.
 """
 
 
@@ -98,6 +113,7 @@ class Understanding:
     commands: List[Command] = field(default_factory=list)
     urgency: str = "none"
     urgency_quote: str = ""
+    needs: List[str] = field(default_factory=list)
     model: str = ""
     dropped: List[str] = field(default_factory=list)  # what code refused: unquoted claims
     # Set once code has acted on it (facts recorded, commands executed): a
@@ -181,6 +197,9 @@ def parse(raw: str, message: str) -> Optional[Understanding]:
         u.commands.append(Command(quote=quote, type=kind, until=str(c.get("until") or "")[:16],
                                   hours=hours, scope=scope))
 
+    u.needs = [n for n in dict.fromkeys(str(x).strip().lower() for x in data.get("needs") or [])
+               if n in NEEDS]
+
     urgency = str(data.get("urgency") or "none").lower()
     u.urgency_quote = str(data.get("urgency_quote") or "")
     if urgency not in URGENCY:
@@ -195,6 +214,14 @@ def parse(raw: str, message: str) -> Optional[Understanding]:
 # ---------------------------------------------------------------------------
 # The call
 # ---------------------------------------------------------------------------
+
+def tools_needed(u: "Understanding") -> set:
+    """Model-facing tool names the reading says the answer needs."""
+    out: set = set()
+    for n in u.needs:
+        out |= NEEDS.get(n, set())
+    return out
+
 
 def build_input(message: str, history: Sequence[Dict[str, str]], now: str,
                 state: str = "") -> str:
