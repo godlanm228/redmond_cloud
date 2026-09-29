@@ -295,3 +295,30 @@ class MigrationTests(DbTestBase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def test_a_pool_thread_reconnects_after_close_all(tmp_path):
+    """Sep 29, 2026: close_all() closed every thread's connection but cleared
+    only its own thread's reference; a worker thread then reused the closed one."""
+    import threading
+    db.set_db_path(tmp_path / "gen.sqlite")
+    db.kv_set("x", 1)
+    ready, go, done = threading.Event(), threading.Event(), {}
+
+    def worker():
+        db.kv_get("x")           # this thread opens its own connection
+        ready.set()
+        go.wait(5)
+        try:
+            done["value"] = db.kv_get("x")
+        except Exception as e:  # noqa: BLE001
+            done["error"] = e
+
+    t = threading.Thread(target=worker)
+    t.start()
+    ready.wait(5)
+    db.close_all()               # e.g. the next scenario of a run
+    go.set()
+    t.join(5)
+    assert "error" not in done, done.get("error")
+    assert done["value"] == 1

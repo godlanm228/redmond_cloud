@@ -47,12 +47,15 @@ _conns_guard = threading.Lock()
 # полтора десятка потоков одновременно берут эксклюзивную блокировку на
 # CREATE TABLE и часть падает с 'database is locked'.
 _schema_done_for: Optional[Path] = None
+# Растёт с каждым close_all(): соединение потока старого поколения закрыто.
+_generation = 0
 
 
 def close_all() -> None:
     """Закрыть все соединения. Для тестов и корректного завершения."""
-    global _schema_done_for
+    global _schema_done_for, _generation
     with _conns_guard:
+        _generation += 1
         for c in _all_conns:
             try:
                 c.close()
@@ -84,7 +87,12 @@ def connect() -> sqlite3.Connection:
     """
     path = db_path().absolute()
     conn = getattr(_local, "conn", None)
-    if conn is not None and getattr(_local, "path", None) == path:
+    # Поколение: close_all() закрывает соединения ВСЕХ потоков, а ссылку
+    # очищает только у своего. Поток из пула (asyncio.to_thread) держал бы
+    # закрытое соединение и падал на «Cannot operate on a closed database» —
+    # так 29.09.2026 упал сценарный прогон на втором сценарии.
+    if (conn is not None and getattr(_local, "path", None) == path
+            and getattr(_local, "gen", None) == _generation):
         return conn
 
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -104,6 +112,7 @@ def connect() -> sqlite3.Connection:
     conn.execute("PRAGMA foreign_keys=ON")
     _local.conn = conn
     _local.path = path
+    _local.gen = _generation
     with _conns_guard:
         _all_conns.append(conn)
     _ensure_schema_once(conn, path)

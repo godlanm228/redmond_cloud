@@ -173,7 +173,38 @@ def model_tools(allowed: Optional[Iterable[str]] = None) -> List[dict]:
             desc = rename_refs(f.get("description", ""))
             out.append(schema if desc == f.get("description", "") else
                        {**schema, "function": {**f, "description": desc}})
-    return out
+    return [_nullable_optionals(s) for s in out]
+
+
+def _nullable_optionals(schema: dict) -> dict:
+    """Every optional parameter also accepts null.
+
+    Models fill optional fields with null instead of leaving them out, and Groq
+    validates tool calls against the schema on its side: 29.09.2026 «в больнице
+    лежу, мут до первого числа» failed with 400 «/hours: expected number, but
+    got null» — mode and scope allowed null, days and hours did not. The code
+    already reads None as «not given». Gemini's schema conversion drops null."""
+    fn = schema.get("function") or {}
+    params = fn.get("parameters")
+    if not isinstance(params, dict) or not params.get("properties"):
+        return schema
+    return {**schema, "function": {**fn, "parameters": _nullable_object(params)}}
+
+
+def _nullable_object(obj: dict) -> dict:
+    required = set(obj.get("required") or [])
+    props = {}
+    for name, prop in (obj.get("properties") or {}).items():
+        prop = dict(prop)
+        if prop.get("type") == "object" and prop.get("properties"):
+            prop = _nullable_object(prop)
+        if name not in required and "type" in prop:
+            t = prop["type"]
+            types = list(t) if isinstance(t, list) else [t]
+            if "null" not in types:
+                prop["type"] = types + ["null"]
+        props[name] = prop
+    return {**obj, "properties": props}
 
 
 def resolve(name: str, args: Optional[Dict[str, Any]]) -> Tuple[str, Dict[str, Any], str]:

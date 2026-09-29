@@ -507,8 +507,9 @@ TOOL_SCHEMAS = [
                 "it as days or hours — also with scope='all'. mode='forever' ONLY when "
                 "no duration is named at all. «отстань/не сейчас/занят» → hours=2; «не "
                 "пиши сегодня/стоп» → mode='today'; «мут на 7 дней, фул» → days=7 + "
-                "scope='all'; «пиши/можешь писать» → mode='off'. Tell the owner exactly "
-                "the end time from the tool result."
+                "scope='all'; «пиши/можешь писать» → mode='off'. An END DATE («до "
+                "первого числа», «до понедельника», «до 20:00») → until, never compute "
+                "hours yourself. Tell the owner exactly the end time from the tool result."
             ),
             "parameters": {
                 "type": "object",
@@ -519,6 +520,12 @@ TOOL_SCHEMAS = [
                     },
                     "days": {"type": "number", "description": "Days of silence, 1-30."},
                     "hours": {"type": "number", "description": "Hours of silence, 0.5-720."},
+                    "until": {
+                        "type": "string",
+                        "description": "When the silence ends, owner's local time: "
+                                       "'YYYY-MM-DD' (ends at the start of that day) or "
+                                       "'YYYY-MM-DDTHH:MM'. Use for any named end date or time.",
+                    },
                     "scope": {
                         "type": ["string", "null"],
                         "description": "'pings' (default: only ticker check-ins) or 'all' (total silence incl. digests).",
@@ -1049,6 +1056,17 @@ def _dispatch_tool(name: str, args: Dict[str, Any], rg=None) -> str:
             unmute()
             return "Тишина снята — проактивные сообщения снова включены."
         hours = float(args.get("hours") or 0) + 24.0 * float(args.get("days") or 0)
+        until = str(args.get("until") or "").strip()
+        if until and not hours:
+            # Дату окончания считает код, а не модель: «мут до первого числа»
+            # модель пересчитывала в часы сама и путалась (29.09.2026).
+            end = _parse_local_end(until)
+            if end is None:
+                return f"Не понял дату окончания тишины: «{until}». Нужна дата вида 2026-10-01."
+            from utils.time import now_local
+            hours = (end - now_local()).total_seconds() / 3600
+            if hours <= 0:
+                return f"Эта дата уже прошла ({until}) — уточни, до когда тишина."
         if hours:
             # Срок назван — он главнее режима. 14.09.2026 на «не разговаривай со
             # мной 7 дней, фул мут» модель поставила mode='forever', и тишина
@@ -2105,6 +2123,19 @@ def _filter_dossier(text: str, exclude_section_ids: Tuple[str, ...]) -> str:
 # ============================================================================
 # Profile update
 # ============================================================================
+
+def _parse_local_end(value: str) -> Optional[datetime]:
+    """'2026-10-01' → начало этого дня; '2026-10-01T16:45' → это время. Время
+    владельца (Europe/Berlin). None — не разобрать."""
+    from utils.time import OWNER_TZ
+    try:
+        end = datetime.fromisoformat(value.strip().replace(" ", "T"))
+    except ValueError:
+        return None
+    if end.tzinfo is None and OWNER_TZ is not None:
+        end = end.replace(tzinfo=OWNER_TZ)
+    return end
+
 
 def _tool_update_profile(args: Dict[str, Any], rg) -> str:
     """Обновляет config/owner_profile.json и in-memory копию в rg."""

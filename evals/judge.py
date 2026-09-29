@@ -25,7 +25,9 @@ logger = logging.getLogger("evals.judge")
 # Judges per provider of the answering agent: never the same provider.
 JUDGES_FOR = {
     "gemini": ["openai/gpt-oss-120b", "qwen/qwen3.8-27b"],
-    "groq": ["gemini-2.5-pro", "gemini-2.5-flash", "qwen/qwen3.8-27b"],
+    # gemini-2.5-pro is withdrawn (404, Sep 29, 2026); a Groq model as the last
+    # resort would compete with the agents for the same minute of tokens.
+    "groq": ["gemini-3.7-flash", "gemini-3.5-flash", "gemini-3.8-flash"],
 }
 JUDGE_MODELS: List[str] = JUDGES_FOR["gemini"]
 KEYS = ("relevance", "facts", "context", "tone")
