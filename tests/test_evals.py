@@ -261,3 +261,26 @@ def test_judge_falls_back_to_the_next_model():
 def test_judge_is_told_a_scheduled_prompt_is_not_the_owner():
     prompt = judge.build_prompt(_turn(kind="scheduled", text="(scheduled) обед"), _res(), [])
     assert "Vlad did not write this" in prompt
+
+
+def test_a_crashing_judge_does_not_end_the_run(runner, monkeypatch):
+    """Sep 29 smoke run: the judge crashed on its input and took the whole run,
+    report included, down with it."""
+    runner.use_judge = True
+
+    def broken(*a, **kw):
+        raise AttributeError("'list' object has no attribute 'strip'")
+
+    monkeypatch.setattr(judge, "grade", broken)
+    sc = _scenario(("owner", "как дела?", "2026-09-29T14:05:00"),
+                   ("owner", "а сейчас?", "2026-09-29T14:06:00"))
+    results = asyncio.run(runner.run([sc]))
+    assert len(results) == 2
+    assert all(r.judge["verdict"] == "unjudged" for r in results)
+
+
+def test_owner_facts_reach_the_judge_as_text(runner, monkeypatch):
+    runner.start(_scenario(("owner", "x", "2026-09-29T14:05:00")))
+    rg = runner.dispatcher.response_generator
+    monkeypatch.setattr(rg, "_compact_owner_facts", lambda: ["учёба: WI", "английский: B1–B2"])
+    assert runner.known_facts() == "учёба: WI\nанглийский: B1–B2"

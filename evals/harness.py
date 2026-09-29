@@ -340,6 +340,7 @@ class Runner:
         self.chat_id, self.user_id = owner_ids()
         self.calls: List[Tuple[str, Dict[str, Any]]] = []
         self.cut: Dict[str, Dict[str, int]] = {}
+        self.results: List[TurnResult] = []
         self.dispatcher = None
         self._n = 1000
         self.tap = LogTap()
@@ -445,14 +446,16 @@ class Runner:
 
     def known_facts(self) -> str:
         rg = self.dispatcher.response_generator
-        with contextlib.suppress(Exception):
-            return rg._compact_owner_facts()
-        return ""
+        try:
+            facts = rg._compact_owner_facts()
+        except Exception:  # noqa: BLE001 — the judge can work without them
+            return ""
+        return "\n".join(map(str, facts)) if isinstance(facts, (list, tuple)) else str(facts or "")
 
     async def run(self, scenarios: List[Scenario]) -> List[TurnResult]:
         from evals import checks, judge
 
-        results: List[TurnResult] = []
+        results = self.results
         for sc in scenarios:
             self.start(sc)
             owner_said: List[str] = []
@@ -463,8 +466,12 @@ class Runner:
                 res = await self.run_turn(sc, i, turn)
                 res.violations = checks.check(turn, res, owner_said)
                 if self.use_judge and not res.skipped and (res.replies or turn.kind == "owner"):
-                    res.judge = await asyncio.to_thread(
-                        judge.grade, turn, res, transcript, self.known_facts(), sc.note)
+                    try:
+                        res.judge = await asyncio.to_thread(
+                            judge.grade, turn, res, transcript, self.known_facts(), sc.note)
+                    except Exception as e:  # noqa: BLE001 — a broken judge must not end the run
+                        logger.exception("judge crashed")
+                        res.judge = {"verdict": "unjudged", "error": f"{e.__class__.__name__}: {e}"}
                 transcript.append({"kind": turn.kind, "at": turn.at, "text": turn.text,
                                    "replies": " / ".join(res.replies)})
                 results.append(res)
@@ -559,24 +566,31 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     sandbox = Sandbox(hub)
     sandbox.enter()
+    crashed = ""
     try:
         runner = Runner(sandbox, pause=args.pause, use_judge=not args.no_judge)
         try:
-            results = asyncio.run(runner.run(scenarios))
+            asyncio.run(runner.run(scenarios))
+        except BaseException as e:  # noqa: BLE001 — keep what was measured, then report
+            logger.exception("run stopped")
+            crashed = f"{e.__class__.__name__}: {e}"
         finally:
             runner.close()
     finally:
         sandbox.cleanup()
 
+    results = runner.results
     stamp = datetime.now().strftime("%Y%m%d-%H%M")
     summary = summarize(results)
+    if crashed:
+        summary["stopped"] = crashed
     (out_dir / f"run-{stamp}.json").write_text(json.dumps(
         {"summary": summary, "cut": runner.cut, "results": [asdict(r) for r in results]},
         ensure_ascii=False, indent=1), encoding="utf-8")
     (out_dir / f"run-{stamp}.md").write_text(render_markdown(results, summary), encoding="utf-8")
     print(json.dumps(summary, ensure_ascii=False))
     print(f"report: {out_dir / f'run-{stamp}.md'}")
-    return 0
+    return 1 if crashed else 0
 
 
 if __name__ == "__main__":
