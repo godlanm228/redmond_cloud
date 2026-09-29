@@ -351,9 +351,12 @@ async def _run_delegation(
             delegator.name, chat_id,
             f"Это к Айрис — @{iris.bot_username}.", delegator.emoji, "plain",
         )
+        # Сначала слова владельца, потом пометка: текст, начинающийся со скобки,
+        # код считает своим промптом (скедулер, фото) — и тогда проверка «по
+        # словам владельца» не видела у Iris ни одного его слова.
         envelope = (
-            f"(передано от {delegator.name} — это запрос владельца в твоей зоне, "
-            f"ответь ему сама)\n{task}"
+            f"{task}\n\n(передано от {delegator.name} — это сообщение владельца в "
+            f"твоей зоне, ответь ему сама)"
         )
         async with coordinator.typing(iris.name, chat_id):
             response = await _generate_with_status(iris, envelope, context, chat_id)

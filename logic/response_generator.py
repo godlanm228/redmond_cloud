@@ -1,3 +1,4 @@
+import json
 import logging
 import os
 import math
@@ -377,20 +378,48 @@ def _ground_tokens(text: str) -> set:
     return out
 
 
+# Инструменты, которые записывают факты о владельце, и поле с самим фактом.
+# 29.09.2026 прогон показал обход: проверка стояла только на add_diary_entry, а
+# handoff_to_iris кладёт «наблюдение» Redmond'а в тот же дневник без неё.
+_OWNER_FACT_FIELDS = {"add_diary_entry": "text", "handoff_to_iris": "observation"}
+
+
 def _ungrounded_write(fn_name: str, fn_args: Dict[str, Any], ctx: "GenerationContext") -> str:
     """Отказ, если запись в дневник не опирается на слова владельца. '' — можно."""
-    if fn_name != "add_diary_entry":
+    field_name = _OWNER_FACT_FIELDS.get(fn_name)
+    if not field_name:
         return ""
     owner_said = [] if _is_system_prompt(ctx.user_text) else [ctx.user_text]
     owner_said += [h.get("user", "") for h in (ctx.history or [])[-2:]
                    if not _is_system_prompt(h.get("user", ""))]
-    entry = _ground_tokens(str(fn_args.get("text", "")))
+    entry = _ground_tokens(str(fn_args.get(field_name, "")))
     if entry and entry & set().union(*map(_ground_tokens, owner_said or [""])):
         return ""
     logger.warning("Запись в дневник отклонена: не опирается на слова владельца (%r)",
-                   str(fn_args.get("text", ""))[:80])
+                   str(fn_args.get(field_name, ""))[:80])
     return ("Не записано: в дневник идёт только то, что владелец сам сказал в этом "
             "разговоре. Если он это говорил — запиши его же словами; если нет — не пиши.")
+
+
+def _owner_words_to_iris(result: str, ctx: "GenerationContext") -> str:
+    """Передача Iris несёт слова владельца дословно, а не пересказ модели.
+
+    29.09.2026 (прогон, 26.08 «курю кальян с Настей, чилю…»): Redmond передал
+    Iris «сегодня я потратил 3 часа на разработку Redmond Hub, сейчас еду домой…
+    Billiard Club» — пересказ, в котором половину модель выдумала. Iris должна
+    видеть то, что владелец написал."""
+    from logic.tools import DELEGATION_MARKER
+    try:
+        payload = json.loads(result[len(DELEGATION_MARKER):] or "{}")
+    except ValueError:
+        return result
+    if str(payload.get("target") or "") != "Iris" or _is_system_prompt(ctx.user_text):
+        return result
+    if payload.get("task") != ctx.user_text:
+        logger.info("Передача Iris: пересказ модели заменён словами владельца (%r)",
+                    str(payload.get("task", ""))[:80])
+    payload["task"] = ctx.user_text
+    return DELEGATION_MARKER + json.dumps(payload, ensure_ascii=False)
 
 
 def _is_system_prompt(text: str) -> bool:
@@ -1023,7 +1052,7 @@ class ResponseGenerator:
                 # окончен. Маркер уходит наверх до handler'а (handoff-модель).
                 from logic.tools import DELEGATION_MARKER
                 if isinstance(result, str) and result.startswith(DELEGATION_MARKER):
-                    return result
+                    return _owner_words_to_iris(result, ctx)
 
                 messages.append({
                     "role": "tool",
@@ -1291,7 +1320,7 @@ class ResponseGenerator:
 
                 # Делегирование: ход агента окончен, маркер наверх до handler'а.
                 if isinstance(result, str) and result.startswith(DELEGATION_MARKER):
-                    return result
+                    return _owner_words_to_iris(result, ctx)
 
                 # Имя в ответе обязано совпадать с именем вызова (групповым).
                 part = {"functionResponse": dict(
