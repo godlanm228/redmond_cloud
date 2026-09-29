@@ -21,7 +21,7 @@ import asyncio
 import json
 import logging
 import os
-from typing import Optional, Set
+from typing import Any, Optional, Set
 
 from telegram import Update
 from telegram.ext import ContextTypes
@@ -235,6 +235,7 @@ async def _generate(
                 chat_id,
                 status_cb=status_cb,
                 force_tool=force_tool,
+                understanding=(meta or {}).get("understanding"),
             ),
             timeout=GENERATION_TIMEOUT_SEC,
         )
@@ -248,6 +249,37 @@ async def _generate(
         return "⚠ Внутренняя ошибка генерации."
 
     return response or "Не знаю, что ответить."
+
+
+async def _understand(text: str, context: ContextTypes.DEFAULT_TYPE, chat_id: int,
+                      reply_to_agent: str = "") -> Any:
+    """Прочитать сообщение владельца один раз (logic/understanding). None — шаг
+    недоступен или это не его слова; дальше работает прежний путь (роутер,
+    детектор острой ситуации), ответ от этого шага не зависит."""
+    if not text or text.lstrip().startswith("("):
+        return None
+    from logic import understanding
+    state = get_state(context.application.bot_data["router_states"], chat_id)
+    history = [{"who": "Влад" if m.get("role") == "user" else (m.get("agent") or "бот"),
+                "text": m.get("text", "")} for m in state.recent_messages]
+    notes = []
+    try:
+        from logic import system_facts
+        notes.append(system_facts._mute_line())
+    except Exception:  # noqa: BLE001
+        pass
+    if reply_to_agent:
+        notes.append(f"сообщение — реплай на реплику агента {reply_to_agent}")
+    try:
+        u = await asyncio.to_thread(understanding.understand, text, history, "", "; ".join(notes))
+    except Exception:  # noqa: BLE001
+        logger.warning("Понимание упало — дальше прежним путём", exc_info=True)
+        return None
+    if u is not None:
+        logger.info("Понимание [%s]: → %s, срочность %s, фактов %d, команд %d%s",
+                    u.model, u.addressee, u.urgency, len(u.facts), len(u.commands),
+                    f", отброшено {len(u.dropped)}" if u.dropped else "")
+    return u
 
 
 async def _generate_with_status(
@@ -315,6 +347,7 @@ async def _run_delegation(
     raw_payload: str,
     context: ContextTypes.DEFAULT_TYPE,
     chat_id: int,
+    understood: Any = None,
 ) -> None:
     """
     Handoff-делегирование Ньюсеру. In-process: Telegram НЕ доставляет ботам
@@ -359,10 +392,12 @@ async def _run_delegation(
             f"твоей зоне, ответь ему сама)"
         )
         async with coordinator.typing(iris.name, chat_id):
-            response = await _generate_with_status(iris, envelope, context, chat_id)
+            response = await _generate_with_status(iris, envelope, context, chat_id,
+                                                   meta={"understanding": understood})
         if response.startswith(DELEGATION_MARKER):
             # Iris делегировала дальше (напр. факт у Newser) — один уровень вглубь.
-            await _run_delegation(iris, response[len(DELEGATION_MARKER):], context, chat_id)
+            await _run_delegation(iris, response[len(DELEGATION_MARKER):], context, chat_id,
+                                  understood=understood)
             return
         state: RouterState = get_state(router_states, chat_id)
         state.add("assistant", response, iris.name)
@@ -623,12 +658,16 @@ async def _route_and_respond(
             return  # текстовый апдейт — ответит Application того агента
         agent = explicit
         clean_text = explicit.strip_trigger(text) or "(привет)"
+        understood = await _understand(clean_text, context, chat_id, reply_to_agent)
         if agent.name == "Redmond":
-            needs_research = llm_research_flag(clean_text, state, groq_key)
+            needs_research = (understood.research if understood is not None
+                              else llm_research_flag(clean_text, state, groq_key))
     else:
         clean_text = text
+        understood = await _understand(text, context, chat_id, reply_to_agent)
         agent, needs_research = route(
             text, state, groq_api_key=groq_key, reply_to_agent=reply_to_agent,
+            understood=understood,
         )
         # Роутер решил, что сообщение не к агентам (владелец думает вслух).
         # Молчим — но сообщение всё равно кладём в историю, чтобы следующая
@@ -657,11 +696,14 @@ async def _route_and_respond(
     # формулирует таск с контекстом, решение уже принято).
     force_tool = "delegate_research" if (agent.name == "Redmond" and needs_research) else None
     async with coordinator.typing(agent.name, chat_id):
-        response = await _generate_with_status(agent, clean_text, context, chat_id, force_tool=force_tool)
+        response = await _generate_with_status(agent, clean_text, context, chat_id,
+                                               force_tool=force_tool,
+                                               meta={"understanding": understood})
 
     # Агент делегировал → его ход окончен, оркеструем handoff (ответит Newser)
     if response.startswith(DELEGATION_MARKER):
-        await _run_delegation(agent, response[len(DELEGATION_MARKER):], context, chat_id)
+        await _run_delegation(agent, response[len(DELEGATION_MARKER):], context, chat_id,
+                              understood=understood)
         return
 
     if force_tool:
@@ -671,7 +713,7 @@ async def _route_and_respond(
         logger.warning("Forced delegation bypassed (%s) — hard fallback", agent.name)
         await _run_delegation(
             agent, json.dumps({"task": clean_text, "region": ""}, ensure_ascii=False),
-            context, chat_id,
+            context, chat_id, understood=understood,
         )
         return
 
@@ -818,6 +860,9 @@ async def slim_agent_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
     # Cipher: реплай на его сообщение — сигнал «продолжаем ЭТОТ разговор».
     meta: dict = {"reply_to_message_id": getattr(
         getattr(update.message, "reply_to_message", None), "message_id", None)}
+    if agent.executor != "cipher_subprocess":
+        meta["understanding"] = await _understand(clean_text, context, chat_id,
+                                                  reply_target_agent(update))
 
     async with coordinator.typing(agent.name, chat_id):
         response = await _generate_with_status(agent, clean_text, context, chat_id,
@@ -828,7 +873,8 @@ async def slim_agent_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     # Агент делегировал (например Iris → Newser за внешним фактом)
     if response.startswith(DELEGATION_MARKER):
-        await _run_delegation(agent, response[len(DELEGATION_MARKER):], context, chat_id)
+        await _run_delegation(agent, response[len(DELEGATION_MARKER):], context, chat_id,
+                              understood=meta.get("understanding"))
         return
 
     # Обновляем router_states — это критично для sticky.

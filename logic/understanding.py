@@ -100,6 +100,10 @@ class Understanding:
     urgency_quote: str = ""
     model: str = ""
     dropped: List[str] = field(default_factory=list)  # what code refused: unquoted claims
+    # Set once code has acted on it (facts recorded, commands executed): a
+    # handoff to Iris carries the same Understanding and must not act twice.
+    applied: bool = False
+    done: List[tuple] = field(default_factory=list)
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -238,3 +242,80 @@ def understand(message: str, history: Sequence[Dict[str, str]] = (), now: str = 
                 logger.warning("Понимание: отброшено без цитаты — %s", "; ".join(u.dropped))
             return u
         logger.warning("Понимание: %s дала непригодный ответ %r", model, (raw or "")[:120])
+
+
+# ---------------------------------------------------------------------------
+# Acting on it (code, not the answering model)
+# ---------------------------------------------------------------------------
+
+WHEN_TAG = {"done": "сделано", "now": "сейчас", "plan": "план", "habit": "привычка"}
+
+
+def _diary_text(quote: str) -> str:
+    text = " ".join((quote or "").split()).strip(" ,.;")
+    return text[:1].upper() + text[1:] if text else ""
+
+
+def apply(u: "Understanding", execute=None) -> List[tuple]:
+    """Carry out what the message says: its commands, and its facts into the
+    diary in the owner's own words (the quote), tagged plan / done / now.
+
+    The diary gets his words, not a retelling: 29.09.2026 his plan «довести до
+    ума…» was written by the model as «Довёл UI до презентабельного вида».
+    Returns (tool, args, result) for the receipt under the answer."""
+    from logic.tools import execute_tool
+    run = execute or execute_tool
+    done: List[tuple] = []
+
+    for c in u.commands:
+        if c.type == "unmute":
+            args = {"mode": "off"}
+        else:
+            args = {"scope": c.scope}
+            if c.until:
+                args["until"] = c.until
+            elif c.hours:
+                args["hours"] = c.hours
+        done.append(("mute_notifications", args, run("mute_notifications", args)))
+
+    recent = set()
+    try:
+        from logic import coach_storage
+        recent = {normalize(e.get("text", "")) for e in coach_storage.read_diary(last_n=15)}
+    except Exception:  # noqa: BLE001 — without the check a repeat is written twice, not lost
+        logger.debug("diary read for repeats failed", exc_info=True)
+    for f in u.facts:
+        text = _diary_text(f.quote)
+        if not text or normalize(text) in recent:
+            continue
+        tags = [t for t in (WHEN_TAG.get(f.when, ""), f.topic.strip().lower()) if t]
+        args = {"text": text, "tags": tags}
+        done.append(("add_diary_entry", args, run("add_diary_entry", args)))
+        recent.add(normalize(text))
+    return done
+
+
+ATTENTION = (
+    "SERIOUS BUT NOT ACUTE. The owner mentioned something serious about himself "
+    "(hospital, illness, an examination, bad news). Take it as a fact, not an alarm: "
+    "acknowledge it plainly and, if it fits, ask politely what happened or how he is. "
+    "No drama, no advice lists, no hotlines, no guessing the cause. Anything else he "
+    "asked for in the same message - do it."
+)
+
+
+def prompt_block(u: "Understanding", done: Sequence[tuple] = ()) -> str:
+    """What the answering agent is told about the message: what code read and did."""
+    lines = ["[Как код понял сообщение владельца]"]
+    if u.about:
+        lines.append(f"  о чём: {u.about}")
+    if u.refers_to:
+        lines.append(f"  относится к: {u.refers_to}")
+    for f in u.facts:
+        lines.append(f"  факт ({WHEN_TAG.get(f.when, f.when)}): {f.fact}")
+    for name, _args, result in done:
+        lines.append(f"  сделано кодом ({name}): {' '.join(str(result).split())[:200]}")
+    lines.append("  Правила: факты из этого сообщения код уже записал в дневник — сам их не "
+                 "пиши. Сроки, даты и номера записей бери только из строк «сделано кодом», "
+                 "своими словами не пересказывай. План — это план, а не сделанное.")
+    return "\n".join(lines)

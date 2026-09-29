@@ -559,6 +559,12 @@ class GenerationContext:
     # Чей это запрос для лимитов моделей: ответ владельцу или плановая задача,
     # которой нельзя тратить резерв дневных квот (utils/llm_gate).
     priority: str = llm_gate.OWNER
+    # Как код прочитал сообщение (logic/understanding) и что по нему сделал сам:
+    # записал факты, выполнил команды. None — шаг понимания был недоступен.
+    understanding: Any = None
+    code_actions: List[Tuple[str, Dict[str, Any], str]] = field(default_factory=list)
+    # Серьёзное, но не острое (больница, обследование): сказать по-человечески.
+    attention: bool = False
 
 
 class ResponseGenerator:
@@ -641,6 +647,7 @@ class ResponseGenerator:
         status_cb=None,
         force_tool: Optional[str] = None,
         include_history: bool = True,
+        understanding: Any = None,
     ) -> str:
         """
         Stateless по entry-point — все per-chat данные ходят через chat_id.
@@ -673,6 +680,24 @@ class ResponseGenerator:
             # Без истории зовут только плановые задачи (скедулер).
             priority=llm_gate.OWNER if include_history else llm_gate.BACKGROUND,
         )
+        if understanding is not None and include_history:
+            # Срочность — из прочтения с цитатой, а не из списка слов: «в больнице
+            # лежу» — факт о том, где он, а не острая ситуация (владелец, 29.09).
+            from logic import understanding as understanding_mod
+            ctx.understanding = understanding
+            ctx.distress = understanding.urgency == "crisis"
+            ctx.attention = understanding.urgency == "attention"
+            if not understanding.applied:
+                try:
+                    understanding.done = understanding_mod.apply(understanding)
+                    understanding.applied = True
+                except Exception:  # noqa: BLE001 — ответ важнее записи; модель сделает по-старому
+                    logger.exception("Понимание: действия по сообщению не выполнены")
+                    ctx.understanding = None
+            # Передача Iris несёт то же понимание: второй раз не выполняем, но
+            # квитанцию показывает тот, кто отвечает владельцу.
+            ctx.code_actions = list(understanding.done) if ctx.understanding else []
+            ctx.actions.extend(ctx.code_actions)
         if ctx.distress:
             logger.warning("Сигнал острой ситуации в сообщении владельца — "
                            "ответ: сначала спросить, что случилось")
@@ -697,7 +722,9 @@ class ResponseGenerator:
             if ctx.failed and ctx.distress:
                 # Вопрос «что случилось» не зависит от лимитов провайдера.
                 response = distress.FALLBACK_REPLY
-            elif not ctx.failed and ctx.actions and not ctx.distress:
+                if ctx.code_actions:
+                    response = f"{response}\n\n{_receipt(ctx.code_actions)}"
+            elif not ctx.failed and ctx.actions and (not ctx.distress or ctx.code_actions):
                 receipt = _receipt(ctx.actions)
                 if receipt:
                     response = f"{response.rstrip()}\n\n{receipt}"
@@ -810,7 +837,7 @@ class ResponseGenerator:
         # Инструменты агента в том виде, в каком их видит модель (logic/toolbox:
         # сгруппированные с action; allowed_tools — по исходным именам).
         allowed = getattr(ctx.agent, "allowed_tools", None) if ctx.agent else None
-        tools_for_agent = toolbox.model_tools(allowed or None)
+        tools_for_agent = toolbox.model_tools(allowed or None, exclude=self._excluded_tools(ctx))
 
         # Принудительный tool (классификатор решил «research» → делегирование
         # гарантируется кодом): оставляем только его + tool_choice forced на хопе 0.
@@ -1116,6 +1143,19 @@ class ResponseGenerator:
             return None, "garbled: tool call written as text"
         return completion, err
 
+    @staticmethod
+    def _excluded_tools(ctx: "GenerationContext") -> set:
+        """Инструменты, чью работу по этому сообщению уже сделал код: факты
+        записаны (logic/understanding), команда тишины выполнена. Модель, у
+        которой они остались, записала бы своё толкование поверх («Позавтракал»
+        на просьбу о муте, 14.09.2026) или поставила бы мут второй раз."""
+        if ctx.understanding is None:
+            return set()
+        out = {"add_diary_entry"}
+        if any(name == "mute_notifications" for name, _a, _r in ctx.code_actions):
+            out.add("mute_notifications")
+        return out
+
     def _acquire_model(self, chain: List[str], tried: List[str], tokens: int,
                        ctx: "GenerationContext", errors: List[str]) -> Optional[str]:
         """Модель для шага из `chain` (кроме уже испробованных) по лимитам шлюза.
@@ -1181,7 +1221,7 @@ class ResponseGenerator:
 
         # Инструменты агента в том виде, в каком их видит модель (как в Groq-пути).
         allowed = getattr(ctx.agent, "allowed_tools", None) if ctx.agent else None
-        tools_for_agent = toolbox.model_tools(allowed or None)
+        tools_for_agent = toolbox.model_tools(allowed or None, exclude=self._excluded_tools(ctx))
         # Исходный инструмент за каждым functionResponse — для сжатия.
         legacy_by_part: Dict[int, str] = {}
         if ctx.force_tool:
@@ -1501,6 +1541,9 @@ class ResponseGenerator:
         if ctx.distress:
             from logic import distress
             prompt = f"{prompt}\n\n{distress.DIRECTIVE}"
+        elif ctx.attention:
+            from logic import understanding as understanding_mod
+            prompt = f"{prompt}\n\n{understanding_mod.ATTENTION}"
         return prompt
 
     def _compact_owner_facts(self) -> List[str]:
@@ -1966,6 +2009,11 @@ class ResponseGenerator:
                     continue
                 parts.append(f"  Я: {_clip(turn['user'])}")
                 parts.append(f"  Ты: {_clip(turn['bot'])}")
+            parts.append("")
+
+        if ctx.understanding is not None:
+            from logic import understanding as understanding_mod
+            parts.append(understanding_mod.prompt_block(ctx.understanding, ctx.code_actions))
             parts.append("")
 
         parts.append(ctx.user_text)

@@ -386,6 +386,7 @@ def route(
     state: RouterState,
     groq_api_key: str = "",
     reply_to_agent: str = "",
+    understood: Any = None,
 ) -> tuple:
     """
     Главный роутер. Возвращает (AgentConfig | None, research: bool) + обновляет state.
@@ -436,11 +437,15 @@ def route(
                         text[:40], agent.name, agent.name)
             return agent, False
 
-    # 4. LLM-классификация (агент + research-флаг одним вызовом)
-    chosen_name, research = _llm_route(
-        text, state.recent_messages, groq_api_key,
-        reply_to_agent=reply_to_agent, last_agent=state.last_agent_name,
-    )
+    # 4. Кому — по прочтению сообщения (logic/understanding); если его нет —
+    # прежний LLM-классификатор.
+    if understood is not None and getattr(understood, "addressee", ""):
+        chosen_name, research = understood.addressee, bool(understood.research)
+    else:
+        chosen_name, research = _llm_route(
+            text, state.recent_messages, groq_api_key,
+            reply_to_agent=reply_to_agent, last_agent=state.last_agent_name,
+        )
 
     # 4a. Роутер решил, что сообщение вообще не к агентам — молчим. Кроме
     # сигнала острой ситуации: 29.09.2026 сценарный прогон дал роутеру (новая
@@ -450,7 +455,11 @@ def route(
     # это решает код, не классификатор.
     if chosen_name == NOBODY:
         from logic import distress
-        if distress.detect(text):
+        # Молчать нельзя и тогда, когда в сообщении есть что сделать: факт для
+        # дневника, команда, серьёзное о себе.
+        acts = understood is not None and (understood.facts or understood.commands
+                                           or understood.urgency != "none")
+        if distress.detect(text) or acts:
             logger.warning("Router: %r → «никто», но это сигнал острой ситуации — Iris",
                            text[:60])
             chosen_name = "Iris"

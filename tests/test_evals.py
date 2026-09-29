@@ -132,6 +132,8 @@ def runner(tmp_path, monkeypatch):
     monkeypatch.setenv("ALLOWED_USER_IDS", "7")
     monkeypatch.setattr(multi_bot, "_generate_cipher", multi_bot._generate_cipher)
     monkeypatch.setattr(tools, "execute_tool", tools.execute_tool)
+    from logic import understanding
+    monkeypatch.setattr(understanding, "understand", understanding.understand)
     seen = []
     real_generate = multi_bot._generate
 

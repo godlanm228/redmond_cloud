@@ -83,6 +83,7 @@ class TurnResult:
     provider: List[str] = field(default_factory=list)    # failed model calls (429, 503, …)
     log: List[str] = field(default_factory=list)
     skipped: str = ""
+    understanding: Optional[Dict[str, Any]] = None   # how the bot read the message
     seconds: float = 0.0
     violations: List[str] = field(default_factory=list)
     judge: Optional[Dict[str, Any]] = None
@@ -340,6 +341,7 @@ class Runner:
         self.use_judge = use_judge
         self.chat_id, self.user_id = owner_ids()
         self.calls: List[Tuple[str, Dict[str, Any]]] = []
+        self.readings: List[Optional[Dict[str, Any]]] = []
         self.cut: Dict[str, Dict[str, int]] = {}
         self.results: List[TurnResult] = []
         self.dispatcher = None
@@ -365,6 +367,17 @@ class Runner:
             return "(Cipher в прогоне не вызывается)"
 
         multi_bot._generate_cipher = no_cipher
+
+        from logic import understanding
+        original_understand = understanding.understand
+        readings = self.readings
+
+        def recording_understand(*a, **kw):
+            u = original_understand(*a, **kw)
+            readings.append(u.to_dict() if u else None)
+            return u
+
+        understanding.understand = recording_understand
 
     def start(self, sc: Scenario) -> None:
         """Fresh data and a fresh bot for a scenario (history, sticky, caches)."""
@@ -398,6 +411,7 @@ class Runner:
         sent_before = len(self.coordinator.sent)
         log_before = len(self.tap.lines)
         self.calls.clear()
+        self.readings.clear()
         try:
             if turn.kind == "scheduled":
                 if coach_storage.muted_now():
@@ -428,6 +442,7 @@ class Runner:
         res.provider = [f"{w}: {t}" for ts, w, t in failures.recent(hours=1, limit=20)
                         if ts >= started]
         res.log = self.tap.lines[log_before:]
+        res.understanding = self.readings[-1] if self.readings else None
         return res
 
     async def _owner_message(self, text: str) -> None:
@@ -528,6 +543,15 @@ def render_markdown(results: List[TurnResult], summary: Dict[str, Any]) -> str:
             lines.append(f"- пропущено: {r.skipped}")
         for reply in r.replies:
             lines.append(f"- **{r.agent}:** {reply[:1200]}")
+        u = r.understanding
+        if u:
+            facts = "; ".join(f"{f['when']}: «{f['quote']}»" for f in u.get("facts", []))
+            cmds = "; ".join(f"{c['type']} {c.get('until') or c.get('hours') or ''}".strip()
+                             for c in u.get("commands", []))
+            lines.append(f"- понял: → {u.get('addressee')}, {u.get('urgency')}"
+                         + (f" | факты: {facts}" if facts else "")
+                         + (f" | команды: {cmds}" if cmds else "")
+                         + (f" | отброшено: {len(u['dropped'])}" if u.get("dropped") else ""))
         if r.tool_calls:
             lines.append("- tools: " + ", ".join(n for n, _a in r.tool_calls))
         if r.violations:

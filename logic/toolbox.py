@@ -153,22 +153,25 @@ def _group_schema(group: str, actions: List[str]) -> dict:
     }}
 
 
-def model_tools(allowed: Optional[Iterable[str]] = None) -> List[dict]:
+def model_tools(allowed: Optional[Iterable[str]] = None,
+                exclude: Iterable[str] = ()) -> List[dict]:
     """Schemas to offer the model. `allowed` lists ORIGINAL tool names (as in
-    AgentConfig.allowed_tools); None means everything. A group is offered with
-    only the actions whose original tools are allowed."""
+    AgentConfig.allowed_tools); None means everything. `exclude` removes original
+    tools (code already did that job, e.g. recorded the message's facts). A
+    group is offered with only the actions whose original tools remain."""
     allowed_set = None if allowed is None else set(allowed)
+    excluded = set(exclude or ())
     out: List[dict] = []
     for group, (_, mapping) in GROUPS.items():
         actions = [a for a, legacy in mapping.items()
-                   if allowed_set is None or legacy in allowed_set]
+                   if (allowed_set is None or legacy in allowed_set) and legacy not in excluded]
         if actions:
             out.append(_group_schema(group, actions))
     for schema in TOOL_SCHEMAS:
         name = schema["function"]["name"]
         if name in GROUPED:
             continue
-        if allowed_set is None or name in allowed_set:
+        if (allowed_set is None or name in allowed_set) and name not in excluded:
             f = schema["function"]
             desc = rename_refs(f.get("description", ""))
             out.append(schema if desc == f.get("description", "") else
