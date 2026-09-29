@@ -284,3 +284,31 @@ def test_owner_facts_reach_the_judge_as_text(runner, monkeypatch):
     rg = runner.dispatcher.response_generator
     monkeypatch.setattr(rg, "_compact_owner_facts", lambda: ["учёба: WI", "английский: B1–B2"])
     assert runner.known_facts() == "учёба: WI\nанглийский: B1–B2"
+
+
+def test_state_is_read_in_the_replayed_time(runner, monkeypatch):
+    """Smoke run, Sep 29: a mute set on Sep 14 until Sep 21 was reported as
+    missing, because it was read after the real clock was back."""
+    from handlers import multi_bot
+    from logic import coach_storage
+
+    async def mute_week(agent, user_text, context, chat_id=0, **kw):
+        coach_storage.set_mute("hours", hours=168, scope="all")
+        return "Тишина на неделю."
+
+    monkeypatch.setattr(multi_bot, "_generate", mute_week)
+    sc = _scenario(("owner", "Мут на 7 дней", "2026-09-14T12:01:00"))
+    r = asyncio.run(runner.run([sc]))[0]
+    assert r.mute_after, "an active mute read with the wrong clock"
+
+
+def test_provider_failures_are_counted_apart_from_replies():
+    res = _res(provider=['Gemini generateContent: HTTP 429: {"error": 1} [model=gemini-3.6-flash]'])
+    v = checks.check(_turn(), res, ["x"])
+    assert "provider: Gemini 429 gemini-3.6-flash" in v
+
+
+def test_the_judge_comes_from_the_other_provider():
+    assert not judge.models_for("Iris")[0].startswith("gemini")
+    assert judge.models_for("Redmond")[0].startswith("gemini")
+    assert not judge.models_for("Iris, Newser")[0].startswith("gemini")

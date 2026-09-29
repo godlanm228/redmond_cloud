@@ -79,7 +79,8 @@ class TurnResult:
     tool_calls: List[Tuple[str, Dict[str, Any]]] = field(default_factory=list)
     diary_added: List[str] = field(default_factory=list)
     mute_after: Optional[Dict[str, Any]] = None
-    errors: List[str] = field(default_factory=list)
+    errors: List[str] = field(default_factory=list)      # crashes of the turn itself
+    provider: List[str] = field(default_factory=list)    # failed model calls (429, 503, …)
     log: List[str] = field(default_factory=list)
     skipped: str = ""
     seconds: float = 0.0
@@ -409,7 +410,11 @@ class Runner:
                 await self._owner_message(turn.text)
         except Exception as e:  # noqa: BLE001 — a crash is a finding, not the end of the run
             logger.exception("turn crashed")
-            res.errors.append(f"crash: {e.__class__.__name__}: {e}")
+            res.errors.append(f"{e.__class__.__name__}: {e}")
+        try:
+            # Still in the replayed time: a mute set on Sep 14 until Sep 21 is
+            # active on Sep 14 and long expired by the real clock.
+            res.mute_after = coach_storage.mute_info()
         finally:
             set_clock(None)
 
@@ -420,9 +425,8 @@ class Runner:
         res.tool_calls = list(self.calls)
         res.diary_added = [r["text"] for r in db.query("SELECT id, text FROM diary ORDER BY id")
                            if r["id"] not in diary_before]
-        res.mute_after = coach_storage.mute_info()
-        res.errors += [f"{w}: {t}" for ts, w, t in failures.recent(hours=1, limit=20)
-                       if ts >= started]
+        res.provider = [f"{w}: {t}" for ts, w, t in failures.recent(hours=1, limit=20)
+                        if ts >= started]
         res.log = self.tap.lines[log_before:]
         return res
 

@@ -6,21 +6,30 @@ written by code for his words, a fact about his whereabouts (hospital) is a
 fact and not an emergency, ask when the situation is unclear instead of
 assuming, no pep talk, no stubs.
 
-The judge is a different model from the ones that answer (Iris runs on
-gemini-3.6-flash, Redmond on Groq): grading your own replies flatters them,
-and it would also spend the answering model's rate limit.
+The judge comes from the other provider than the agent that answered (Iris
+answers on Gemini, the others on Groq): a model grading its own replies
+flatters them, and would also spend the answering model's rate limit. The
+first smoke run on Sep 29 graded Iris's gemini-2.5-flash fallback with
+gemini-2.5-flash.
 """
 
 from __future__ import annotations
 
 import json
 import logging
+import os
 import re
+import time
 from typing import Any, Dict, List, Optional, Sequence
 
 logger = logging.getLogger("evals.judge")
 
-JUDGE_MODELS: List[str] = ["gemini-3.8-flash", "gemini-2.5-flash"]
+# Judges per provider of the answering agent: never the same provider.
+JUDGES_FOR = {
+    "gemini": ["openai/gpt-oss-120b", "qwen/qwen3.8-27b"],
+    "groq": ["gemini-2.5-pro", "gemini-2.5-flash", "qwen/qwen3.8-27b"],
+}
+JUDGE_MODELS: List[str] = JUDGES_FOR["gemini"]
 KEYS = ("relevance", "facts", "context", "tone")
 
 RUBRIC = """\
@@ -57,7 +66,10 @@ def build_prompt(turn: Any, res: Any, transcript: Sequence[Dict[str, str]],
                  known_facts: str = "", note: str = "") -> str:
     lines: List[str] = []
     if note:
-        lines += ["SCENARIO NOTE (from the owner's review):", note, ""]
+        lines += ["WHAT WENT WRONG WHEN THIS CONVERSATION REALLY HAPPENED (owner's review).",
+                  "The reply you grade comes from a newer version of the bot: check that it",
+                  "does not repeat these mistakes. Do not expect it to mention or apologise",
+                  "for them - it never made them.", note, ""]
     if known_facts:
         lines += ["KNOWN FACTS ABOUT VLAD:", known_facts.strip()[:3000], ""]
     if transcript:
@@ -111,7 +123,53 @@ def verdict(scores: Dict[str, int]) -> str:
     return "pass" if all(v == 2 for v in scores.values()) else "weak"
 
 
+def models_for(agents: str) -> List[str]:
+    """Judges for a reply by these agents ('Iris' or 'Iris, Newser')."""
+    from logic.agents import agent_by_name
+    providers = set()
+    for name in [a.strip() for a in (agents or "").split(",") if a.strip()]:
+        agent = agent_by_name(name)
+        order = (agent.provider_order if agent and agent.provider_order else ["groq"])
+        providers.add(order[0])
+    if providers == {"groq"}:
+        return JUDGES_FOR["groq"]
+    return JUDGES_FOR["gemini"]
+
+
 def _call(model: str, prompt: str) -> str:
+    return (_call_gemini if model.startswith("gemini") else _call_groq)(model, prompt)
+
+
+def _call_groq(model: str, prompt: str) -> str:
+    import requests
+    key = os.getenv("REDMOND_GROQ_API_KEY", "")
+    if not key:
+        return ""
+    body = {"model": model, "temperature": 0, "max_completion_tokens": 3000,
+            "messages": [{"role": "system", "content": RUBRIC},
+                         {"role": "user", "content": prompt}]}
+    if model.startswith("openai/gpt-oss"):
+        body["reasoning_effort"] = "medium"
+    headers = {"Authorization": f"Bearer {key}", "User-Agent": "redmond-hub/evals"}
+    for attempt in range(2):
+        try:
+            r = requests.post("https://api.groq.com/openai/v1/chat/completions",
+                              headers=headers, json=body, timeout=90)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("judge %s: %s", model, e)
+            return ""
+        if r.status_code == 429 and attempt == 0:
+            # Groq says how long to wait; the answering agents share this limit.
+            time.sleep(min(float(r.headers.get("retry-after") or 20), 60))
+            continue
+        if r.status_code != 200:
+            logger.warning("judge %s: HTTP %s %s", model, r.status_code, r.text[:200])
+            return ""
+        return (r.json()["choices"][0]["message"].get("content") or "")
+    return ""
+
+
+def _call_gemini(model: str, prompt: str) -> str:
     from utils import gemini
     thinking = ({"thinkingLevel": "medium"} if model.startswith("gemini-3")
                 else {"thinkingBudget": 1024})
@@ -130,8 +188,10 @@ def _call(model: str, prompt: str) -> str:
 
 def grade(turn: Any, res: Any, transcript: Sequence[Dict[str, str]],
           known_facts: str = "", note: str = "",
-          models: Sequence[str] = JUDGE_MODELS, call=_call) -> Dict[str, Any]:
+          models: Optional[Sequence[str]] = None, call=_call) -> Dict[str, Any]:
     prompt = build_prompt(turn, res, transcript, known_facts, note)
+    if models is None:
+        models = models_for(getattr(res, "agent", ""))
     for model in models:
         parsed = parse(call(model, prompt))
         if parsed:

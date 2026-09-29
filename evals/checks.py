@@ -54,6 +54,15 @@ def grounded(entry: str, owner_said: Iterable[str]) -> bool:
     return bool(stems(entry) & said)
 
 
+def _provider_kind(line: str) -> str:
+    """'Gemini generateContent: HTTP 429: {…} [model=gemini-3.6-flash]' →
+    'Gemini 429 gemini-3.6-flash' — one short, countable label."""
+    status = re.search(r"HTTP (\d{3})", line)
+    model = re.search(r"model=([\w./-]+)", line)
+    head = line.split(":", 1)[0].split()[0] if line else "?"
+    return " ".join(x for x in (head, status and status.group(1), model and model.group(1)) if x)
+
+
 def check(turn: Any, res: Any, owner_said: Sequence[str]) -> List[str]:
     """Violations of one turn as 'rule: detail' strings (empty = clean)."""
     out: List[str] = []
@@ -62,7 +71,11 @@ def check(turn: Any, res: Any, owner_said: Sequence[str]) -> List[str]:
     text = "\n".join(replies)
 
     for e in res.errors:
-        out.append(f"error: {e[:160]}")
+        out.append(f"crash: {e[:160]}")
+    for p in getattr(res, "provider", []) or []:
+        # Not the reply's fault, still a failure the owner pays for (latency,
+        # a weaker fallback model, or no answer at all).
+        out.append(f"provider: {_provider_kind(p)}")
 
     silent_ok = expect.get("silent") is True
     if turn.kind == "owner" and not replies and not silent_ok and not expect.get("silent_ok"):
