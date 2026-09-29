@@ -220,3 +220,34 @@ def test_gpt_oss_gets_room_to_reason(monkeypatch):
                                                             ({"choices": [{"message": {"content": "Iris"}}]}, "")))
     assert llm.complete("openai/gpt-oss-20b", "кому?", max_tokens=20) == "Iris"
     assert seen["max_tokens"] > 300 and seen["extra"] == {"reasoning_effort": "low"}
+
+
+def test_a_model_that_cannot_think_minimal_is_asked_again_at_its_floor(clock, monkeypatch):
+    """gemini-3.7-flash, Sep 29: 400 «Thinking level MINIMAL is not supported»."""
+    from utils import gemini
+    bodies = []
+
+    def post(url, headers=None, json=None, timeout=None):
+        import copy
+        bodies.append(copy.deepcopy(json))
+        if json["generationConfig"]["thinkingConfig"].get("thinkingLevel") == "minimal":
+            return _Resp(400, {"error": {"code": 400, "message":
+                         "Thinking level MINIMAL is not supported for this model. "
+                         "Please retry with other thinking level."}})
+        return _Resp(200, {"candidates": [{"content": {"parts": [{"text": "Берлин"}]}}]})
+
+    monkeypatch.setattr(gemini.requests, "post", post)
+    gemini._LEVEL_FLOOR.pop("gemini-3.7-flash", None)
+    try:
+        assert gemini.generate_text("столица?", model="gemini-3.7-flash", max_tokens=20,
+                                    api_key="k") == "Берлин"
+        second = bodies[1]["generationConfig"]
+        assert second["thinkingConfig"] == {"thinkingLevel": "low"}
+        assert second["maxOutputTokens"] == 20 + gemini.THINKING_ALLOWANCE["low"], \
+            "thinking would eat the 20-token answer"
+        # the next call starts at the floor: no wasted 400
+        bodies.clear()
+        gemini.generate_text("ещё", model="gemini-3.7-flash", max_tokens=20, api_key="k")
+        assert len(bodies) == 1
+    finally:
+        gemini._LEVEL_FLOOR.pop("gemini-3.7-flash", None)

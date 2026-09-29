@@ -567,12 +567,14 @@ def describe(models: Optional[Sequence[str]] = None) -> List[str]:
 
 
 def estimate_tokens(*parts: Any) -> int:
-    """Rough token count of a request. ~3 characters per token: Russian text
-    tokenizes denser than English, and underestimating here means a 429."""
+    """Rough token count of a request. ~3.3 characters per token: Russian text
+    tokenizes denser than English, and underestimating here means a 429.
+    Calibrated on the VM, Sep 29, 2026: the real Iris prompt with its tools
+    was 19144 characters and 5692 tokens for Groq (3.36 per token)."""
     total = 0
     for p in parts:
         if p is None:
             continue
         s = p if isinstance(p, str) else json.dumps(p, ensure_ascii=False)
         total += len(s)
-    return total // 3
+    return int(total / 3.3)

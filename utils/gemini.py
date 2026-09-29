@@ -54,9 +54,10 @@ def _thinking_config(model: str) -> Dict[str, Any]:
         и съедает весь maxOutputTokens (ответ приходит пустым, finish=MAX_TOKENS)
       • 2.5 + thinkingLevel   → 400 «Thinking level is not supported for this model»
     Незнакомое семейство → thinkingBudget (поведение до 3.x, безопасный дефолт).
+    Модель, которая сама сказала, что minimal не умеет, получает свой минимум
+    (_LEVEL_FLOOR).
     """
-    return ({"thinkingLevel": "minimal"} if (model or DEFAULT_MODEL).startswith("gemini-3")
-            else {"thinkingBudget": 0})
+    return _thinking_for(model, "")[0]
 
 
 # Сколько выходных токенов добавить сверх ответа, если модели разрешено думать.
@@ -65,12 +66,49 @@ def _thinking_config(model: str) -> Dict[str, Any]:
 THINKING_ALLOWANCE = {"minimal": 0, "low": 1024, "medium": 2048, "high": 4096}
 
 
+_LEVELS = ["minimal", "low", "medium", "high"]
+
+# Модель → самый низкий уровень размышлений, который она принимает. Узнаётся из
+# ответа 400 «Thinking level MINIMAL is not supported for this model» (так
+# ответила gemini-3.7-flash 29.09.2026) и помнится до рестарта. Раньше minimal
+# ставился всем 3.x подряд: стань основной 3.7 — упали бы роутер, vision,
+# поиск и составление ответа.
+_LEVEL_FLOOR: Dict[str, str] = {}
+
+
 def _thinking_for(model: str, level: str) -> Tuple[Dict[str, Any], int]:
-    """(thinkingConfig, доп. токены). Уровень применим только к 3.x."""
+    """(thinkingConfig, доп. токены). Уровень применим только к 3.x; пусто —
+    самый низкий, который модель принимает."""
+    model = model or DEFAULT_MODEL
+    if not model.startswith("gemini-3"):
+        return {"thinkingBudget": 0}, 0
     level = (level or "").strip().lower()
-    if level in THINKING_ALLOWANCE and (model or DEFAULT_MODEL).startswith("gemini-3"):
-        return {"thinkingLevel": level}, THINKING_ALLOWANCE[level]
-    return _thinking_config(model), 0
+    if level not in THINKING_ALLOWANCE:
+        level = "minimal"
+    floor = _LEVEL_FLOOR.get(model, "minimal")
+    if _LEVELS.index(level) < _LEVELS.index(floor):
+        level = floor
+    return {"thinkingLevel": level}, THINKING_ALLOWANCE[level]
+
+
+def _raise_level_floor(model: str, body: Dict[str, Any], error_text: str) -> bool:
+    """400 про неподдерживаемый уровень размышлений: поднять уровень в `body`
+    на ступень (с запасом токенов под него) и запомнить. True — можно повторить."""
+    low = (error_text or "").lower()
+    if "thinking level" not in low or "not supported" not in low:
+        return False
+    cfg = body.get("generationConfig", {})
+    current = str(cfg.get("thinkingConfig", {}).get("thinkingLevel", "")).lower()
+    if current not in _LEVELS or current == _LEVELS[-1]:
+        return False
+    nxt = _LEVELS[_LEVELS.index(current) + 1]
+    _LEVEL_FLOOR[model] = nxt
+    cfg["thinkingConfig"] = {"thinkingLevel": nxt}
+    cfg["maxOutputTokens"] = int(cfg.get("maxOutputTokens", 0)) + \
+        THINKING_ALLOWANCE[nxt] - THINKING_ALLOWANCE[current]
+    logger.warning("Gemini %s не принимает уровень размышлений %s — дальше %s",
+                   model, current, nxt)
+    return True
 
 
 def _bump_usage() -> None:
@@ -120,6 +158,8 @@ def _post_generate(key: str, body: Dict[str, Any], model: str, timeout: float) -
                 _bump_usage()
                 return resp.json()
             last = failure
+            if failure.status == 400 and _raise_level_floor(model, body, resp.text):
+                continue  # тот же запрос с уровнем, который модель принимает
             # Дневной 429 через секунду не пройдёт: повтор только если шлюз
             # не заблокировал модель надолго.
             if not _worth_retrying(failure.status) or llm_gate.blocked(model):
@@ -167,12 +207,13 @@ def generate(
     if not key:
         return None
 
+    thinking, extra = _thinking_for(model, "")
     body: Dict[str, Any] = {
         "contents": [{"parts": parts}],
         "generationConfig": {
             "temperature": temperature,
-            "maxOutputTokens": max_tokens,
-            "thinkingConfig": _thinking_config(model),
+            "maxOutputTokens": max_tokens + extra,
+            "thinkingConfig": thinking,
         },
     }
     if system:
