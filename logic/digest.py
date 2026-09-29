@@ -39,9 +39,13 @@ _MONTHS_GEN = ["января", "февраля", "марта", "апреля", "
 
 
 def _translate_titles(titles: List[str]) -> Optional[List[str]]:
-    """Один Gemini-вызов: заголовки → русский. None при любой проблеме —
-    дайджест важнее перевода, уходит с оригиналами."""
-    from utils.gemini import generate_text
+    """Один вызов модели из фонового пула: заголовки → русский. None при любой
+    проблеме — дайджест важнее перевода, уходит с оригиналами.
+
+    До 29.09.2026 перевод шёл на gemini-3.6-flash — ту же модель, что отвечала
+    владельцу, с дневной квотой 20 запросов: каждое утро два из них уходили на
+    заголовки. Фоновый пул не трогает резерв квот под ответы владельцу."""
+    from utils import llm, llm_gate
     if not titles:
         return None
     prompt = (
@@ -50,13 +54,11 @@ def _translate_titles(titles: List[str]) -> Optional[List[str]]:
         "в том же порядке, без пояснений.\n\n"
         + json.dumps(titles, ensure_ascii=False)
     )
-    raw = ""
-    for _attempt in range(2):  # один ретрай: перевод морозился транзиентно (15-16.06 ушёл англ.)
-        raw = generate_text(prompt, temperature=0.1, max_tokens=1200)
-        if raw:
-            break
+    # Модели пула пробуются по очереди, занятую минуту шлюз ждёт: спешить некуда.
+    raw, _model = llm.text("background", prompt, temperature=0.1, max_tokens=1200,
+                           priority=llm_gate.BACKGROUND, max_wait=60.0)
     if not raw:
-        logger.warning("Digest: Gemini не ответил на перевод (2 попытки) — заголовки в оригинале")
+        logger.warning("Digest: ни одна модель не перевела заголовки — ушли в оригинале")
         return None
     m = re.search(r"\[.*\]", raw, re.DOTALL)
     if not m:

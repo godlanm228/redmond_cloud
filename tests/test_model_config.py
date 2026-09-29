@@ -86,35 +86,47 @@ class GenerateBodyTests(unittest.TestCase):
 
 
 class RouterProviderChainTests(unittest.TestCase):
+    """Роутер спрашивает модели пула "router" по очереди (utils/llm_gate)."""
+
     def setUp(self):
+        from utils import llm, llm_gate
         self.calls = []
-        self._gem, self._groq = agent_router._ask_gemini, agent_router._ask_groq
+        self._complete = llm.complete
+        llm_gate.configure(pools={"router": ["first-model", "second-model"]})
 
     def tearDown(self):
-        agent_router._ask_gemini, agent_router._ask_groq = self._gem, self._groq
+        from utils import llm, llm_gate
+        llm.complete = self._complete
+        llm_gate.reset()
 
-    def _patch(self, gemini_reply, groq_reply):
-        agent_router._ask_gemini = lambda s, u: (
-            self.calls.append("gemini") or gemini_reply)
-        agent_router._ask_groq = lambda s, u, k: (
-            self.calls.append("groq") or groq_reply)
+    def _patch(self, first_reply, second_reply):
+        from utils import llm
+        replies = {"first-model": first_reply, "second-model": second_reply}
+        llm.complete = lambda model, prompt, **kw: (self.calls.append(model) or replies[model])
 
-    def test_gemini_answers_groq_not_touched(self):
+    def test_first_model_answers_second_not_touched(self):
         self._patch("Iris", "Newser")
         name, research = agent_router._llm_route("что с целями", [], "key")
         self.assertEqual((name, research), ("Iris", False))
-        self.assertEqual(self.calls, ["gemini"])
+        self.assertEqual(self.calls, ["first-model"])
 
-    def test_groq_picks_up_when_gemini_silent(self):
+    def test_second_model_picks_up_when_first_silent(self):
         self._patch("", "Newser+research")
         name, research = agent_router._llm_route("что нового по крипте", [], "key")
         self.assertEqual((name, research), ("Newser", True))
-        self.assertEqual(self.calls, ["gemini", "groq"])
+        self.assertEqual(self.calls, ["first-model", "second-model"])
 
     def test_both_silent_gives_none(self):
         self._patch("", "")
         self.assertEqual(agent_router._llm_route("привет", [], "key"), (None, False))
-        self.assertEqual(self.calls, ["gemini", "groq"])
+        self.assertEqual(self.calls, ["first-model", "second-model"])
+
+    def test_a_model_out_for_the_day_is_not_asked(self):
+        from utils import llm_gate
+        llm_gate.report("first-model", 404)
+        self._patch("Iris", "Newser")
+        self.assertEqual(agent_router._llm_route("что с целями", [], "key"), ("Newser", False))
+        self.assertEqual(self.calls, ["second-model"])
 
     def test_keyword_fallback_still_routes_when_llm_dead(self):
         self._patch("", "")
@@ -127,11 +139,16 @@ class GroundingModelChainTests(unittest.TestCase):
     """У google_search своя узкая квота — одна модель ненадёжна, нужен перебор."""
 
     def setUp(self):
+        from utils import llm_gate
         self.tried = []
         self._orig = gemini.generate
+        llm_gate.configure(pools={"search": ["gemini-3.6-flash", "gemini-2.5-flash"]})
+        self.chain = llm_gate.pool("search")
 
     def tearDown(self):
+        from utils import llm_gate
         gemini.generate = self._orig
+        llm_gate.reset()
 
     def _patch(self, answers):
         """answers: {model: текст ответа или '' если модель молчит}."""
@@ -143,26 +160,22 @@ class GroundingModelChainTests(unittest.TestCase):
         gemini.generate = fake
 
     def test_first_model_answers_second_not_touched(self):
-        self._patch({"": "ответ"})
+        self._patch({"gemini-3.6-flash": "ответ"})
         result = gemini.grounded_search("погода")
         self.assertIsNotNone(result)
-        self.assertEqual(self.tried, [""])
+        self.assertEqual(self.tried, ["gemini-3.6-flash"])
 
     def test_falls_through_to_backup_model(self):
         self._patch({"gemini-2.5-flash": "ответ с запасной"})
         result = gemini.grounded_search("погода")
         self.assertIsNotNone(result)
         self.assertEqual(result[0], "ответ с запасной")
-        self.assertEqual(self.tried, list(gemini.GROUNDING_MODELS))
+        self.assertEqual(self.tried, self.chain)
 
     def test_all_silent_gives_none(self):
         self._patch({})
         self.assertIsNone(gemini.grounded_search("погода"))
-        self.assertEqual(self.tried, list(gemini.GROUNDING_MODELS))
-
-    def test_default_model_is_first_in_chain(self):
-        # Основная модель должна пробоваться первой: у неё квота здоровее.
-        self.assertEqual(gemini.GROUNDING_MODELS[0], "")
+        self.assertEqual(self.tried, self.chain)
 
 
 class DeadModelGuardTests(unittest.TestCase):

@@ -41,11 +41,6 @@ from logic.agents import (AGENTS, REDMOND, AgentConfig, agent_by_name,
 
 logger = logging.getLogger(__name__)
 
-try:
-    from groq import Groq
-    GROQ_AVAILABLE = True
-except ImportError:
-    GROQ_AVAILABLE = False
 
 
 # ============================================================================
@@ -69,13 +64,12 @@ class RouterState:
 # Router LLM
 # ============================================================================
 
-# Роутер на Gemini flash-lite, а не на Groq llama-3.1-8b:
-#   • 8B плыла на промпте роутера (~1000 токенов правил) — отсюда промахи вроде
-#     «почему гемини упал» → Redmond+web_search про курс валют (12.08.2026);
-#   • квота отдельная от Groq — стена TPM в чате больше не роняет роутинг заодно.
-# Groq остаётся запасным путём: Gemini молчит → пробуем 8B, потом keywords.
-_ROUTER_MODEL = "gemini-3.1-flash-lite"
-_ROUTER_MODEL_GROQ = "llama-3.1-8b-instant"
+# Модели роутера — пул "router" (utils/llm_gate, config model_pools). До
+# 29.09.2026 они жили здесь константами: gemini-3.1-flash-lite тратил дневную
+# квоту Gemini (20 запросов на модель) на каждое сообщение владельца, а запасная
+# llama-3.1-8b-instant давно была снята Groq — еженедельная проверка моделей
+# констант не видела. Теперь первой идёт gpt-oss-20b: 1000 запросов в сутки и
+# своя минута токенов, которую не делят агенты. Все молчат → keywords.
 
 
 NOBODY = "Никто"
@@ -267,38 +261,16 @@ def _parse_router_reply(raw: str) -> tuple:
     return (name or None), research
 
 
-def _ask_gemini(system: str, user_msg: str) -> str:
-    """Роутинг через Gemini flash-lite. '' при любой проблеме — уйдём на Groq."""
+def _ask(system: str, user_msg: str) -> str:
+    """Ответ первой модели пула "router", которая может его дать. '' — никто."""
+    from utils import llm
     try:
-        from utils import gemini
-        return gemini.generate_text(
-            user_msg, system=system, model=_ROUTER_MODEL,
-            temperature=0.0, max_tokens=20,
-        ).strip()
-    except Exception as e:
-        failures.report("роутер Gemini", e, consequence=failures.DEGRADED)
+        raw, _model = llm.text("router", user_msg, system=system,
+                               max_tokens=20, temperature=0.0)
+    except Exception as e:  # noqa: BLE001 — роутинг уйдёт на keywords
+        failures.report("роутер", e, consequence=failures.DEGRADED)
         return ""
-
-
-def _ask_groq(system: str, user_msg: str, api_key: str) -> str:
-    """Запасной роутинг через Groq 8B. '' при любой проблеме — уйдём на keywords."""
-    if not api_key or not GROQ_AVAILABLE:
-        return ""
-    try:
-        client = Groq(api_key=api_key)
-        completion = client.chat.completions.create(
-            model=_ROUTER_MODEL_GROQ,
-            messages=[
-                {"role": "system", "content": system},
-                {"role": "user", "content": user_msg},
-            ],
-            temperature=0.0,
-            max_tokens=20,
-        )
-        return (completion.choices[0].message.content or "").strip()
-    except Exception as e:
-        failures.report("роутер Groq", e, consequence=failures.DEGRADED)
-        return ""
+    return (raw or "").strip()
 
 
 def _llm_route(
@@ -343,7 +315,7 @@ def _llm_route(
     )
 
     system = _build_router_prompt()
-    raw = _ask_gemini(system, user_msg) or _ask_groq(system, user_msg, api_key)
+    raw = _ask(system, user_msg)
     if not raw:
         return None, False
 

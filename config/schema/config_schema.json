@@ -17,6 +17,22 @@
     "gemini_model": {"type": "string"},
     "gemini_fallback_models": {"type": "array", "items": {"type": "string"}},
     "gemini_thinking_level": {"type": "string", "enum": ["minimal", "low", "medium", "high"]},
+    "model_pools": {
+      "type": "object",
+      "additionalProperties": {"type": "array", "items": {"type": "string", "minLength": 1}}
+    },
+    "model_limits": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "properties": {
+          "rpd": {"type": "integer", "minimum": 1},
+          "rpm": {"type": "integer", "minimum": 1},
+          "tpm": {"type": "integer", "minimum": 1}
+        },
+        "additionalProperties": false
+      }
+    },
 
     "groq_whisper_model": {"type": "string", "minLength": 1},
 

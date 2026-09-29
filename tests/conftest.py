@@ -36,9 +36,13 @@ def _isolated_db(tmp_path):
     что chdir на него не влияет; тесты, которым нужна своя база, спокойно
     переопределяют путь сами.
     """
-    from utils import db
+    from utils import db, llm_gate
     db.close_all()
     db.set_db_path(tmp_path / "hub.sqlite")
+    # The model ledger is process-wide too: a limit learned in one test must
+    # not block a model in the next one.
+    llm_gate.reset()
     yield
+    llm_gate.reset()
     db.close_all()
     db.set_db_path(db.DEFAULT_DB_PATH)

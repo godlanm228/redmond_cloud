@@ -29,20 +29,17 @@ from logic.agent_router import NOBODY, RouterState, _is_short_followup, route
 class RouterTestBase(unittest.TestCase):
     def setUp(self):
         self.llm_calls = []
-        self._orig_gemini = agent_router._ask_gemini
-        self._orig_groq = agent_router._ask_groq
+        self._orig_ask = agent_router._ask
 
     def tearDown(self):
-        agent_router._ask_gemini = self._orig_gemini
-        agent_router._ask_groq = self._orig_groq
+        agent_router._ask = self._orig_ask
 
     def _llm(self, reply):
-        """Подменяем оба провайдера роутера и считаем обращения."""
-        def gem(system, user_msg):
+        """Подменяем модель роутера и считаем обращения."""
+        def ask(system, user_msg):
             self.llm_calls.append(user_msg)
             return reply
-        agent_router._ask_gemini = gem
-        agent_router._ask_groq = lambda s, u, k: ""
+        agent_router._ask = ask
 
 
 class ReplyOverrideTests(RouterTestBase):

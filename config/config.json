@@ -10,6 +10,20 @@
   "gemini_model": "gemini-3.6-flash",
   "gemini_thinking_level": "low",
 
+  "model_pools": {
+    "compose": ["openai/gpt-oss-120b", "qwen/qwen3.8-27b", "gemini-2.5-flash", "gemini-3.6-flash"],
+    "router": ["openai/gpt-oss-20b", "qwen/qwen3.8-27b", "gemini-3.1-flash-lite"],
+    "vision": ["gemini-3.6-flash", "gemini-2.5-flash", "gemini-3.8-flash"],
+    "search": ["gemini-3.6-flash", "gemini-2.5-flash"],
+    "background": ["openai/gpt-oss-20b", "qwen/qwen3.8-27b", "gemini-2.5-flash"]
+  },
+  "model_limits": {
+    "gemini-3.6-flash": {"rpd": 20},
+    "openai/gpt-oss-120b": {"rpd": 1000, "tpm": 8000},
+    "openai/gpt-oss-20b": {"rpd": 1000, "tpm": 8000},
+    "qwen/qwen3.8-27b": {"rpd": 1000, "tpm": 8000}
+  },
+
   "groq_whisper_model": "whisper-large-v3-turbo",
 
   "supergoals_file": "config/supergoals.json",

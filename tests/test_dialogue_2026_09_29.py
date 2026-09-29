@@ -16,7 +16,7 @@ from types import SimpleNamespace
 
 from logic import response_generator as rgm
 from logic.intent_recognizer import Intent
-from utils import gemini
+from utils import gemini, llm_gate
 
 PING_PROMPT = ("(scheduled, пинг дня) Влад сегодня ещё не на связи, записей за день нет. "
                "Поздоровайся тепло, по-человечески спроси как он и какие планы на день")
@@ -44,6 +44,7 @@ def _rg(monkeypatch, replies_by_model, fallbacks=()):
                                 groq_api_key="", groq_model="", groq_fallback_model="")
     rg.mem, rg.top_k, rg.max_history = None, 3, 6
     rg.history_by_chat, rg._history_guard, rg._history_loaded = {}, threading.RLock(), set()
+    llm_gate.configure_from(rg.config)  # what __init__ does: config leads the model pools
     rg._build_system_prompt = lambda ctx: "system"
     rg._build_user_message = lambda ctx: ctx.user_text
     saved, seen = [], []

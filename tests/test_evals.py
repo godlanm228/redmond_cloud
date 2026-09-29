@@ -309,9 +309,14 @@ def test_provider_failures_are_counted_apart_from_replies():
 
 
 def test_the_judge_comes_from_the_other_provider():
-    assert not judge.models_for("Iris")[0].startswith("gemini")
-    assert judge.models_for("Redmond")[0].startswith("gemini")
-    assert not judge.models_for("Iris, Newser")[0].startswith("gemini")
+    from logic.agents import AGENTS
+    from utils import llm_gate
+    for agent in AGENTS:
+        if agent.executor == "cipher_subprocess":
+            continue
+        answers_on = (agent.provider_order or ["groq"])[0]
+        judged_on = llm_gate.provider_of(judge.models_for(agent.name)[0])
+        assert judged_on != answers_on, f"{agent.name} would be graded by its own provider"
 
 
 def test_the_judge_sees_the_weekday():

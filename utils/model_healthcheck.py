@@ -37,20 +37,10 @@ def _check_groq(model: str, api_key: str) -> Tuple[str, str]:
     """(статус, деталь) для одной модели Groq."""
     if not api_key:
         return UNAVAILABLE, "нет ключа"
-    try:
-        from groq import Groq
-    except ImportError:
-        return UNAVAILABLE, "groq SDK не установлен"
-    try:
-        client = Groq(api_key=api_key, timeout=_TIMEOUT_SEC, max_retries=0)
-        client.chat.completions.create(
-            model=model,
-            messages=[{"role": "user", "content": "ping"}],
-            max_tokens=1,
-        )
-        return OK, ""
-    except Exception as e:
-        return _classify(str(e)), str(e)[:160]
+    from utils import groq
+    _completion, err = groq.chat(model, [{"role": "user", "content": "ping"}],
+                                 max_tokens=1, api_key=api_key, timeout=_TIMEOUT_SEC)
+    return (OK, "") if not err else (_classify(err), err[:160])
 
 
 def _check_gemini(model: str) -> Tuple[str, str]:
@@ -73,25 +63,35 @@ def _check_gemini(model: str) -> Tuple[str, str]:
 
 
 def check_models(config: Any) -> List[Tuple[str, str, str, str]]:
-    """Проверяет все модели из конфига. Возвращает [(провайдер, модель, статус, деталь)]."""
-    from logic import agent_router
-    from utils import gemini
+    """Проверяет все модели всех пулов. Возвращает [(провайдер, модель, статус, деталь)].
+
+    Модель, которую шлюз держит заблокированной по лимиту, не пингуется: она
+    жива, у неё кончилась квота, а пинг потратил бы запрос и объявил бы её
+    недоступной (дневная квота Gemini — 20 запросов)."""
+    from utils import llm_gate
 
     groq_key = getattr(config, "groq_api_key", "")
-    groq_models = [m for m in (getattr(config, "groq_model", ""),
-                               getattr(config, "groq_fallback_model", "")) if m]
-    gemini_models = [m for m in (getattr(config, "gemini_model", "") or gemini.DEFAULT_MODEL,
-                                 gemini.GROUNDING_MODEL,
-                                 agent_router._ROUTER_MODEL) if m]
-
     results: List[Tuple[str, str, str, str]] = []
-    for m in dict.fromkeys(groq_models):
-        status, detail = _check_groq(m, groq_key)
-        results.append(("groq", m, status, detail))
-    for m in dict.fromkeys(gemini_models):
-        status, detail = _check_gemini(m)
-        results.append(("gemini", m, status, detail))
+    for provider, m in all_models(config):
+        if llm_gate.blocked(m):
+            results.append((provider, m, OK, "; ".join(llm_gate.describe([m])) or "в лимите"))
+            continue
+        status, detail = _check_groq(m, groq_key) if provider == "groq" else _check_gemini(m)
+        results.append((provider, m, status, detail))
     return results
+
+
+def all_models(config: Any) -> List[Tuple[str, str]]:
+    """(провайдер, модель) для всех моделей, на которых стоит хаб, без повторов.
+
+    Пулы берутся как есть (их настраивает ResponseGenerator при старте): здесь
+    их не перечитываем из конфига — это откатило бы замену снятой модели
+    преемником, сделанную review_catalog минутой раньше."""
+    from utils import llm_gate
+    lead = [getattr(config, f, "") for f in ("groq_model", "groq_fallback_model", "gemini_model")]
+    seen = dict.fromkeys(m for m in lead + [m for models in llm_gate.pools().values()
+                                             for m in models] if m)
+    return [(llm_gate.provider_of(m), m) for m in seen]
 
 
 def check_cipher_auth() -> Tuple[str, str]:
@@ -113,16 +113,24 @@ def check_cipher_auth() -> Tuple[str, str]:
 
 
 def configured_models(config: Any) -> Dict[str, Tuple[str, str]]:
-    """Роль → (провайдер, модель) для всех моделей, на которых стоит хаб."""
-    from logic import agent_router
-    from utils import gemini
-    return {
+    """Роль → (провайдер, модель) для всех моделей, на которых стоит хаб.
+
+    Основные и резервная модели чата — отдельными ролями (их замена — разное
+    решение), остальные — по пулам задач. До 29.09.2026 роутер и поиск
+    значились константами из кода, а vision не значился вовсе: снятую Groq
+    llama-4-scout проверка так и не увидела."""
+    from utils import gemini, llm_gate
+    roles = {
         "groq_model": ("groq", getattr(config, "groq_model", "")),
         "groq_fallback_model": ("groq", getattr(config, "groq_fallback_model", "")),
         "gemini_model": ("gemini", getattr(config, "gemini_model", "") or gemini.DEFAULT_MODEL),
-        "роутер": ("gemini", agent_router._ROUTER_MODEL),
-        "поиск (grounding)": ("gemini", gemini.GROUNDING_MODEL),
     }
+    named = {m for _p, m in roles.values()}
+    for provider, m in all_models(config):
+        if m not in named:
+            tasks = [t for t, models in llm_gate.pools().items() if m in models]
+            roles[f"пул {', '.join(tasks)}: {m}"] = (provider, m)
+    return roles
 
 
 # Какие роли можно менять на преемника автоматически. Резервная модель
@@ -146,9 +154,12 @@ def review_catalog(config: Any) -> List[Any]:
             getattr(config, "gemini_api_key", "") or gemini.api_key_from_env()),
     }
     findings = model_catalog.review(configured_models(config), live)
+    from utils import llm_gate
     for f in findings:
-        if f.gone and f.newer and f.role in _AUTO_REPLACE_ROLES:
-            setattr(config, f.role, f.newer)
+        if f.gone and f.newer and (f.role in _AUTO_REPLACE_ROLES or f.role.startswith("пул ")):
+            if f.role in _AUTO_REPLACE_ROLES:
+                setattr(config, f.role, f.newer)
+            llm_gate.replace_model(f.model, f.newer)
             logger.error("Модель %s снята провайдером — %s временно переключена на "
                          "преемника %s. Поправь config.json.", f.model, f.role, f.newer)
         elif f.gone:
@@ -163,7 +174,7 @@ def describe_findings(findings: List[Any]) -> str:
     """Текст для владельца. Пусто — сообщать нечего."""
     lines = []
     for f in findings:
-        if f.gone and f.newer and f.role in _AUTO_REPLACE_ROLES:
+        if f.gone and f.newer and (f.role in _AUTO_REPLACE_ROLES or f.role.startswith("пул ")):
             lines.append(f"• {f.model} снята {f.provider} — резерв сам переключился на "
                          f"{f.newer}. Надо закрепить в config.json.")
         elif f.gone:

@@ -17,9 +17,7 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 import re
-import time
 from typing import Any, Dict, List, Optional, Sequence
 
 logger = logging.getLogger("evals.judge")
@@ -147,36 +145,27 @@ def models_for(agents: str) -> List[str]:
 
 
 def _call(model: str, prompt: str) -> str:
+    """One judge call through the gate (utils/llm_gate): as background work it
+    waits for a free minute but never takes the daily reserve kept for the
+    owner's messages — the judge shares the bot's API keys and quotas."""
+    from utils import llm_gate
+    tokens = llm_gate.estimate_tokens(RUBRIC, prompt)
+    if llm_gate.acquire([model], tokens, llm_gate.BACKGROUND, max_wait=60) is None:
+        logger.warning("judge %s: out of its limits — %s", model,
+                       "; ".join(llm_gate.describe([model])) or "no room this minute")
+        return ""
     return (_call_gemini if model.startswith("gemini") else _call_groq)(model, prompt)
 
 
 def _call_groq(model: str, prompt: str) -> str:
-    import requests
-    key = os.getenv("REDMOND_GROQ_API_KEY", "")
-    if not key:
-        return ""
-    body = {"model": model, "temperature": 0, "max_completion_tokens": 3000,
-            "messages": [{"role": "system", "content": RUBRIC},
-                         {"role": "user", "content": prompt}]}
-    if model.startswith("openai/gpt-oss"):
-        body["reasoning_effort"] = "medium"
-    headers = {"Authorization": f"Bearer {key}", "User-Agent": "redmond-hub/evals"}
-    for attempt in range(2):
-        try:
-            r = requests.post("https://api.groq.com/openai/v1/chat/completions",
-                              headers=headers, json=body, timeout=90)
-        except Exception as e:  # noqa: BLE001
-            logger.warning("judge %s: %s", model, e)
-            return ""
-        if r.status_code == 429 and attempt == 0:
-            # Groq says how long to wait; the answering agents share this limit.
-            time.sleep(min(float(r.headers.get("retry-after") or 20), 60))
-            continue
-        if r.status_code != 200:
-            logger.warning("judge %s: HTTP %s %s", model, r.status_code, r.text[:200])
-            return ""
-        return (r.json()["choices"][0]["message"].get("content") or "")
-    return ""
+    from utils import groq
+    extra = {"reasoning_effort": "medium"} if model.startswith("openai/gpt-oss") else None
+    completion, err = groq.chat(model, [{"role": "system", "content": RUBRIC},
+                                        {"role": "user", "content": prompt}],
+                                temperature=0, max_tokens=3000, timeout=90, extra=extra)
+    if err:
+        logger.warning("judge %s: %s", model, err[:200])
+    return groq.text_of(completion)
 
 
 def _call_gemini(model: str, prompt: str) -> str:

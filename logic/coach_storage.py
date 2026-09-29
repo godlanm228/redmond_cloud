@@ -632,9 +632,10 @@ def mark_radar(deadline_id: Any) -> None:
         )
 
 
-# Gemini RPD-гард — счётчик запросов за день (free-tier; пул общий
-# с vision/поиском/дайджестом/Iris-петлёй). Авто-сброс на новой дате.
-_GEMINI_RPD_WARN = (1200, 1450)  # пороги для одноразового warning в лог
+# Счётчик успешных запросов Gemini за день, всех моделей вместе, — для отчётов.
+# Не гард: лимит бесплатного тарифа — 20 запросов в сутки на КАЖДУЮ модель
+# (не «~1500 на проект», как считалось здесь до 29.09.2026), и ведёт его по
+# моделям utils/llm_gate.
 
 
 def gemini_bump() -> int:
@@ -652,9 +653,6 @@ def gemini_bump() -> int:
             " ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated=excluded.updated",
             (json.dumps(data), now_local().isoformat(timespec="minutes")),
         )
-    if data["count"] in _GEMINI_RPD_WARN:
-        logger.warning("Gemini RPD: %d запросов сегодня (free-tier лимит ~1500)",
-                       data["count"])
     return data["count"]
 
 

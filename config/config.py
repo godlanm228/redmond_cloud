@@ -1,6 +1,6 @@
 import os
 from pathlib import Path
-from typing import List
+from typing import Dict, List
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 
@@ -39,6 +39,20 @@ class AppConfig(BaseModel):
         default="minimal",
         description="Сколько Gemini 3.x думает в диалоге: minimal/low/medium/high. "
                     "Запас выходных токенов под размышления добавляется автоматически.",
+    )
+
+    # ---------- модели по задачам и их лимиты (utils/llm_gate) ----------
+    model_pools: Dict[str, List[str]] = Field(
+        default_factory=dict,
+        description="Задача → модели в порядке предпочтения (chat_groq, chat_gemini, "
+                    "compose, router, vision, search, background). Не указанные задачи "
+                    "берут пулы по умолчанию из utils/llm_gate; chat_* возглавляют "
+                    "groq_model/groq_fallback_model и gemini_model/gemini_fallback_models.",
+    )
+    model_limits: Dict[str, Dict[str, int]] = Field(
+        default_factory=dict,
+        description="Заранее известные лимиты: модель → {rpd, rpm, tpm}. То, что "
+                    "сообщит провайдер (заголовки Groq, тело 429 Gemini), важнее.",
     )
 
     # ---------- ASR ----------

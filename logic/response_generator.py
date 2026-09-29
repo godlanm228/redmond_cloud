@@ -17,17 +17,19 @@ from config.config_loader import (
 )
 from logic import prompt_budget
 from logic.intent_recognizer import Intent
+from utils import llm_gate
 from utils.memory import MemoryStore
 from utils.searcher import WebSearcher
 from utils.time import now_local
 
 logger = logging.getLogger(__name__)
 
-try:
-    from groq import Groq
-    GROQ_SDK_AVAILABLE = True
-except ImportError:
-    GROQ_SDK_AVAILABLE = False
+# Сколько ждать освобождения лимита модели на одном шаге ответа (utils/llm_gate).
+# Владелец видит статус «жду лимит», и полминуты ожидания лучше отказа или
+# ответа урезанным путём. Плановым задачам спешить некуда, но их общий таймаут
+# в скедулере — 200 с на всю генерацию.
+_OWNER_WAIT_SEC = 30.0
+_BACKGROUND_WAIT_SEC = 45.0
 
 DEFAULT_PERSONA = {
     "name": "Redmond",
@@ -49,6 +51,14 @@ DEFAULT_PERSONA = {
 # Таймаут одного Groq-вызова (сек). Без него SDK на 429/TPD спит десятками
 # секунд и виснет в потоке — пул потоков забивается, хаб встаёт.
 GROQ_TIMEOUT_SEC = 40.0
+
+
+def _completion_text(completion: Optional[dict]) -> str:
+    """Текст ответа chat-completion ('' если его нет)."""
+    try:
+        return (completion["choices"][0]["message"].get("content") or "").strip()
+    except (KeyError, IndexError, TypeError):
+        return ""
 
 
 def _is_rate_limit_error(err: str) -> bool:
@@ -505,6 +515,9 @@ class GenerationContext:
     # Вектор сообщения владельца: один на генерацию, общий для отбора
     # инструментов и поиска по памяти. None — ещё не считали; [] — не вышло.
     query_vec: Optional[List[float]] = None
+    # Чей это запрос для лимитов моделей: ответ владельцу или плановая задача,
+    # которой нельзя тратить резерв дневных квот (utils/llm_gate).
+    priority: str = llm_gate.OWNER
 
 
 class ResponseGenerator:
@@ -517,6 +530,8 @@ class ResponseGenerator:
 
     def __init__(self, config=None):
         self.config = config or load_app_config()
+        # Пулы моделей и известные лимиты — один раз, для всех модулей процесса.
+        llm_gate.configure_from(self.config)
 
         try:
             self.persona = load_personality_profile(self.config.personality_profile)
@@ -614,6 +629,8 @@ class ResponseGenerator:
             # Скедулерные промпты пишет код, а не владелец — сигнал ищем только
             # в его собственных репликах.
             distress=include_history and distress.detect(user_text),
+            # Без истории зовут только плановые задачи (скедулер).
+            priority=llm_gate.OWNER if include_history else llm_gate.BACKGROUND,
         )
         if ctx.distress:
             logger.warning("Сигнал острой ситуации в сообщении владельца — "
@@ -634,7 +651,7 @@ class ResponseGenerator:
             if not response:
                 ctx.failed = True
                 response = (_honest_failure(ctx.actions) if ctx.actions
-                            else self._generate_fallback(ctx))
+                            else self._limits_reply(ctx) or self._generate_fallback(ctx))
 
             if ctx.failed and ctx.distress:
                 # Вопрос «что случилось» не зависит от лимитов провайдера.
@@ -697,6 +714,13 @@ class ResponseGenerator:
             providers = getattr(self.config, "llm_provider_order", ["transformers"])
 
         for provider in providers:
+            pool = llm_gate.pool(f"chat_{provider}") if provider in ("groq", "gemini") else []
+            if pool and not llm_gate.open_models(pool, ctx.priority):
+                # Лимиты всех моделей провайдера уже известны: ни одного вызова
+                # впустую, сразу к следующему.
+                logger.info("Провайдер %s пропущен: %s", provider,
+                            "; ".join(llm_gate.describe(pool)) or "нет свободных моделей")
+                continue
             try:
                 if provider == "groq":
                     response = self._generate_with_groq(ctx)
@@ -731,12 +755,11 @@ class ResponseGenerator:
         from logic.tools import ToolSession, execute_tool
         import json as _json
 
-        primary_model = getattr(self.config, "groq_model", "openai/gpt-oss-120b")
-        fallback_model = getattr(self.config, "groq_fallback_model", "")
-        # Список моделей в порядке предпочтения. Дедуп если совпадают.
-        model_chain = [m for m in [primary_model, fallback_model] if m]
-        seen = set()
-        model_chain = [m for m in model_chain if not (m in seen or seen.add(m))]
+        # Модели Groq в порядке предпочтения. Формат сообщений у них общий,
+        # поэтому каждый шаг может уйти на ту, у которой сейчас есть минута:
+        # лимит 8000 токенов в минуту — на КАЖДУЮ модель, а шаг Iris ~4.5k.
+        model_chain = llm_gate.pool("chat_groq")
+        primary_model = model_chain[0] if model_chain else ""
 
         messages = [
             {"role": "system", "content": self._build_system_prompt(ctx)},
@@ -812,13 +835,19 @@ class ResponseGenerator:
                 except Exception:
                     logger.debug("prompt_budget size failed", exc_info=True)
 
-            # Пробуем модели по цепочке: primary, потом fallback.
-            # Fallback включается при rate_limit / tool_use_failed / любой transient ошибке.
-            # Ошибки КОПИМ: классификация ниже смотрит на всю цепочку, а не на
-            # последнюю ошибку (см. chain_has).
+            # Модель на этот шаг выбирает шлюз: первая по предпочтению, у которой
+            # хватает токенов в минуте; если ни у одной — ждём ближайшую (владелец
+            # видит статус), а не падаем по цепочке. Ошибки КОПИМ: классификация
+            # ниже смотрит на всю цепочку (см. chain_has).
             completion = None
             hop_errors: List[str] = []
-            for model in model_chain:
+            hop_tokens = llm_gate.estimate_tokens(messages, hop_tools)
+            tried: List[str] = []
+            while True:
+                model = self._acquire_model(model_chain, tried, hop_tokens, ctx, hop_errors)
+                if model is None:
+                    break
+                tried.append(model)
                 completion, err = self._groq_chat(
                     api_key, model, messages, tools=hop_tools,
                     temperature=temperature, max_tokens=max_tokens,
@@ -846,10 +875,9 @@ class ResponseGenerator:
                         hop_errors.append(err)
                 if completion is not None:
                     if model != primary_model:
-                        logger.warning(
-                            "Used fallback model %s (primary %s failed) at hop %d",
-                            model, primary_model, hop,
-                        )
+                        # Штатно: у основной не было минуты или она отказала.
+                        logger.info("Шаг %d ответила %s (до неё: %s)", hop, model,
+                                    ", ".join(tried[:-1]) or f"{primary_model} занята")
                     break
             if completion is None:
                 logger.warning(
@@ -1011,7 +1039,8 @@ class ResponseGenerator:
         max_tokens: int = 800,
         tool_choice: Optional[dict] = None,
     ) -> Tuple[Optional[dict], str]:
-        """Низкоуровневый chat-completion с tools. Возвращает (сырой JSON | None, ошибка).
+        """Chat-completion с tools через utils/groq (там же отчёт шлюзу лимитов).
+        Возвращает (сырой JSON | None, ошибка).
 
         Ошибка отдаётся ЗНАЧЕНИЕМ, а не полем объекта: ResponseGenerator один на
         все 4 бота и вызывается из потоков (asyncio.to_thread), так что общее
@@ -1021,63 +1050,53 @@ class ResponseGenerator:
 
         tools=None — финальный compose-вызов без tools (модель обязана дать текст).
         tool_choice — forced choice (принудительное делегирование), иначе auto."""
-        base_url = getattr(self.config, "groq_api_base", "https://api.groq.com").rstrip("/")
-        try:
-            if GROQ_SDK_AVAILABLE:
-                kwargs = dict(
-                    model=model,
-                    messages=messages,
-                    temperature=temperature,
-                    max_tokens=max_tokens,
-                )
-                if tools:
-                    kwargs["tools"] = tools
-                    kwargs["tool_choice"] = tool_choice or "auto"
-                if "qwen" in model:
-                    # Qwen3 — reasoning-модель: без этого думает в <think>-блоке,
-                    # сжигая max_tokens на рассуждения. none = сразу ответ.
-                    kwargs["extra_body"] = {"reasoning_effort": "none"}
-                # timeout + max_retries=0: НЕ давать SDK уходить в долгие повторы.
-                # На 429 (особенно TPD) дефолтный retry спит десятки секунд ×N,
-                # генерация виснет в потоке, пул потоков забивается → весь хаб
-                # встаёт (так пропал вечерний итог 10.06). Свой fallback на qwen
-                # и явный ответ при исчерпании лимита делаем сами, выше по стеку.
-                client = Groq(api_key=api_key, timeout=GROQ_TIMEOUT_SEC, max_retries=0)
-                completion = client.chat.completions.create(**kwargs)
-                raw = (completion.to_dict() if hasattr(completion, "to_dict")
-                       else completion.model_dump())
-                return raw, ""
-
-            payload = {
-                "model": model,
-                "messages": messages,
-                "temperature": temperature,
-                "max_tokens": max_tokens,
-            }
-            if tools:
-                payload["tools"] = tools
-                payload["tool_choice"] = tool_choice or "auto"
-            if "qwen" in model:
-                payload["reasoning_effort"] = "none"
-            resp = requests.post(
-                f"{base_url}/openai/v1/chat/completions",
-                headers={"Authorization": f"Bearer {api_key}"},
-                json=payload,
-                timeout=GROQ_TIMEOUT_SEC,
-            )
-            resp.raise_for_status()
-            return resp.json(), ""
-        except Exception as e:
-            err = str(e)
-            from utils import failures
-            failures.remember(f"Groq {model}", err)
+        # Без повторов внутри: на 429 SDK спал десятки секунд ×N, генерация
+        # висла в потоке, пул потоков забивался и вставал весь хаб (10.06).
+        # Ждать или идти к другой модели решает шлюз, выше по стеку.
+        from utils import groq as groq_client
+        completion, err = groq_client.chat(
+            model, messages, tools=tools, tool_choice=tool_choice,
+            temperature=temperature, max_tokens=max_tokens, api_key=api_key,
+            base_url=getattr(self.config, "groq_api_base", ""), timeout=GROQ_TIMEOUT_SEC,
+        )
+        if err:
             # Снятая провайдером модель — не транзиент, чинится только правкой
             # конфига. Отдельный уровень, чтобы не тонуло среди 429-шума.
             if _is_model_gone_error(err):
-                logger.error("Groq model %s недоступна (снята провайдером?): %s", model, err)
+                logger.error("Groq model %s недоступна (снята провайдером?): %s", model, err[:300])
             else:
-                logger.warning("Groq chat call failed (%s): %s", model, err)
-            return None, err
+                logger.warning("Groq chat call failed (%s): %s", model, err[:300])
+        return completion, err
+
+    def _acquire_model(self, chain: List[str], tried: List[str], tokens: int,
+                       ctx: "GenerationContext", errors: List[str]) -> Optional[str]:
+        """Модель для шага из `chain` (кроме уже испробованных) по лимитам шлюза.
+
+        None — ни одна не может взять шаг в пределах допустимого ожидания; тогда
+        в `errors` кладётся причина в том же виде, что у провайдера («try again
+        in Ns», «per day», «request too large»), и дальше работает обычная
+        классификация отказа — с честным текстом владельцу."""
+        left = [m for m in chain if m not in tried]
+        if not left:
+            return None
+        max_wait = _OWNER_WAIT_SEC if ctx.priority == llm_gate.OWNER else _BACKGROUND_WAIT_SEC
+
+        def on_wait(model: str, seconds: float) -> None:
+            logger.info("Жду лимит %s: %.0f с (шаг ~%d ток)", model, seconds, tokens)
+            if ctx.status_cb:
+                ctx.status_cb(f"жду лимит модели ~{math.ceil(seconds)} с")
+
+        model = llm_gate.acquire(left, tokens, ctx.priority, max_wait, on_wait=on_wait)
+        if model is None and not tried:
+            _m, soonest = llm_gate.choose(left, tokens, ctx.priority)
+            if llm_gate.too_large(left, tokens):
+                errors.append(f"413 request too large: ~{tokens} tokens > per-minute limit "
+                              f"of every model in {left}")
+            elif soonest == math.inf:
+                errors.append("rate_limit: requests per day exhausted on " + ", ".join(left))
+            else:
+                errors.append(f"rate_limit: all models busy, try again in {math.ceil(soonest)}s")
+        return model
 
     # _execute_tool удалён в v2 — заменён на execute_tool() из logic/tools.py
     # (полный набор tools, единый dispatcher, agent-filter поддержка).
@@ -1109,7 +1128,8 @@ class ResponseGenerator:
         api_key = getattr(self.config, "gemini_api_key", "") or gemini.api_key_from_env()
         if not api_key:
             return ""
-        model = getattr(self.config, "gemini_model", "") or gemini.DEFAULT_MODEL
+        chain = llm_gate.pool("chat_gemini")
+        model = chain[0] if chain else gemini.DEFAULT_MODEL
 
         # Инструменты агента в том виде, в каком их видит модель (как в Groq-пути).
         allowed = getattr(ctx.agent, "allowed_tools", None) if ctx.agent else None
@@ -1165,8 +1185,9 @@ class ResponseGenerator:
             # gemini-3.6-flash отвечала 503 весь день, и каждый ответ падал на
             # Groq, где лимит кончался за пару сообщений. После первого вызова
             # инструмента модель не меняем — подпись размышления привязана к ней.
-            candidates = [model] if hop else list(dict.fromkeys(
-                [model] + list(getattr(self.config, "gemini_fallback_models", []) or [])))
+            # Модели с исчерпанным дневным лимитом (20 запросов у бесплатного
+            # тарифа) шлюз не отдаёт — вызов на них ничего не даст.
+            candidates = [model] if hop else llm_gate.open_models(chain, ctx.priority)
             data = None
             for candidate in candidates:
                 data = gemini.generate_contents(
@@ -1269,6 +1290,27 @@ class ResponseGenerator:
             return self._finish_after_tools(ctx, _flatten_gemini(system, contents))
         return ""
 
+    def _limits_reply(self, ctx: GenerationContext) -> str:
+        """Отказ по фактической причине, если ответить нечем из-за лимитов:
+        какие модели и когда освободится ближайшая. '' — дело не в лимитах.
+
+        До 29.09.2026 владелец в этом случае получал «модели недоступны или
+        перегружены, повтори чуть позже», хотя шлюз точно знает, что дневная
+        квота кончилась и вернётся в 09:00."""
+        providers = getattr(ctx.agent, "provider_order", None) if ctx.agent else None
+        providers = providers or getattr(self.config, "llm_provider_order", ["groq", "gemini"])
+        models = [m for p in providers for m in llm_gate.pool(f"chat_{p}")]
+        if not models or llm_gate.open_models(models, ctx.priority):
+            return ""
+        when = llm_gate.next_free(models, priority=ctx.priority)
+        if when is None:
+            return ""
+        from utils.time import OWNER_TZ
+        wait = max(0.0, when - llm_gate._now())
+        at = datetime.fromtimestamp(when, OWNER_TZ).strftime("%H:%M")
+        return ("Все модели сейчас упёрлись в лимиты бесплатного тарифа — ответить нечем. "
+                f"Ближайшая освободится в {at} (через {_human_wait(wait)}).")
+
     def _compose_with_gemini(self, messages: list, ctx: GenerationContext) -> Optional[str]:
         """Аварийный compose при исчерпании Groq TPD: беседа этой генерации
         (вкл. уже собранные tool-результаты) сплющивается в plain-prompt для
@@ -1291,26 +1333,27 @@ class ResponseGenerator:
         max_tokens = getattr(ctx.agent, "max_tokens", 800) if ctx.agent else 800
 
         gemini_key = getattr(self.config, "gemini_api_key", "") or gemini.api_key_from_env()
-        if gemini_key:
-            text = gemini.generate_text(prompt, temperature=temperature,
-                                        max_tokens=max_tokens, api_key=gemini_key)
-            if text:
-                return text
-
         groq_key = getattr(self.config, "groq_api_key", "")
-        if groq_ok and groq_key:
-            chain = [m for m in (getattr(self.config, "groq_model", ""),
-                                 getattr(self.config, "groq_fallback_model", "")) if m]
-            for model in dict.fromkeys(chain):
+        chain = [m for m in llm_gate.pool("compose")
+                 if (gemini_key if llm_gate.provider_of(m) == "gemini" else groq_key and groq_ok)]
+        tokens = llm_gate.estimate_tokens(prompt)
+        tried: List[str] = []
+        while True:
+            model = self._acquire_model(chain, tried, tokens, ctx, [])
+            if model is None:
+                return None
+            tried.append(model)
+            if llm_gate.provider_of(model) == "gemini":
+                text = gemini.generate_text(prompt, model=model, temperature=temperature,
+                                            max_tokens=max_tokens, api_key=gemini_key)
+            else:
                 completion, _err = self._groq_chat(
                     groq_key, model, [{"role": "user", "content": prompt}], tools=None,
                     temperature=temperature, max_tokens=max_tokens,
                 )
-                if completion is not None:
-                    content = (completion["choices"][0]["message"].get("content") or "").strip()
-                    if content:
-                        return content
-        return None
+                text = _completion_text(completion)
+            if text and text.strip():
+                return text.strip()
 
     # ---------- отбор инструментов (logic/tool_select) ----------
 

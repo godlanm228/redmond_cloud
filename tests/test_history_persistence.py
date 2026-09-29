@@ -121,13 +121,12 @@ class StickyRehydrationTests(HistoryDbTests):
         """Главный смысл: «лол» сразу после рестарта находит адресата."""
         db.history_add(CHAT, "что по еде", "записала обед", agent="Iris")
         state = agent_router.get_state({}, CHAT)
-        orig = agent_router._ask_gemini, agent_router._ask_groq
-        agent_router._ask_gemini = lambda s, u: agent_router.NOBODY
-        agent_router._ask_groq = lambda s, u, k: ""
+        orig = agent_router._ask
+        agent_router._ask = lambda s, u: agent_router.NOBODY
         try:
             agent, _ = agent_router.route("лол", state, "key")
         finally:
-            agent_router._ask_gemini, agent_router._ask_groq = orig
+            agent_router._ask = orig
         self.assertIsNotNone(agent)
         self.assertEqual(agent.name, "Iris")
 

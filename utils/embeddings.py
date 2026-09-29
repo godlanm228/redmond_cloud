@@ -76,8 +76,11 @@ def _request(texts: Sequence[str], kind: str) -> Optional[List[List[float]]]:
     key = _key()
     if not key or not texts:
         return None
+    from utils import llm_gate
     models = [_model_in_use] if _model_in_use else list(dict.fromkeys(MODELS))
     for model in models:
+        if llm_gate.blocked(model):
+            continue  # its limit is known: no call to learn it again
         try:
             r = requests.post(f"{_API}/models/{model}:batchEmbedContents",
                               headers={"x-goog-api-key": key},
@@ -86,6 +89,7 @@ def _request(texts: Sequence[str], kind: str) -> Optional[List[List[float]]]:
             failures.report("эмбеддинги", e, consequence=failures.DEGRADED, model=model)
             return None
         failure = failures.check(r)
+        llm_gate.report(model, r.status_code, body=None if failure is None else _full_body(r))
         if failure is None:
             vectors = [e.get("values") or [] for e in r.json().get("embeddings", [])]
             if len(vectors) != len(texts) or not all(vectors):
@@ -99,6 +103,13 @@ def _request(texts: Sequence[str], kind: str) -> Optional[List[List[float]]]:
         failures.report("эмбеддинги", failure, consequence=failures.DEGRADED, model=model)
         return None
     return None
+
+
+def _full_body(r) -> object:
+    try:
+        return r.json()
+    except Exception:  # noqa: BLE001
+        return getattr(r, "text", "")
 
 
 def embed(texts: Sequence[str], kind: str = DOCUMENT) -> Optional[List[List[float]]]:

@@ -1,11 +1,15 @@
 """
 Gemini API (generativelanguage.googleapis.com) — единый низкоуровневый клиент.
 
-Ключ REDMOND_GEMINI_API_KEY = free-tier проект RedmondFree (~10 RPM / сотни RPD)
-— для наших объёмов с запасом (реальный расход ~16 запросов в день). ВАЖНО:
+Ключ REDMOND_GEMINI_API_KEY = free-tier проект RedmondFree. Лимит бесплатного
+тарифа — 20 запросов в сутки НА МОДЕЛЬ на проект (429 от 29.09.2026:
+GenerateRequestsPerDayPerProjectPerModel-FreeTier = 20), сброс в полночь по
+тихоокеанскому времени. Раньше здесь было «сотни RPD, с запасом» — неправда,
+на которой держался выбор Gemini основной моделью Iris. Лимиты ведёт
+utils/llm_gate: заблокированную модель не вызываем вовсе. ВАЖНО:
 проект должен быть БЕЗ биллинга — проект с prepay-биллингом при нуле кредитов
 отдаёт 429 без отката на free tier (так «не работал» старый ключ).
-У google_search grounding квота ОТДЕЛЬНАЯ и заметно меньше — см. GROUNDING_MODEL.
+Модели для задач (поиск, vision, запасные для чата) — пулы utils/llm_gate.
 
 Модель по умолчанию — REDMOND_GEMINI_MODEL из env, иначе DEFAULT_MODEL.
 
@@ -30,7 +34,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import requests
 
-from utils import failures
+from utils import failures, llm_gate
 
 logger = logging.getLogger(__name__)
 
@@ -70,9 +74,8 @@ def _thinking_for(model: str, level: str) -> Tuple[Dict[str, Any], int]:
 
 
 def _bump_usage() -> None:
-    """Инкремент дневного счётчика запросов Gemini (RPD-гард free-tier:
-    1500/день на проект, пул общий с vision/поиском/дайджестом/Iris). Единый
-    чокпоинт — здесь проходят ВСЕ вызовы. Никогда не роняет генерацию."""
+    """Инкремент дневного счётчика запросов Gemini (статистика; лимиты по
+    моделям ведёт utils/llm_gate). Никогда не роняет генерацию."""
     try:
         from logic import coach_storage
         coach_storage.gemini_bump()
@@ -94,7 +97,12 @@ def _post_generate(key: str, body: Dict[str, Any], model: str, timeout: float) -
     """
     import time
 
-    url = f"{_API_BASE}/models/{model or DEFAULT_MODEL}:generateContent"
+    model = model or DEFAULT_MODEL
+    if llm_gate.blocked(model):
+        # Лимит уже известен: вызов потратил бы время и ничего не дал.
+        logger.info("Gemini %s пропущена: %s", model, "; ".join(llm_gate.describe([model])))
+        return None
+    url = f"{_API_BASE}/models/{model}:generateContent"
     last: Any = None
     for attempt in range(2):
         try:
@@ -104,14 +112,21 @@ def _post_generate(key: str, body: Dict[str, Any], model: str, timeout: float) -
                 url, headers={"x-goog-api-key": key}, json=body, timeout=timeout,
             )
             failure = failures.check(resp)
+            # Полное тело: quotaId стоит в конце ответа, за ссылками на
+            # документацию, и в обрезанный текст ошибки не попадает.
+            llm_gate.report(model, resp.status_code,
+                            body=None if failure is None else _full_body(resp))
             if failure is None:
                 _bump_usage()
                 return resp.json()
             last = failure
-            if not _worth_retrying(failure.status):
+            # Дневной 429 через секунду не пройдёт: повтор только если шлюз
+            # не заблокировал модель надолго.
+            if not _worth_retrying(failure.status) or llm_gate.blocked(model):
                 break
         except Exception as e:  # noqa: BLE001 — сеть/таймаут/битый JSON
             last = e
+            llm_gate.report(model, None)
         if attempt == 0:
             time.sleep(1.0)
 
@@ -121,6 +136,13 @@ def _post_generate(key: str, body: Dict[str, Any], model: str, timeout: float) -
         model=model or DEFAULT_MODEL,
     )
     return None
+
+
+def _full_body(resp: Any) -> Any:
+    try:
+        return resp.json()
+    except Exception:  # noqa: BLE001
+        return getattr(resp, "text", "")
 
 
 def _worth_retrying(status: int) -> bool:
@@ -305,8 +327,6 @@ def tool_schemas_to_gemini(schemas: List[dict]) -> Optional[List[dict]]:
 # 13.08.2026 замерено: 3.6 на обычных вызовах отвечает стабильно, 2.5 — через раз
 # (429 → 200 на повторе), то есть жёсткий пин на любую одну модель хуже перебора.
 # Второй эшелон (CSE/DDG) остаётся ниже по стеку в logic/tools.py.
-GROUNDING_MODELS = ("", "gemini-2.5-flash")  # "" = DEFAULT_MODEL
-GROUNDING_MODEL = GROUNDING_MODELS[-1]  # для healthcheck и обратной совместимости
 
 
 def grounded_search(
@@ -319,7 +339,8 @@ def grounded_search(
     Поиск через Google Search grounding: модель сама гуглит и отвечает фактурой.
     Возвращает (answer_text, [(source_title, url), …]) или None при ошибке.
     URL источников — redirect-ссылки Google (vertexaisearch…), они рабочие.
-    Модели пробуются по очереди (GROUNDING_MODELS) — у grounding узкая квота.
+    Модели — пул "search" по очереди; исчерпавшие дневную квоту шлюз
+    пропускает без вызова (_post_generate).
     """
     system = (
         "You are a web search assistant. Answer factually based on Google "
@@ -333,7 +354,7 @@ def grounded_search(
     )
     data = None
     text = ""
-    for model in GROUNDING_MODELS:
+    for model in llm_gate.pool("search") or [DEFAULT_MODEL]:
         data = generate(
             [{"text": query}],
             model=model,

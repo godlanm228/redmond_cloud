@@ -85,6 +85,15 @@ def _failures_lines() -> List[str]:
             for ts, where, text in items]
 
 
+def _limits_lines() -> List[str]:
+    """Модели, упёршиеся в лимит сейчас (utils/llm_gate): причина и до когда."""
+    try:
+        from utils import llm_gate
+        return [f"  {line}" for line in llm_gate.describe()]
+    except Exception:  # noqa: BLE001
+        return []
+
+
 def block() -> str:
     """Готовый блок для конца system prompt: правила + факты."""
     lines = [RULES, "", "SYSTEM FACTS (from code, now):", f"- {_cipher_line()}",
@@ -95,4 +104,8 @@ def block() -> str:
         lines.extend(fails)
     else:
         lines.append("- Сбоев моделей за сутки в этом процессе не было")
+    limits = _limits_lines()
+    if limits:
+        lines.append("- Модели в лимите сейчас (бесплатный тариф; отвечают другие):")
+        lines.extend(limits)
     return "\n".join(lines)

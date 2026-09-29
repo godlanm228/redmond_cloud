@@ -1,11 +1,9 @@
 """
-Единое распознавание изображений: Gemini 2.5 Flash (primary) с fallback
-на Groq vision (llama-4-scout, free tier).
+Единое распознавание изображений: модели Gemini из пула "vision" по очереди
+(utils/llm_gate — у каждой своя дневная квота, исчерпанные пропускаются).
 
-Scout — слабейшая vision-модель Groq: путала пасту-ракушки с «ракумаки»,
-немецкую колбаску определяла как «кусок колбасы». Gemini распознаёт
-радикально лучше и заодно не тратит Groq-лимиты. Scout остаётся аварийным
-запасным, если Gemini недоступен.
+Запасного пути через Groq нет: llama-4-scout (путала пасту-ракушки с
+«ракумаки») Groq снял, а других моделей со зрением у него сейчас нет.
 
 Один vision-вызов классифицирует фото и достаёт нужное:
   • shift_schedule — скрин графика смен → структурные смены (как раньше)
@@ -20,17 +18,14 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 import re
 from typing import Any, Dict, List, Optional
 
-import requests
 
 from utils.time import now_local
 
 logger = logging.getLogger(__name__)
 
-_VISION_MODEL = os.getenv("REDMOND_GROQ_VISION_MODEL", "meta-llama/llama-4-scout-17b-16e-instruct")
 
 _PROMPT = """Look at the image and return ONLY a JSON object — no other text.
 
@@ -72,65 +67,41 @@ def _as_int(v: Any) -> Optional[int]:
 
 
 def _call_gemini_vision(prompt: str, image_b64: str) -> str:
-    """Gemini 2.5 Flash vision. '' при любой ошибке (уйдём на Groq scout)."""
+    """Разбор фото моделями пула "vision" по очереди (utils/llm_gate): у каждой
+    Gemini своя дневная квота, исчерпанные шлюз пропускает. '' — не смог никто."""
+    from utils import llm_gate
     from utils.gemini import extract_text, generate
-    return extract_text(generate(
-        [
-            {"text": prompt},
-            {"inline_data": {"mime_type": "image/jpeg", "data": image_b64}},
-        ],
-        temperature=0.0,
-        max_tokens=700,
-        timeout=60.0,
-    ))
-
-
-def _call_groq_vision(prompt: str, image_b64: str, api_key: str) -> Dict[str, str]:
-    """Groq scout (fallback). Возвращает {content, error}."""
-    if not api_key:
-        return {"content": "", "error": "no api key"}
-    try:
-        resp = requests.post(
-            "https://api.groq.com/openai/v1/chat/completions",
-            headers={"Authorization": f"Bearer {api_key}"},
-            json={
-                "model": _VISION_MODEL,
-                "messages": [{
-                    "role": "user",
-                    "content": [
-                        {"type": "text", "text": prompt},
-                        {"type": "image_url", "image_url": {
-                            "url": f"data:image/jpeg;base64,{image_b64}",
-                        }},
-                    ],
-                }],
-                "temperature": 0,
-                "max_tokens": 700,
-            },
-            timeout=60,
-        )
-        resp.raise_for_status()
-        return {"content": resp.json()["choices"][0]["message"]["content"] or "", "error": ""}
-    except Exception as e:
-        logger.exception("Groq vision call failed")
-        return {"content": "", "error": str(e)}
+    for model in llm_gate.open_models(llm_gate.pool("vision")):
+        text = extract_text(generate(
+            [
+                {"text": prompt},
+                {"inline_data": {"mime_type": "image/jpeg", "data": image_b64}},
+            ],
+            model=model,
+            temperature=0.0,
+            max_tokens=700,
+            timeout=60.0,
+        ))
+        if text:
+            return text
+    return ""
 
 
 def analyze_image(image_b64: str, api_key: str) -> Dict[str, Any]:
-    """Один vision-вызов: Gemini → fallback Groq scout (api_key — ключ Groq).
-    Возвращает {type, shifts, description, error}."""
+    """Один разбор фото моделями пула "vision". Возвращает {type, shifts,
+    description, error}. api_key не используется: запасной путь через Groq
+    scout снят вместе с моделью (llama-4-scout отвечает 404 с сентября 2026,
+    других моделей со зрением у Groq нет)."""
     now = now_local()
     prompt = _PROMPT.format(year=now.year, month=now.strftime("%B"))
 
     content = _call_gemini_vision(prompt, image_b64)
-    if content:
-        logger.info("Vision: Gemini")
-    else:
-        logger.warning("Gemini vision недоступен — fallback на Groq scout")
-        groq = _call_groq_vision(prompt, image_b64, api_key)
-        content = groq["content"]
-        if not content:
-            return {"type": "other", "shifts": [], "description": "", "error": groq["error"] or "empty"}
+    if not content:
+        from utils import llm_gate
+        why = "; ".join(llm_gate.describe(llm_gate.pool("vision"))) or "модели не ответили"
+        logger.warning("Vision: разбор не удался — %s", why)
+        return {"type": "other", "shifts": [], "description": "", "error": why}
+    logger.info("Vision: разобрано")
 
     m = re.search(r"\{.*\}", content, re.DOTALL)
     if not m:
