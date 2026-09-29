@@ -67,16 +67,37 @@ def check_models(config: Any) -> List[Tuple[str, str, str, str]]:
 
     Модель, которую шлюз держит заблокированной по лимиту, не пингуется: она
     жива, у неё кончилась квота, а пинг потратил бы запрос и объявил бы её
-    недоступной (дневная квота Gemini — 20 запросов)."""
-    from utils import llm_gate
+    недоступной (дневная квота Gemini — 20 запросов).
+
+    Gemini генерацией не пингуем вовсе: каждая проверка на старте съедала по
+    запросу из 20 суточных у каждой модели пулов, а рестартов бывает несколько
+    в день. Хватает каталога (бесплатно) и того, что видел шлюз: каталог
+    показывает и снятые модели (gemini-2.5-flash-lite в нём есть, а отвечает
+    404 «no longer available»), поэтому 404 из шлюза важнее каталога. Пинг —
+    только если каталог недоступен. Уровень размышлений модели шлюз узнаёт
+    сам по первому ответу (utils/gemini._raise_level_floor)."""
+    from utils import gemini, llm_gate, model_catalog
 
     groq_key = getattr(config, "groq_api_key", "")
+    catalog = None
     results: List[Tuple[str, str, str, str]] = []
     for provider, m in all_models(config):
+        if llm_gate.gone(m):
+            results.append((provider, m, GONE, "; ".join(llm_gate.describe([m]))))
+            continue
         if llm_gate.blocked(m):
             results.append((provider, m, OK, "; ".join(llm_gate.describe([m])) or "в лимите"))
             continue
-        status, detail = _check_groq(m, groq_key) if provider == "groq" else _check_gemini(m)
+        if provider == "groq":
+            status, detail = _check_groq(m, groq_key)
+        else:
+            if catalog is None:
+                catalog = model_catalog.list_gemini(
+                    getattr(config, "gemini_api_key", "") or gemini.api_key_from_env()) or []
+            if catalog:
+                status, detail = (OK, "в каталоге") if m in catalog else (GONE, "нет в каталоге")
+            else:
+                status, detail = _check_gemini(m)
         results.append((provider, m, status, detail))
     return results
 

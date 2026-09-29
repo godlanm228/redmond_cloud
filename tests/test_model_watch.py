@@ -68,3 +68,26 @@ def test_removed_fallback_is_replaced_but_primary_is_not(monkeypatch):
     text = mh.describe_findings(findings)
     assert "qwen/qwen3.6-27b" in text and "qwen/qwen3.8-27b" in text
     assert "gemini-3.8-flash" in text
+
+
+def test_gemini_models_are_checked_without_spending_their_quota(monkeypatch):
+    """Sep 29, 2026: a start pinged every Gemini model of every pool with a
+    generation request - one of its 20 a day, several restarts a day."""
+    from types import SimpleNamespace
+    from utils import gemini, groq, llm_gate, model_catalog, model_healthcheck
+    llm_gate.configure(pools={"chat_groq": ["openai/gpt-oss-120b"],
+                              "chat_gemini": ["gemini-3.6-flash", "gemini-2.5-flash-lite", "gemini-9-gone"]})
+    generated = []
+    monkeypatch.setattr(gemini, "generate", lambda *a, **kw: generated.append(kw.get("model")))
+    monkeypatch.setattr(groq, "chat", lambda m, msgs, **kw: ({"choices": []}, ""))
+    monkeypatch.setattr(model_catalog, "list_gemini",
+                        lambda key: ["gemini-3.6-flash", "gemini-2.5-flash-lite"])
+    llm_gate.report("gemini-2.5-flash-lite", 404)  # listed, yet «no longer available»
+    config = SimpleNamespace(groq_api_key="k", gemini_api_key="k", groq_model="",
+                             groq_fallback_model="", gemini_model="")
+    status = {m: s for _p, m, s, _d in model_healthcheck.check_models(config)}
+    assert generated == [], "a Gemini model was pinged with a generation request"
+    assert status["gemini-3.6-flash"] == model_healthcheck.OK
+    assert status["gemini-2.5-flash-lite"] == model_healthcheck.GONE
+    assert status["gemini-9-gone"] == model_healthcheck.GONE
+    assert status["openai/gpt-oss-120b"] == model_healthcheck.OK

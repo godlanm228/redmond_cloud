@@ -498,6 +498,13 @@ def open_models(models: Sequence[str], priority: str = OWNER) -> List[str]:
             if wait_for(m, 0, priority) < 120]
 
 
+def gone(model: str) -> bool:
+    """The provider answered 404 for this model recently (withdrawn)."""
+    with _lock:
+        st = _state(model)
+        return st.blocked_until > _now() and "404" in st.reason
+
+
 def blocked(model: str) -> bool:
     """Blocked for longer than a short pause: don't spend a call on it."""
     return wait_for(model, 0, OWNER) >= 120
