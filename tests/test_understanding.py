@@ -82,3 +82,9 @@ def test_the_input_marks_scheduled_messages_as_the_bots():
                            "2026-09-29 12:02, вторник")
     assert "плановое сообщение бота: Добрый день!" in text
     assert "НОВОЕ сообщение Влада: «Это как?»" in text
+
+
+def test_short_quotes_get_their_reading_in_the_diary():
+    assert und._diary_text(und.Fact(quote="Чилю", fact="Отдыхает")) == "Отдыхает — «Чилю»"
+    assert und._diary_text(und.Fact(quote="Поел овсянку", fact="поел овсянку")) == "Поел овсянку"
+    assert und._diary_text(und.Fact(quote="Снова болит живот", fact="болит живот")) == "Снова болит живот"

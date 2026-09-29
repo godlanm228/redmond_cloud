@@ -100,8 +100,10 @@ DEFAULT_POOLS: Dict[str, List[str]] = {
     "compose": ["openai/gpt-oss-120b", "qwen/qwen3.8-27b", "gemini-2.5-flash",
                 "gemini-3.6-flash"],
     # reading each owner message (logic/understanding): needs the strongest model
-    "understand": ["openai/gpt-oss-120b", "qwen/qwen3.8-27b", "gemini-3.5-flash",
-                   "gemini-3.6-flash"],
+    # qwen first: the answer's hops start on gpt-oss-120b, and both in one
+    # minute of the same model is ~8K tokens - the wall (probe, Sep 29, 2026)
+    "understand": ["qwen/qwen3.8-27b", "openai/gpt-oss-120b", "openai/gpt-oss-20b",
+                   "gemini-3.5-flash", "gemini-3.6-flash"],
     # tiny classification on every owner message: cheap models with big quotas
     "router": ["openai/gpt-oss-20b", "qwen/qwen3.8-27b", "gemini-3.1-flash-lite"],
     "vision": ["gemini-3.6-flash", "gemini-2.5-flash", "gemini-3.8-flash"],

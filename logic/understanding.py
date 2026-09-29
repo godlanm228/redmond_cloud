@@ -61,7 +61,7 @@ PROMPT = """\
 
 Правила:
 - quote — ДОСЛОВНЫЙ фрагмент нового сообщения, скопированный символ в символ. Код проверит, что он там есть. Не перефразируй в quote.
-- facts — только то, что Влад сам сообщил о своей жизни: что сделал, делает, где находится, как себя чувствует, что съел, что планирует, чем занят. fact — коротко, от третьего лица, по-русски, НЕ добавляя ничего сверх сказанного. Не факты: вопросы, просьбы, команды, мнения о боте, пересказ прошлых реплик бота.
+- facts — только то, что Влад сам сообщил о своей жизни: что сделал, делает, где находится, как себя чувствует, что съел, что планирует, чем занят. fact — коротко, от третьего лица, по-русски, НЕ добавляя ничего сверх сказанного. Не факты: вопросы, просьбы, команды, мнения о боте, эмоции и реакции на ответы бота («я в ахуе», «класс»), пересказ прошлых реплик бота.
 - when: done — уже сделал/случилось; now — происходит сейчас; plan — намерение, план, «хочу/буду/надо/довести»; habit — регулярно.
 - Нет фактов — пустой список. Никогда не додумывай факт, которого нет в тексте (еду, сон, занятия).
 - commands — только явные просьбы выключить/включить уведомления бота («мут на 7 дней», «не пиши до понедельника», «можешь писать»). until — дата окончания, если названа, в виде YYYY-MM-DD или YYYY-MM-DDTHH:MM по его времени; hours — если назван срок в часах/днях (дни × 24). scope: all — если просит полную тишину («фул мут», «ничего не присылай»), иначе pings.
@@ -251,9 +251,18 @@ def understand(message: str, history: Sequence[Dict[str, str]] = (), now: str = 
 WHEN_TAG = {"done": "сделано", "now": "сейчас", "plan": "план", "habit": "привычка"}
 
 
-def _diary_text(quote: str) -> str:
-    text = " ".join((quote or "").split()).strip(" ,.;")
+def _cap(text: str) -> str:
+    text = " ".join((text or "").split()).strip(" ,.;")
     return text[:1].upper() + text[1:] if text else ""
+
+
+def _diary_text(f: "Fact") -> str:
+    """His words. A one- or two-word quote («Чилю», «Спортом») means little in
+    the diary a week later, so it gets the reading in front: «Отдыхает — «Чилю»»."""
+    quote = _cap(f.quote)
+    if len(quote.split()) > 2 or not f.fact or normalize(f.fact) == normalize(quote):
+        return quote
+    return f"{_cap(f.fact)} — «{quote}»"
 
 
 def apply(u: "Understanding", execute=None) -> List[tuple]:
@@ -285,7 +294,7 @@ def apply(u: "Understanding", execute=None) -> List[tuple]:
     except Exception:  # noqa: BLE001 — without the check a repeat is written twice, not lost
         logger.debug("diary read for repeats failed", exc_info=True)
     for f in u.facts:
-        text = _diary_text(f.quote)
+        text = _diary_text(f)
         if not text or normalize(text) in recent:
             continue
         tags = [t for t in (WHEN_TAG.get(f.when, ""), f.topic.strip().lower()) if t]
