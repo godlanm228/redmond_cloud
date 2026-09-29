@@ -29,6 +29,8 @@ _LEAKS = [
     re.compile(r"\b(?:add_diary_entry|mute_notifications|update_profile|read_dossier(?:_section)?|"
                r"load_tools|delegate_research|get_current_time|web_search)\b"),
     re.compile(r"\baction=\w+"),
+    # a tool call written as text (qwen on Groq, Sep 29 run)
+    re.compile(r"<tool_call>|<function=|</?parameter[=>]", re.I),
 ]
 
 _WORD = re.compile(r"[a-zа-яё0-9]+", re.I)

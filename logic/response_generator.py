@@ -53,6 +53,18 @@ DEFAULT_PERSONA = {
 GROQ_TIMEOUT_SEC = 40.0
 
 
+_TOOL_MARKUP_RX = re.compile(r"<tool_call>|<function=|</?parameter[=>]|<\|tool", re.I)
+
+
+def _tool_markup_as_text(completion: Optional[dict]) -> bool:
+    """В тексте ответа — разметка вызова инструмента, а структурных вызовов нет."""
+    try:
+        msg = completion["choices"][0]["message"]
+    except (KeyError, IndexError, TypeError):
+        return False
+    return not msg.get("tool_calls") and bool(_TOOL_MARKUP_RX.search(msg.get("content") or ""))
+
+
 def _completion_text(completion: Optional[dict]) -> str:
     """Текст ответа chat-completion ('' если его нет)."""
     try:
@@ -1066,6 +1078,13 @@ class ResponseGenerator:
                 logger.error("Groq model %s недоступна (снята провайдером?): %s", model, err[:300])
             else:
                 logger.warning("Groq chat call failed (%s): %s", model, err[:300])
+        elif _tool_markup_as_text(completion):
+            # Модель написала вызов инструмента ТЕКСТОМ («<tool_call><function=diary>…»)
+            # вместо структурного вызова — 29.09.2026 это ушло бы владельцу как
+            # ответ (прогон, qwen3.8). Брак, а не ответ: шаг уходит к другой модели.
+            logger.warning("Groq %s написала вызов инструмента текстом — брак, беру другую модель",
+                           model)
+            return None, "garbled: tool call written as text"
         return completion, err
 
     def _acquire_model(self, chain: List[str], tried: List[str], tokens: int,

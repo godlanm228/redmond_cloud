@@ -138,3 +138,34 @@ def test_the_owner_hears_the_real_wait_when_it_is_too_long(world):
     reply = _ask(world)
     assert reply.failed
     assert "95" in reply or "~2 мин" in reply or "сек" in reply, reply
+
+
+MARKUP = ("<tool_call>\n<function=diary>\n<parameter=action>\nadd\n</parameter>\n"
+          "<parameter=text>\nДовести до ума\n</parameter>\n</function>\n</tool_call>")
+
+
+def test_a_tool_call_written_as_text_is_not_an_answer(world, monkeypatch):
+    """Sep 29 run: qwen answered «Че за галлюцинации?» with raw tool markup."""
+    from utils import groq
+    replies = {"openai/gpt-oss-120b": ({"choices": [{"message": {"content": MARKUP}}]}, ""),
+               "qwen/qwen3.8-27b": (_text("Записала план как план, не как сделанное."), "")}
+    called = []
+
+    def chat(model, messages, **kw):
+        called.append(model)
+        return replies.get(model, (_text("ок"), ""))
+
+    monkeypatch.setattr(groq, "chat", chat)
+    del world.rg._groq_chat  # the real one, through utils.groq
+    reply = _ask(world)
+    assert "<tool_call>" not in reply
+    assert called[:2] == ["openai/gpt-oss-120b", "qwen/qwen3.8-27b"]
+
+
+def test_the_rules_catch_tool_markup_as_a_leak():
+    from evals import checks
+    from types import SimpleNamespace as NS
+    turn = NS(kind="owner", expect={})
+    res = NS(replies=[MARKUP], agent="Iris", tool_calls=[], errors=[], provider=[], log=[],
+             seconds=1.0, mute_after=None, skipped="")
+    assert any(v.startswith("leak") for v in checks.check(turn, res, ["x"]))
