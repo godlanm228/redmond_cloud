@@ -94,16 +94,20 @@ class ModelState:
 # (llama-3.1-8b-instant, llama-4-scout) had been withdrawn by Groq unnoticed.
 DEFAULT_POOLS: Dict[str, List[str]] = {
     # agent answers with tools, per provider (a tool loop can't switch provider)
-    "chat_groq": ["openai/gpt-oss-120b", "qwen/qwen3.8-27b", "openai/gpt-oss-20b"],
-    "chat_gemini": ["gemini-3.6-flash", "gemini-2.5-flash", "gemini-3.8-flash"],
+    # Only models good enough to talk to the owner: better an honest «wait a
+    # minute» than an answer from a weak model (owner, Sep 30, 2026). gpt-oss-20b
+    # and the flash-lite models do mechanical work only (router fallback,
+    # headline translation).
+    "chat_groq": ["openai/gpt-oss-120b", "qwen/qwen3.8-27b"],
+    "chat_gemini": ["gemini-3.6-flash", "gemini-3.7-flash", "gemini-3.8-flash", "gemini-3.5-flash"],
     # one call without tools: compose an answer from what was gathered
-    "compose": ["openai/gpt-oss-120b", "qwen/qwen3.8-27b", "gemini-2.5-flash",
-                "gemini-3.6-flash"],
+    "compose": ["openai/gpt-oss-120b", "qwen/qwen3.8-27b", "gemini-3.6-flash",
+                "gemini-3.7-flash", "gemini-3.8-flash"],
     # reading each owner message (logic/understanding): needs the strongest model
     # qwen first: the answer's hops start on gpt-oss-120b, and both in one
     # minute of the same model is ~8K tokens - the wall (probe, Sep 29, 2026)
-    "understand": ["qwen/qwen3.8-27b", "openai/gpt-oss-120b", "openai/gpt-oss-20b",
-                   "gemini-3.5-flash", "gemini-3.6-flash"],
+    "understand": ["qwen/qwen3.8-27b", "openai/gpt-oss-120b", "gemini-3.6-flash",
+                   "gemini-3.7-flash"],
     # tiny classification on every owner message: cheap models with big quotas
     "router": ["openai/gpt-oss-20b", "qwen/qwen3.8-27b", "gemini-3.1-flash-lite"],
     "vision": ["gemini-3.6-flash", "gemini-2.5-flash", "gemini-3.8-flash"],
