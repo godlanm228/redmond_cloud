@@ -20,6 +20,12 @@
   },
   "model_limits": {
     "gemini-3.6-flash": {"rpd": 20},
+    "gemini-3.5-flash": {"rpd": 20},
+    "gemini-3.7-flash": {"rpd": 20},
+    "gemini-3.8-flash": {"rpd": 20},
+    "gemini-2.5-flash": {"rpd": 20},
+    "gemini-3.5-flash-lite": {"rpd": 20},
+    "gemini-3.1-flash-lite": {"rpd": 20},
     "openai/gpt-oss-120b": {"rpd": 1000, "tpm": 8000},
     "openai/gpt-oss-20b": {"rpd": 1000, "tpm": 8000},
     "qwen/qwen3.8-27b": {"rpd": 1000, "tpm": 8000}

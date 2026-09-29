@@ -232,3 +232,19 @@ class ReplyTargetExtractionTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class CrisisIsNeverSilentTests(RouterTestBase):
+    """Sep 29, 2026 scenario run: the real «Суисайд» of Sep 4 got «Никто» from
+    the new router model, and the bot said nothing."""
+
+    def test_a_crisis_word_is_routed_even_when_the_model_says_nobody(self):
+        self._llm(agent_router.NOBODY)
+        agent, _ = agent_router.route("Суисайд", agent_router.RouterState(), "key")
+        self.assertIsNotNone(agent, "silence on a crisis message")
+        self.assertEqual(agent.name, "Iris")
+
+    def test_thinking_aloud_may_still_be_left_alone(self):
+        self._llm(agent_router.NOBODY)
+        agent, _ = agent_router.route("хм, ну такое", agent_router.RouterState(), "key")
+        self.assertIsNone(agent)
