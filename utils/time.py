@@ -14,8 +14,24 @@ except Exception:  # pragma: no cover — zoneinfo есть с 3.9, страхо
     OWNER_TZ = None
 
 
+_clock = None  # подмена часов для сценарных прогонов (evals/); в бою None
+
+
 def now_local() -> datetime:
+    if _clock is not None:
+        return _clock()
     return datetime.now(OWNER_TZ) if OWNER_TZ else datetime.now()
+
+
+def set_clock(clock) -> None:
+    """Заменить «сейчас» функцией без аргументов (None — вернуть настоящие часы).
+
+    Нужно, чтобы прогнать реальный диалог в том времени, когда он шёл: пинг
+    «обед» в 20:30, «проснулся в 12» и прочее зависят от часов. Модули берут
+    now_local по имени, поэтому подмена сделана внутри функции, а не заменой
+    самой функции."""
+    global _clock
+    _clock = clock
 
 
 def current_time() -> str:

@@ -43,6 +43,8 @@ config/owner_profile.json
 data/owner_dossier.md
 data/coach/
 data/daily_log.md
+# Scenario runs: real conversations and the bot's replies to them (evals/).
+data/evals/
 
 # OS
 .DS_Store
