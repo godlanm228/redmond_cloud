@@ -109,6 +109,10 @@ def all_models(config: Any) -> List[Tuple[str, str]]:
     их не перечитываем из конфига — это откатило бы замену снятой модели
     преемником, сделанную review_catalog минутой раньше."""
     from utils import llm_gate
+    if not llm_gate.is_configured():
+        # Проверка на старте идёт раньше, чем ResponseGenerator настроит шлюз:
+        # без этого она видела пулы по умолчанию, а не config (29.09.2026).
+        llm_gate.configure_from(config)
     lead = [getattr(config, f, "") for f in ("groq_model", "groq_fallback_model", "gemini_model")]
     seen = dict.fromkeys(m for m in lead + [m for models in llm_gate.pools().values()
                                              for m in models] if m)

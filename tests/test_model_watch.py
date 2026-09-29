@@ -91,3 +91,15 @@ def test_gemini_models_are_checked_without_spending_their_quota(monkeypatch):
     assert status["gemini-2.5-flash-lite"] == model_healthcheck.GONE
     assert status["gemini-9-gone"] == model_healthcheck.GONE
     assert status["openai/gpt-oss-120b"] == model_healthcheck.OK
+
+
+def test_the_start_up_check_sees_the_config_pools():
+    """Sep 29, 2026: the check ran before the generator configured the gate and
+    reviewed the default pools instead of config.json's."""
+    from types import SimpleNamespace
+    from utils import llm_gate, model_healthcheck
+    config = SimpleNamespace(groq_model="", groq_fallback_model="", gemini_model="",
+                             model_pools={"router": ["gemini-3.5-flash-lite"]}, model_limits={})
+    models = [m for _p, m in model_healthcheck.all_models(config)]
+    assert "gemini-3.5-flash-lite" in models
+    assert llm_gate.is_configured()

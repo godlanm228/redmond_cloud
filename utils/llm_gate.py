@@ -112,6 +112,7 @@ _states: Dict[str, ModelState] = {}
 _seeds: Dict[str, Dict[str, int]] = {}
 _pools: Dict[str, List[str]] = {k: list(v) for k, v in DEFAULT_POOLS.items()}
 _loaded = False
+_configured = False
 _last_save = 0.0
 
 
@@ -124,7 +125,9 @@ def configure(known_limits: Optional[Mapping[str, Mapping[str, int]]] = None,
     """Limits known in advance (config 'model_limits'), e.g. {"gemini-3.6-flash":
     {"rpd": 20}} — what the providers report later overrides them; and pools
     (config 'model_pools') over the defaults."""
+    global _configured
     with _lock:
+        _configured = True
         _seeds.clear()
         for model, lim in (known_limits or {}).items():
             _seeds[model] = {k: int(v) for k, v in dict(lim).items() if k in ("rpd", "rpm", "tpm")}
@@ -150,6 +153,10 @@ def configure_from(config: Any) -> None:
     configure(getattr(config, "model_limits", None) or {}, pools)
 
 
+def is_configured() -> bool:
+    return _configured
+
+
 def pool(task: str) -> List[str]:
     with _lock:
         return list(_pools.get(task) or DEFAULT_POOLS.get(task, []))
@@ -169,8 +176,9 @@ def replace_model(old: str, new: str) -> None:
 
 def reset() -> None:
     """Forget everything (tests)."""
-    global _loaded, _last_save
+    global _loaded, _last_save, _configured
     with _lock:
+        _configured = False
         _states.clear()
         _seeds.clear()
         _pools.clear()
