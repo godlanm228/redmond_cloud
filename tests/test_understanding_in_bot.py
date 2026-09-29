@@ -140,3 +140,13 @@ def test_cipher_only_when_addressed():
     agent, _ = agent_router.route("шифр, перезапусти сервис", agent_router.RouterState(), "",
                                   understood=about_cipher)
     assert agent.name == "Cipher", "an explicit address still reaches him"
+
+
+def test_nothing_goes_to_the_diary_in_a_crisis(rg, at_1644):
+    """Run 4 (Sep 30): «Суисайд» → the diary got «Влад сообщил о суициде» - the
+    very interpretation that went there on Sep 4."""
+    u = _u("Суисайд", urgency="crisis", urgency_quote="Суисайд",
+           facts=[dict(quote="Суисайд", fact="Влад сообщил о суициде", when="now", topic="здоровье")])
+    before = len(coach_storage.read_diary(last_n=50))
+    _ask(rg, "Суисайд", u)
+    assert len(coach_storage.read_diary(last_n=50)) == before

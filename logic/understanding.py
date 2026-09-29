@@ -287,6 +287,12 @@ def apply(u: "Understanding", execute=None) -> List[tuple]:
                 args["hours"] = c.hours
         done.append(("mute_notifications", args, run("mute_notifications", args)))
 
+    if u.urgency == "crisis":
+        # В острой ситуации в дневник не пишем ничего: 04.09.2026 туда легло
+        # толкование «суицидальные мысли», и прогон 29.09 повторил это кодом
+        # («Влад сообщил о суициде — «Суисайд»»). Команды — выполняются.
+        return done
+
     recent = set()
     try:
         from logic import coach_storage
