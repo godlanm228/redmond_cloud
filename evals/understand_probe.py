@@ -31,7 +31,9 @@ def _history(conn, before_id: int, day_start: float) -> List[Dict[str, str]]:
     out: List[Dict[str, str]] = []
     for user, bot in reversed(rows):
         if user.lstrip().startswith("("):
-            out.append({"who": "плановое сообщение бота", "text": bot})
+            # As the live bot sees it: the router state carries the agent's name.
+            who = "Newser" if "дайджест" in user else "Iris"
+            out.append({"who": who, "text": bot})
         else:
             out += [{"who": "Влад", "text": user}, {"who": "бот", "text": bot}]
     return out
