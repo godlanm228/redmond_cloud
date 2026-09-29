@@ -312,3 +312,8 @@ def test_the_judge_comes_from_the_other_provider():
     assert not judge.models_for("Iris")[0].startswith("gemini")
     assert judge.models_for("Redmond")[0].startswith("gemini")
     assert not judge.models_for("Iris, Newser")[0].startswith("gemini")
+
+
+def test_the_judge_sees_the_weekday():
+    prompt = judge.build_prompt(_turn(), _res(), [])
+    assert "2026-09-29 14:00 Tue" in prompt

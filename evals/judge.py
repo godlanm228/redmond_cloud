@@ -62,6 +62,16 @@ Answer with JSON only:
 """
 
 
+def when(at: str) -> str:
+    """'2026-09-14T12:01:39+02:00' → '2026-09-14 12:01 Mon'. Without the weekday
+    the judge doubted a correct «понедельник» (Sep 29 re-grade)."""
+    from datetime import datetime
+    try:
+        return datetime.fromisoformat(at).strftime("%Y-%m-%d %H:%M %a")
+    except (TypeError, ValueError):
+        return str(at or "")
+
+
 def build_prompt(turn: Any, res: Any, transcript: Sequence[Dict[str, str]],
                  known_facts: str = "", note: str = "") -> str:
     lines: List[str] = []
@@ -76,14 +86,14 @@ def build_prompt(turn: Any, res: Any, transcript: Sequence[Dict[str, str]],
         lines.append("EARLIER IN THIS CONVERSATION:")
         for t in transcript[-8:]:
             who = "Vlad" if t["kind"] == "owner" else "(scheduled prompt by code)"
-            lines.append(f"[{t.get('at', '')}] {who}: {t['text'][:500]}")
+            lines.append(f"[{when(t.get('at', ''))}] {who}: {t['text'][:500]}")
             if t.get("replies"):
                 lines.append(f"  bot: {t['replies'][:600]}")
         lines.append("")
     if turn.kind == "owner":
-        lines.append(f"NOW [{turn.at}] Vlad writes: {turn.text}")
+        lines.append(f"NOW [{when(turn.at)}] Vlad writes: {turn.text}")
     else:
-        lines.append(f"NOW [{turn.at}] scheduled prompt written by code (Vlad did not "
+        lines.append(f"NOW [{when(turn.at)}] scheduled prompt written by code (Vlad did not "
                      f"write this): {turn.text[:800]}")
     who = res.agent or "nobody"
     lines.append(f"REPLY by {who}: " + (" / ".join(res.replies) if res.replies else "(no reply)"))
