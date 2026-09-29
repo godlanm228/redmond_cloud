@@ -138,7 +138,15 @@ class StickyRehydrationTests(HistoryDbTests):
         self.assertEqual(state.last_agent_name, "Newser")
 
     def test_broken_db_does_not_raise(self):
-        db.set_db_path(Path("/нет/такого/пути/hub.sqlite"))
+        # A folder inside a regular file cannot be created on any OS. Until
+        # 30.09.2026 this was "/нет/такого/пути/hub.sqlite": unwritable on the
+        # VM, but on Windows it is C:\нет\такого\пути, and db.connect() created
+        # it - a real folder with an empty database on the laptop's C: drive
+        # since the test's first run (14.08.2026), and nothing broken to test.
+        blocker = Path(tempfile.mkdtemp()) / "not-a-folder"
+        blocker.write_text("x", encoding="utf-8")
+        self.addCleanup(lambda: (blocker.unlink(missing_ok=True), blocker.parent.rmdir()))
+        db.set_db_path(blocker / "hub.sqlite")
         state = agent_router.get_state({}, CHAT)
         self.assertIsNotNone(state)
 
