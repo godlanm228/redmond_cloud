@@ -79,7 +79,8 @@ def _rg(monkeypatch, fake, compose=""):
     rg._build_system_prompt = lambda ctx: "system"
     rg._build_user_message = lambda ctx: ctx.user_text
     saved = []
-    rg._save_interaction = lambda user, resp, chat_id=0, *a, **kw: saved.append((user, resp))
+    rg._save_interaction = lambda user, resp, chat_id=0, *a, **kw: saved.append(
+        (user, resp, kw.get("history_only", False)))
     calls = []
 
     def fake_tool(name, args, rg=None, session=None):
@@ -137,7 +138,8 @@ def test_all_models_silent_is_an_honest_failure(monkeypatch):
     assert "Модели не ответили" in reply
     assert "📝 Запись #107 в дневник: «Поел»" in reply
     assert reply.failed is True
-    assert saved == [], "отказ записан в историю как реплика разговора"
+    # Слова владельца остаются в истории (29.09.2026), но отказ не идёт в долгую память.
+    assert all(history_only for _u, _r, history_only in saved), "отказ записан в долгую память"
 
 
 def test_provider_outage_mid_loop_does_not_repeat_the_action(monkeypatch):
@@ -178,4 +180,5 @@ def test_distress_gets_a_question_even_when_models_are_down(monkeypatch):
     reply = _ask(rg, text="Суисайд")
     assert reply == distress.FALLBACK_REPLY
     assert calls == [], "в острой ситуации инструменты не вызываются"
-    assert all(t is None for t in fake.tools_seen), "модели предложили инструменты"
+    offered = {d["name"] for t in fake.tools_seen for g in (t or []) for d in g.get("functionDeclarations", [])}
+    assert offered <= {"mute_notifications"}, f"в острой ситуации предложено лишнее: {offered}"

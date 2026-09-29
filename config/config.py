@@ -31,6 +31,10 @@ class AppConfig(BaseModel):
 
     gemini_api_key: str = Field(default="", description="env: REDMOND_GEMINI_API_KEY")
     gemini_model: str = Field(default="gemini-3.6-flash")
+    gemini_fallback_models: List[str] = Field(
+        default=["gemini-3.8-flash", "gemini-2.5-flash"],
+        description="Если основная Gemini перегружена (503) на первом шаге — пробуем эти.",
+    )
     gemini_thinking_level: str = Field(
         default="minimal",
         description="Сколько Gemini 3.x думает в диалоге: minimal/low/medium/high. "

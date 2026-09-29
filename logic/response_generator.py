@@ -645,10 +645,16 @@ class ResponseGenerator:
                     response = f"{response.rstrip()}\n\n{receipt}"
 
             response = self._postprocess(response, ctx)
-            # Отказ — не реплика разговора: в памяти и истории он потом всплывает
-            # как «так было» и учит модель отвечать отказами.
+            # Отказ — не реплика разговора: в долгую память он не идёт, иначе
+            # потом всплывает как «так было». Но слова владельца в историю
+            # попадают всегда: 29.09.2026 его план («довести Redmond до
+            # презентабельности…») ушёл в сбой моделей и пропал, и на «че за
+            # галлюцинации, я же сказал план» Iris нечего было зафиксировать.
             if not ctx.failed:
                 self._save_interaction(user_text, response, chat_id)
+            elif not _is_system_prompt(user_text):
+                self._save_interaction(user_text, "(ответа не было — модели не ответили)",
+                                       chat_id, history_only=True)
             self.last_response = response
             return Reply(response, failed=ctx.failed)
         except Exception:
@@ -750,7 +756,11 @@ class ResponseGenerator:
                 tools_for_agent = forced
         # Острая ситуация: в этом ответе только вопрос, никаких действий.
         if ctx.distress:
-            tools_for_agent = []
+            # Острая ситуация: действий по своей инициативе нет, но прямую
+            # команду владельца выполняем. 29.09.2026 «в больнице лежу, мут до
+            # первого числа» получил только вопрос, и мут пришлось повторять.
+            tools_for_agent = [t for t in tools_for_agent
+                               if t["function"]["name"] == "mute_notifications"]
         # Какой исходный инструмент стоит за каждым tool-сообщением: сжатие
         # берёт «что существенно» по исходному имени, а в истории — групповое.
         legacy_by_call: Dict[str, str] = {}
@@ -983,7 +993,7 @@ class ResponseGenerator:
                 })
                 # Действия, которые реально что-то поменяли: для квитанции и
                 # для того, чтобы другой провайдер не выполнил их второй раз.
-                if fn_name in _STATE_CHANGING_TOOLS and not _tool_result_failed(result):
+                if fn_name in _STATE_CHANGING_TOOLS and not bad_call and not _tool_result_failed(result):
                     ctx.actions.append((fn_name, fn_args, str(result)))
 
         logger.warning("Groq tool-loop hit limit (%d hops)", max_hops)
@@ -1112,7 +1122,11 @@ class ResponseGenerator:
                 tools_for_agent = forced
         # Острая ситуация: в этом ответе только вопрос, никаких действий.
         if ctx.distress:
-            tools_for_agent = []
+            # Острая ситуация: действий по своей инициативе нет, но прямую
+            # команду владельца выполняем. 29.09.2026 «в больнице лежу, мут до
+            # первого числа» получил только вопрос, и мут пришлось повторять.
+            tools_for_agent = [t for t in tools_for_agent
+                               if t["function"]["name"] == "mute_notifications"]
         agent_name = getattr(ctx.agent, "name", "?") if ctx.agent else "?"
         deferred: List[dict] = []
         if tools_for_agent and not ctx.force_tool:
@@ -1146,11 +1160,27 @@ class ResponseGenerator:
                     "mode": "ANY", "allowedFunctionNames": [ctx.force_tool],
                 }}
 
-            data = gemini.generate_contents(
-                contents, system=system, tools=hop_tools, tool_config=tool_config,
-                temperature=temperature, max_tokens=max_tokens, model=model, api_key=api_key,
-                thinking_level=getattr(self.config, "gemini_thinking_level", ""),
-            )
+            # На первом шаге перегруженную модель (503) меняем на запасную из
+            # того же провайдера, а не сразу уходим на Groq с его 8k TPM: 29.09.2026
+            # gemini-3.6-flash отвечала 503 весь день, и каждый ответ падал на
+            # Groq, где лимит кончался за пару сообщений. После первого вызова
+            # инструмента модель не меняем — подпись размышления привязана к ней.
+            candidates = [model] if hop else list(dict.fromkeys(
+                [model] + list(getattr(self.config, "gemini_fallback_models", []) or [])))
+            data = None
+            for candidate in candidates:
+                data = gemini.generate_contents(
+                    contents, system=system, tools=hop_tools, tool_config=tool_config,
+                    temperature=temperature, max_tokens=max_tokens, model=candidate,
+                    api_key=api_key,
+                    thinking_level=getattr(self.config, "gemini_thinking_level", ""),
+                )
+                if data is not None:
+                    if candidate != model:
+                        logger.warning("Gemini %s недоступна — ответила запасная %s",
+                                       model, candidate)
+                        model = candidate
+                    break
             if data is None:
                 # Gemini не ответил (RPD/RPM/5xx/timeout). Уже что-то записали →
                 # ответ составляем по собранному (не на Groq с нуля — переисполнит);
@@ -1230,7 +1260,7 @@ class ResponseGenerator:
                 )}
                 legacy_by_part[id(part)] = fn_name
                 response_parts.append(part)
-                if fn_name in _STATE_CHANGING_TOOLS and not _tool_result_failed(result):
+                if fn_name in _STATE_CHANGING_TOOLS and not bad_call and not _tool_result_failed(result):
                     ctx.actions.append((fn_name, fn_args, str(result)))
 
             contents.append({"role": "user", "parts": response_parts})
@@ -1836,6 +1866,13 @@ class ResponseGenerator:
         if ctx.history:
             parts.append("[Предыдущий диалог]")
             for turn in ctx.history[-4:]:
+                # Плановое сообщение бот пишет сам — промпт кода не реплика
+                # владельца. 29.09.2026 промпт пинга («поздоровайся тепло…»)
+                # стоял здесь как «Я:», и на «Это как?» Iris начала рецензировать
+                # текст пинга («Текст подходит: коротко, без давления…»).
+                if _is_system_prompt(turn.get("user", "")):
+                    parts.append(f"  Ты (сама, по расписанию): {_clip(turn['bot'])}")
+                    continue
                 parts.append(f"  Я: {_clip(turn['user'])}")
                 parts.append(f"  Ты: {_clip(turn['bot'])}")
             parts.append("")
@@ -1900,11 +1937,11 @@ class ResponseGenerator:
             return self.history_by_chat.setdefault(chat_id, [])
 
     def _save_interaction(self, user_text: str, response: str, chat_id: int = 0,
-                          agent: str = "") -> None:
+                          agent: str = "", history_only: bool = False) -> None:
         if not response:
             return
 
-        if self.mem is not None:
+        if self.mem is not None and not history_only:
             try:
                 self.mem.add(user_text, response)
             except Exception as e:

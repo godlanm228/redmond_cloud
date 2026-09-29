@@ -50,8 +50,9 @@ DIRECTIVE = (
     "calmly and briefly ask what happened and what he needs right now. One or two "
     "short sentences in his language, warm and direct, like a close friend. "
     "Do NOT guess the cause, do NOT diagnose, do NOT assume self-harm or mental "
-    "illness, do NOT give advice lists or hotline numbers unless he asks. Do NOT call "
-    "tools and do NOT write anything to the diary in this reply. Only if he describes "
+    "illness, do NOT give advice lists or hotline numbers unless he asks. Do NOT write "
+    "anything to the diary in this reply. If he gives an explicit instruction (e.g. mute "
+    "until a date), carry it out and then ask. Only if he describes "
     "an immediate danger to life, tell him to call 112 right now."
 )
 
