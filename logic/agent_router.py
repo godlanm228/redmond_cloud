@@ -441,6 +441,13 @@ def route(
     # прежний LLM-классификатор.
     if understood is not None and getattr(understood, "addressee", ""):
         chosen_name, research = understood.addressee, bool(understood.research)
+        if chosen_name == "Cipher":
+            # Cipher действует на сервере и тратит подписку Claude — только по
+            # явному обращению (имя, @, реплай; они обработаны выше). Прочтение
+            # отдало ему «ты и шифр два разных бота, поч он отвечал вместо
+            # тебя» — разговор ПРО него (проба 29.09.2026, тот же класс, что 10.09).
+            logger.info("Router: прочтение выбрало Cipher без обращения к нему → Redmond")
+            chosen_name = "Redmond"
     else:
         chosen_name, research = _llm_route(
             text, state.recent_messages, groq_api_key,

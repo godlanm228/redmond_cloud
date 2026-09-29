@@ -127,3 +127,16 @@ def test_the_router_takes_the_addressee_and_never_drops_a_fact():
                 facts=[dict(quote="Курю кальян", fact="Курит кальян", when="now", topic="отдых")])
     agent, _ = agent_router.route("Курю кальян", agent_router.RouterState(), "", understood=kalyan)
     assert agent is not None and agent.name == "Iris", "a fact must not be dropped by silence"
+
+
+def test_cipher_only_when_addressed():
+    """Probe, Sep 29: «Да но ты и шифр два разных бота / Поч он отвечал вместо тебя»
+    was read as addressed to Cipher - it is about him."""
+    from logic import agent_router
+    about_cipher = _u("", addressee="Cipher")
+    agent, _ = agent_router.route("Да но ты и шифр два разных бота\nПоч он отвечал вместо тебя",
+                                  agent_router.RouterState(), "", understood=about_cipher)
+    assert agent.name == "Redmond"
+    agent, _ = agent_router.route("шифр, перезапусти сервис", agent_router.RouterState(), "",
+                                  understood=about_cipher)
+    assert agent.name == "Cipher", "an explicit address still reaches him"
