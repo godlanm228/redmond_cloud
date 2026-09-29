@@ -153,6 +153,22 @@ def _group_schema(group: str, actions: List[str]) -> dict:
     }}
 
 
+def legacy_names(schemas: Iterable[dict]) -> set:
+    """Original tool names behind the schemas offered to the model: a group
+    stands for the actions it lists."""
+    out = set()
+    for s in schemas or []:
+        name = (s.get("function") or {}).get("name", "")
+        if name in GROUPS:
+            actions = (((s["function"].get("parameters") or {}).get("properties") or {})
+                       .get("action") or {}).get("enum") or []
+            mapping = GROUPS[name][1]
+            out |= {mapping[a] for a in actions if a in mapping}
+        elif name:
+            out.add(name)
+    return out
+
+
 def model_tools(allowed: Optional[Iterable[str]] = None,
                 exclude: Iterable[str] = ()) -> List[dict]:
     """Schemas to offer the model. `allowed` lists ORIGINAL tool names (as in
