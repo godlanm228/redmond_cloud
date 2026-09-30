@@ -880,6 +880,7 @@ class ResponseGenerator:
         # Одна на генерацию: помнит, какие записи модель РЕАЛЬНО видела,
         # и не даёт менять запись по номеру, взятому наугад (инцидент 17.08).
         tool_session = ToolSession()
+        tool_session.protect_code_records(ctx.code_actions)
         agent_name = getattr(ctx.agent, "name", "?") if ctx.agent else "?"
         # Не все инструменты сразу: ядро + ближайшие по смыслу, остальное через
         # load_tools (logic/tool_select). Принудительный вызов не трогаем.
@@ -1277,6 +1278,7 @@ class ResponseGenerator:
         # Одна на генерацию: помнит, какие записи модель РЕАЛЬНО видела,
         # и не даёт менять запись по номеру, взятому наугад (инцидент 17.08).
         tool_session = ToolSession()
+        tool_session.protect_code_records(ctx.code_actions)
 
         max_hops = 5
         for hop in range(max_hops):

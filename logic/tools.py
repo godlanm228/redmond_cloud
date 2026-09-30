@@ -876,6 +876,7 @@ class ToolSession:
 
     def __init__(self) -> None:
         self.seen: Dict[str, set] = {}
+        self.protected: Dict[str, set] = {}
 
     def note(self, kind: str, ids: Any) -> None:
         if not kind:
@@ -884,6 +885,22 @@ class ToolSession:
 
     def saw(self, kind: str, rec_id: int) -> bool:
         return int(rec_id) in self.seen.get(kind, set())
+
+    def protect_code_records(self, code_actions: Any) -> None:
+        """Записи, которые код только что сделал со слов владельца из ЭТОГО сообщения.
+
+        30.09.2026: «удали запись о спортзале… я 5 часов занимался разработкой».
+        Код записал новые факты (#110, #111), а модель удалила их вместе со
+        старыми (#107, #108). Свежие слова владельца в том же ответе не удаляются.
+        """
+        for name, _args, result in code_actions or ():
+            kind = RECORD_KIND.get(name, "")
+            if kind:
+                self.protected.setdefault(kind, set()).update(
+                    int(i) for i in _REF_RX.findall(str(result)))
+
+    def is_protected(self, kind: str, rec_id: int) -> bool:
+        return int(rec_id) in self.protected.get(kind, set())
 
 
 # С какой таблицей работает инструмент. Нужно, чтобы номер #3 из дневника
@@ -951,6 +968,26 @@ def _refuse_unseen(name: str, args: Dict[str, Any], session: "ToolSession") -> s
             f"наугад. Сначала {hint}, потом обращайся по настоящему id.")
 
 
+# Инструменты, которые УДАЛЯЮТ запись по номеру.
+DELETING_TOOLS = ("delete_diary_entry", "delete_deadline")
+
+
+def _refuse_protected(name: str, args: Dict[str, Any], session: "ToolSession") -> str:
+    """'' — можно удалять. Иначе отказ: запись код сделал из этого же сообщения."""
+    if name not in DELETING_TOOLS:
+        return ""
+    kind = RECORD_KIND.get(name, "")
+    asked: List[int] = []
+    for f in ADDRESSED_RECORDS.get(name, ()):
+        asked.extend(_ids_from(args.get(f)))
+    fresh = [i for i in asked if session.is_protected(kind, i)]
+    if not fresh:
+        return ""
+    return (f"Не удаляю {', '.join('#' + str(i) for i in fresh)} — это код только что "
+            f"записал со слов владельца из этого же сообщения. Удаляй только старые записи, "
+            f"о которых он просит; остальные номера из запроса обработай отдельным вызовом.")
+
+
 def execute_tool(name: str, args: Dict[str, Any], rg=None,
                  session: Optional["ToolSession"] = None) -> str:
     """Диспетчер tool-вызовов с записью ИСХОДА, а не только вызова.
@@ -981,7 +1018,7 @@ def execute_tool(name: str, args: Dict[str, Any], rg=None,
     # Обращение к существующей записи по номеру — только если модель этот
     # номер видела в этой генерации (см. ToolSession).
     if session is not None:
-        refusal = _refuse_unseen(name, args, session)
+        refusal = _refuse_unseen(name, args, session) or _refuse_protected(name, args, session)
         if refusal:
             logger.warning("Tool refused: %s(%s) → %s", name, args, refusal)
             return refusal
