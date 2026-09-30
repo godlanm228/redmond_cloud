@@ -540,6 +540,9 @@ def _tool_result_failed(result: Any) -> bool:
     когда state-changing tool на самом деле ничего не сделал."""
     if not isinstance(result, str):
         return False
+    from logic.tools import Refused
+    if isinstance(result, Refused):
+        return True
     low = result.lower()
     return any(m in low for m in _TOOL_FAILURE_MARKERS)
 
@@ -583,6 +586,9 @@ class GenerationContext:
     # записал факты, выполнил команды. None — шаг понимания был недоступен.
     understanding: Any = None
     code_actions: List[Tuple[str, Dict[str, Any], str]] = field(default_factory=list)
+    # Какие модели дали ходы этого ответа (по шагу на вызов): без этого в логе
+    # не видно, кто ответил, если отвечала основная модель пула.
+    models: List[str] = field(default_factory=list)
     # Серьёзное, но не острое (больница, обследование): сказать по-человечески.
     attention: bool = False
     # Исходные инструменты, предложенные модели на этом ответе: правила Iris
@@ -752,6 +758,9 @@ class ResponseGenerator:
                 if receipt:
                     response = f"{response.rstrip()}\n\n{receipt}"
 
+            if ctx.models:
+                logger.info("Ответ [%s]: %s", ctx.agent.name if ctx.agent else "Redmond",
+                            " → ".join(dict.fromkeys(ctx.models)))
             response = self._postprocess(response, ctx)
             # Отказ — не реплика разговора: в долгую память он не идёт, иначе
             # потом всплывает как «так было». Но слова владельца в историю
@@ -968,6 +977,7 @@ class ResponseGenerator:
                     if err:
                         hop_errors.append(err)
                 if completion is not None:
+                    ctx.models.append(model)
                     if model != primary_model:
                         # Штатно: у основной не было минуты или она отказала.
                         logger.info("Шаг %d ответила %s (до неё: %s)", hop, model,
@@ -1317,6 +1327,7 @@ class ResponseGenerator:
                         logger.warning("Gemini %s недоступна — ответила запасная %s",
                                        model, candidate)
                         model = candidate
+                    ctx.models.append(model)
                     break
             if data is None:
                 # Gemini не ответил (RPD/RPM/5xx/timeout). Уже что-то записали →

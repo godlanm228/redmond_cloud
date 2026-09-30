@@ -860,6 +860,13 @@ def _validate_args(name: str, args: Dict[str, Any]) -> Tuple[Dict[str, Any], str
     return out, "", notes
 
 
+class Refused(str):
+    """Отказ проверки кода (номер не видела, запись свежая) — указание модели,
+    а не действие. В квитанцию владельцу не идёт: 30.09.2026 под ответом стояло
+    «🗑 Не трогаю #110, #111 — …» рядом с «🗑 Удалила — #110, #111», хотя
+    модель просто сделала шаг, который защита и просила."""
+
+
 class ToolSession:
     """Что модель РЕАЛЬНО видела в этой генерации.
 
@@ -1021,7 +1028,7 @@ def execute_tool(name: str, args: Dict[str, Any], rg=None,
         refusal = _refuse_unseen(name, args, session) or _refuse_protected(name, args, session)
         if refusal:
             logger.warning("Tool refused: %s(%s) → %s", name, args, refusal)
-            return refusal
+            return Refused(refusal)
 
     try:
         result = _dispatch_tool(name, args, rg)
