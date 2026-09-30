@@ -427,6 +427,26 @@ def _is_system_prompt(text: str) -> bool:
     return (text or "").lstrip().startswith("(")
 
 
+_URL_RE = re.compile(r"https?://\S+")
+
+
+def _reply_language_hint(text: str) -> str:
+    """Явная строка о языке ответа, если владелец написал не кириллицей.
+
+    30.09.2026: на «Heute 2 h für Statistik gelernt, morgen geht's ins Gym» Iris
+    ответила по-русски. Общее правило «отвечай на языке пользователя» есть в
+    system, но русская история чата и русский блок «как код понял» перевесили.
+    Строка стоит прямо перед сообщением — ближе всего к генерации.
+    """
+    body = _URL_RE.sub(" ", text or "")
+    latin = sum(1 for ch in body if ch.isalpha() and ch.isascii() or ch in "äöüßÄÖÜ")
+    cyrillic = sum(1 for ch in body if "Ѐ" <= ch <= "ӿ")
+    if latin >= 8 and latin > 2 * cyrillic:
+        return ("[Язык ответа] Это сообщение владелец написал не по-русски. Ответь на языке "
+                "его сообщения: немецкий → по-немецки, английский → по-английски.")
+    return ""
+
+
 class Reply(str):
     """Ответ генерации + признак того, что модель на самом деле не ответила.
 
@@ -1929,6 +1949,11 @@ class ResponseGenerator:
         if ctx.understanding is not None:
             from logic import understanding as understanding_mod
             parts.append(understanding_mod.prompt_block(ctx.understanding, ctx.code_actions))
+            parts.append("")
+
+        hint = _reply_language_hint(ctx.user_text)
+        if hint:
+            parts.append(hint)
             parts.append("")
 
         parts.append(ctx.user_text)
