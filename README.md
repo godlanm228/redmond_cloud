@@ -77,7 +77,7 @@ cache is reused.
 Python 3.12 · `python-telegram-bot` · Groq · Google Gemini · SQLite (FTS5) · APScheduler ·
 Pydantic · pytest · systemd · Oracle Cloud Free Tier
 
-**14,000+ lines of Python · 371 tests · 60 commits · running in production since May 2026**
+**24,000+ lines of Python · 661 tests · 110+ commits · running in production since May 2026**
 
 ## Tests
 
@@ -85,7 +85,7 @@ Pydantic · pytest · systemd · Oracle Cloud Free Tier
 python -m pytest tests/ -q
 ```
 
-371 tests, no network access required — external calls are stubbed at the fixture level.
+661 tests, no network access required — external calls are stubbed at the fixture level.
 CI runs the full suite on every push.
 
 ## Running it locally
@@ -126,7 +126,7 @@ logic/                  agents, router, response generator, tools, vision, diges
 utils/                  SQLite layer, Gemini client, memory, search, migrations
 safety/                 goal manager
 deploy/                 systemd unit, backup script
-tests/                  371 tests
+tests/                  661 tests
 ```
 
 ## License

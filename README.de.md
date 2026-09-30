@@ -81,7 +81,7 @@ der Cache pro Konversation wird wiederverwendet.
 Python 3.12 · `python-telegram-bot` · Groq · Google Gemini · SQLite (FTS5) · APScheduler ·
 Pydantic · pytest · systemd · Oracle Cloud Free Tier
 
-**Über 14.000 Zeilen Python · 371 Tests · 60 Commits · seit Mai 2026 im Produktivbetrieb**
+**Über 24.000 Zeilen Python · 661 Tests · über 110 Commits · seit Mai 2026 im Produktivbetrieb**
 
 ## Tests
 
@@ -89,7 +89,7 @@ Pydantic · pytest · systemd · Oracle Cloud Free Tier
 python -m pytest tests/ -q
 ```
 
-371 Tests, ohne Netzwerkzugriff — externe Aufrufe werden auf Fixture-Ebene gestubbt. Die CI
+661 Tests, ohne Netzwerkzugriff — externe Aufrufe werden auf Fixture-Ebene gestubbt. Die CI
 führt die vollständige Suite bei jedem Push aus.
 
 ## Lokal starten
@@ -131,7 +131,7 @@ logic/                  Agenten, Router, Response Generator, Tools, Vision, Dige
 utils/                  SQLite-Layer, Gemini-Client, Memory, Suche, Migrationen
 safety/                 Goal Manager
 deploy/                 systemd-Unit, Backup-Skript
-tests/                  371 Tests
+tests/                  661 Tests
 ```
 
 ## Lizenz
