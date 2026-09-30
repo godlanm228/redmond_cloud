@@ -66,7 +66,7 @@ PROMPT = """\
  "research": true/false,
  "about": "о чём сообщение, одной фразой",
  "refers_to": "если это ответ или вопрос к предыдущей реплике — к какой и о чём; иначе пусто",
- "facts": [{"quote": "...", "fact": "...", "when": "done|now|plan|habit", "topic": "..."}],
+ "facts": [{"quote": "...", "fact": "...", "when": "done|now|plan|habit", "topic": "...", "diary": true}],
  "commands": [{"quote": "...", "type": "mute|unmute", "until": "", "hours": null, "scope": "all|pings"}],
  "urgency": "none|attention|crisis",
  "urgency_quote": "",
@@ -78,6 +78,7 @@ PROMPT = """\
 - facts — только то, что Влад сам сообщил о своей жизни: что сделал, делает, где находится, как себя чувствует, что съел, что планирует, чем занят. fact — коротко, от третьего лица, по-русски, НЕ добавляя ничего сверх сказанного. Не факты: вопросы, просьбы, команды, мнения о боте, эмоции и реакции на ответы бота («я в ахуе», «класс»), пересказ прошлых реплик бота.
 - when: done — уже сделал/случилось; now — происходит сейчас; plan — намерение, план, «хочу/буду/надо/довести»; habit — регулярно.
 - Нет фактов — пустой список. Никогда не додумывай факт, которого нет в тексте (еду, сон, занятия).
+- diary: true — только событие или состояние его дня, которое пригодится в дневнике через неделю: что сделал, делает или собирается сделать (учёба, работа, спорт, еда, сон, встречи, дела), где он, как себя чувствует. false — всё остальное: поправки к словам бота («это другое имя», «нет, я имел в виду…»), сведения о словах, именах, языке, постоянные данные о нём (фамилия, возраст, где учится — это профиль, не дневник), то, что он просит удалить или исправить.
 - commands — только явные просьбы выключить/включить уведомления бота («мут на 7 дней», «не пиши до понедельника», «можешь писать»). until — дата окончания, если названа, в виде YYYY-MM-DD или YYYY-MM-DDTHH:MM по его времени; hours — если назван срок в часах/днях (дни × 24). scope: all — если просит полную тишину («фул мут», «ничего не присылай»), иначе pings.
 - urgency: crisis — только явная угроза жизни или острая ситуация прямо сейчас (суицид, «не могу дышать», «вызови скорую», сильная боль сейчас). attention — серьёзное, но не острое: больница, болезнь, обследования, плохие новости. none — всё остальное. Нахождение в больнице само по себе — attention, не crisis. Для attention и crisis urgency_quote — дословный фрагмент.
 - addressee: обращение — это имя агента в начале сообщения, через запятую или @ («Айрис, …», «@newser»). Имя внутри текста как тема — НЕ обращение (проект «Redmond Cloud», «шифр отвечал»). Если последняя реплика в разговоре — вопрос агента, а новое сообщение на него отвечает, — тому агенту. Жалоба на ответ агента — тому агенту. Иначе — чья это зона по смыслу. Сообщение о тяжёлом состоянии, боли, больнице — Iris. «Никто» — только если Влад явно думает вслух и не ждёт ответа; вопрос, просьба или рассказ о себе — всегда агенту.
@@ -92,6 +93,10 @@ class Fact:
     fact: str
     when: str = "now"
     topic: str = ""
+    # An event of his day goes to the diary; a correction of the bot or a
+    # stable fact about him does not. 30.09.2026 «Валик это совсем другое имя»
+    # (his correction of Redmond) and his surname were written as diary entries.
+    diary: bool = True
 
 
 @dataclass
@@ -178,7 +183,8 @@ def parse(raw: str, message: str) -> Optional[Understanding]:
             continue
         when = str(f.get("when") or "now").lower()
         u.facts.append(Fact(quote=quote, fact=text[:300], when=when if when in WHEN else "now",
-                            topic=str(f.get("topic") or "")[:40]))
+                            topic=str(f.get("topic") or "")[:40],
+                            diary=f.get("diary") not in (False, "false", "False", 0)))
 
     for c in data.get("commands") or []:
         if not isinstance(c, dict):
@@ -327,6 +333,8 @@ def apply(u: "Understanding", execute=None) -> List[tuple]:
     except Exception:  # noqa: BLE001 — without the check a repeat is written twice, not lost
         logger.debug("diary read for repeats failed", exc_info=True)
     for f in u.facts:
+        if not f.diary:
+            continue
         text = _diary_text(f)
         if not text or normalize(text) in recent:
             continue
@@ -354,10 +362,11 @@ def prompt_block(u: "Understanding", done: Sequence[tuple] = ()) -> str:
     if u.refers_to:
         lines.append(f"  относится к: {u.refers_to}")
     for f in u.facts:
-        lines.append(f"  факт ({WHEN_TAG.get(f.when, f.when)}): {f.fact}")
+        tail = "" if f.diary else " — в дневник НЕ записан"
+        lines.append(f"  факт ({WHEN_TAG.get(f.when, f.when)}): {f.fact}{tail}")
     for name, _args, result in done:
         lines.append(f"  сделано кодом ({name}): {' '.join(str(result).split())[:200]}")
-    lines.append("  Правила: факты из этого сообщения код уже записал в дневник — сам их не "
+    lines.append("  Правила: события из этого сообщения код уже записал в дневник — сам их не "
                  "пиши. Сроки, даты и номера записей бери только из строк «сделано кодом», "
                  "своими словами не пересказывай. План — это план, а не сделанное.")
     return "\n".join(lines)

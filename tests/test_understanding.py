@@ -88,3 +88,35 @@ def test_short_quotes_get_their_reading_in_the_diary():
     assert und._diary_text(und.Fact(quote="Чилю", fact="Отдыхает")) == "Отдыхает — «Чилю»"
     assert und._diary_text(und.Fact(quote="Поел овсянку", fact="поел овсянку")) == "Поел овсянку"
     assert und._diary_text(und.Fact(quote="Снова болит живот", fact="болит живот")) == "Снова болит живот"
+
+
+VALIK = "чушь. Валик это совсем другое имя.\nи на русском моя фамилия будет Кулагин."
+
+
+def test_a_correction_and_a_surname_stay_out_of_the_diary():
+    """30.09.2026 his correction of Redmond and his surname became diary entries."""
+    u = und.parse(_raw(addressee="Redmond", facts=[
+        {"quote": "Валик это совсем другое имя", "fact": "Валик — другое имя",
+         "when": "now", "topic": "имя", "diary": False},
+        {"quote": "на русском моя фамилия будет Кулагин", "fact": "фамилия по-русски Кулагин",
+         "when": "now", "topic": "профиль", "diary": False},
+    ]), VALIK)
+    assert len(u.facts) == 2 and not any(f.diary for f in u.facts)
+    calls = []
+    und.apply(u, execute=lambda name, args: calls.append(name) or "ok")
+    assert calls == []
+    block = und.prompt_block(u)
+    assert block.count("в дневник НЕ записан") == 2
+
+
+def test_an_event_of_his_day_is_recorded():
+    msg = "Heute 2 h für Statistik gelernt, morgen geht's ins Gym"
+    u = und.parse(_raw(facts=[
+        {"quote": "Heute 2 h für Statistik gelernt", "fact": "2 часа учил статистику",
+         "when": "done", "topic": "учёба", "diary": True},
+        # A model that leaves the field out keeps the old behaviour: recorded.
+        {"quote": "morgen geht's ins Gym", "fact": "завтра в зал", "when": "plan", "topic": "спорт"},
+    ]), msg)
+    recorded = []
+    und.apply(u, execute=lambda name, args: recorded.append(args["text"]) or "ok")
+    assert recorded == ["Heute 2 h für Statistik gelernt", "Morgen geht's ins Gym"]
