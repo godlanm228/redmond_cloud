@@ -475,7 +475,8 @@ def process(raw_bytes: bytes, name: str, owner_words: Sequence[str],
                                         else " — спроси позже «что в файле»."))
     if reading["summary"]:
         lines.append(reading["summary"])
-    lines += [f"• {f}" for f in reading["key_facts"]]
+    if not content.calendar:  # у календаря структуру показывает код, факты её повторяли
+        lines += [f"• {f}" for f in reading["key_facts"]]
     if content.note.strip():
         lines.append(content.note.strip())
     if content.calendar and "schedule" not in reading["do_now"] and record.get("schedule_items"):

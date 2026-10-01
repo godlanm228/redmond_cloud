@@ -200,7 +200,7 @@ def _titles(d):
 
 def test_extend_to_a_date_with_a_christmas_break(october):
     out = tools.execute_tool("extend_schedule", {
-        "until": "2027-02-12", "breaks": [{"from": "2026-12-23", "to": "2027-01-05"}]})
+        "until": "2027-02-12", "breaks": "2026-12-23..2027-01-05"})
     assert "с 02.11.2026 по 12.02.2027" in out and "Без пар: 23.12–05.01" in out
     assert "Diskrete Mathematik - Vorlesung" in _titles(date(2026, 11, 2))
     assert ws.study_slots(date(2026, 12, 28)) == [], "Рождество — без пар"
@@ -212,7 +212,7 @@ def test_extend_to_a_date_with_a_christmas_break(october):
 
 
 def test_extend_with_no_end_until_he_says_stop(october):
-    out = tools.execute_tool("extend_schedule", {"until": None, "breaks": []})
+    out = tools.execute_tool("extend_schedule", {"until": None, "breaks": "none"})
     assert "без конца" in out and "Без перерывов" in out
     assert ws.study_slots(date(2027, 6, 7))
     stop = tools.execute_tool("stop_schedule_extension", {"last_day": "2026-12-18"})
@@ -221,7 +221,7 @@ def test_extend_with_no_end_until_he_says_stop(october):
 
 
 def test_extending_again_replaces_not_doubles(october):
-    tools.execute_tool("extend_schedule", {"until": "2027-02-12", "breaks": []})
+    tools.execute_tool("extend_schedule", {"until": "2027-02-12", "breaks": "none"})
     once = len(ws.study_slots(date(2026, 11, 2)))
     tools.execute_tool("extend_schedule", {"until": "2026-12-18"})
     assert once and len(ws.study_slots(date(2026, 11, 2))) == once
@@ -243,7 +243,7 @@ def test_an_end_before_the_file_ends_is_refused_honestly(october):
 
 
 def test_undoing_the_file_takes_its_extension_too(october):
-    tools.execute_tool("extend_schedule", {"until": "2027-02-12", "breaks": []})
+    tools.execute_tool("extend_schedule", {"until": "2027-02-12", "breaks": "none"})
     tools.execute_tool("undo_file_items", {})
     assert ws.study_slots(date(2026, 11, 2)) == [] and ws.study_slots(date(2026, 10, 5)) == []
     assert _titles(date(2026, 10, 5)) == ["Настольный теннис"]
@@ -283,8 +283,17 @@ def test_the_day_state_says_how_far_the_schedule_goes(october):
     from logic.priorities import build_day_context
     assert "по 30.10.2026" in build_day_context() and "не продлено" in build_day_context()
     tools.execute_tool("extend_schedule", {
-        "until": "2027-02-12", "breaks": [{"from": "2026-12-23", "to": "2027-01-05"}]})
+        "until": "2027-02-12", "breaks": "2026-12-23..2027-01-05"})
     state = build_day_context()
     assert "продлено еженедельно до 12.02.2027" in state and "без пар 23.12.2026–05.01.2027" in state
     tools.execute_tool("undo_file_items", {})
     assert "продлено" not in build_day_context().replace("не продлено", "")
+
+
+def test_breaks_come_as_text_and_several_are_fine(october):
+    out = tools.execute_tool("extend_schedule", {
+        "until": "2027-02-12", "breaks": "2026-12-23..2027-01-05; 2027-02-01..2027-02-03"})
+    assert "Без пар: 23.12–05.01, 01.02–03.02" in out
+    assert ws.study_slots(date(2027, 2, 1)) == [] and ws.study_slots(date(2027, 2, 8))
+    bad = tools.execute_tool("extend_schedule", {"until": "2027-02-12", "breaks": "после сессии"})
+    assert "не разобрал" in bad

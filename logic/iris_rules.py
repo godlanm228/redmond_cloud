@@ -114,7 +114,7 @@ MODULES = [
         "- An end you do not KNOW (конец семестра, экзамены, «до каникул», any event): take",
         "  its date from the conversation; if it is not there — ask him, don't guess.",
         "- Breaks (каникулы, Projektwoche, праздники) he or the conversation named → breaks.",
-        "  Over Christmas the tool needs breaks decided: his dates, or [] if he says none —",
+        "  Over Christmas the tool needs breaks decided: his dates, or 'none' if he says none —",
         "  not known → ask him once (the tool refuses otherwise).",
         "- After extending, say the exact range and the breaks in one line.",
         "- «стоп / хватит / дальше без пар с X» → stop_schedule_extension(last_day).",

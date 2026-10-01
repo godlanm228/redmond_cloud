@@ -653,13 +653,10 @@ TOOL_SCHEMAS = [
                     "until": {"type": ["string", "null"],
                               "description": "YYYY-MM-DD last day; null = no end"},
                     "breaks": {
-                        "type": ["array", "null"],
-                        "description": "Days without classes. Over Christmas this must be "
-                                       "decided: his dates, or [] if he said there is no break",
-                        "items": {"type": "object", "properties": {
-                            "from": {"type": "string", "description": "YYYY-MM-DD"},
-                            "to": {"type": "string", "description": "YYYY-MM-DD"}},
-                            "required": ["from", "to"]},
+                        "type": ["string", "null"],
+                        "description": "Days without classes: 'YYYY-MM-DD..YYYY-MM-DD', several "
+                                       "separated by ';'. 'none' if he said there is no break. "
+                                       "Over Christmas this must be decided — not known: ask him",
                     },
                     "reference_date": {"type": ["string", "null"],
                                        "description": "A day of the week to use as the "
@@ -1604,13 +1601,12 @@ def _tool_extend_schedule(args: Dict[str, Any]) -> str:
         until = _parse_day(args["until"])
         if until is None:
             return f"Дата «{args['until']}» не в формате YYYY-MM-DD — не продлено."
-    breaks = []
-    breaks_said = "breaks" in args  # [] = «перерыва нет»; не передано = не спрошено
-    for b in args.get("breaks") or []:
-        a, z = _parse_day((b or {}).get("from")), _parse_day((b or {}).get("to"))
-        if a is None or z is None or z < a:
-            return f"Каникулы {b} — нужны from/to в формате YYYY-MM-DD — не продлено."
-        breaks.append((a, z))
+    # Не передано — не спрошено; 'none' — он сказал, что перерыва нет.
+    breaks_said = args.get("breaks") not in (None, "")
+    try:
+        breaks = _parse_breaks(args.get("breaks"))
+    except ValueError as e:
+        return f"Каникулы не разобрал ({e}) — не продлено. Формат: YYYY-MM-DD..YYYY-MM-DD."
     ref = _parse_day(args.get("reference_date")) if args.get("reference_date") else None
     if not breaks_said and _crosses_christmas(until):
         # Правило владельца: не указано и не очевидно — спросить. Пары через
@@ -1636,6 +1632,30 @@ def _tool_extend_schedule(args: Dict[str, Any]) -> str:
         lines.append("Каникулы не указаны — пары стоят и на праздниках; если есть перерыв, "
                      "спроси его даты.")
     return "\n".join(lines)
+
+
+def _parse_breaks(raw: Any) -> List[Tuple[date, date]]:
+    """'2026-12-23..2027-01-05; 2027-02-01..2027-02-03' → [(from, to)].
+    Строкой, а не списком объектов: 01.10.2026 gpt-oss прислал элемент строкой
+    вместо объекта, и Groq отклонил весь вызов по схеме. Список тоже принимаем."""
+    if raw in (None, ""):
+        return []
+    items = raw if isinstance(raw, list) else re.split(r"[;,\n]+", str(raw))
+    out = []
+    for item in items:
+        if isinstance(item, dict):
+            item = f"{item.get('from')}..{item.get('to')}"
+        text = str(item).strip()
+        if not text or text.lower() in ("none", "нет", "[]", "no"):
+            continue
+        days = re.findall(r"\d{4}-\d{2}-\d{2}", text)
+        if len(days) != 2:
+            raise ValueError(f"«{text}»")
+        a, z = _parse_day(days[0]), _parse_day(days[1])
+        if a is None or z is None or z < a:
+            raise ValueError(f"«{text}»")
+        out.append((a, z))
+    return out
 
 
 def _crosses_christmas(until: Optional[date]) -> bool:
