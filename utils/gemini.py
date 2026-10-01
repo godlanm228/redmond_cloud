@@ -22,7 +22,7 @@ utils/llm_gate: заблокированную модель не вызывае�
 
 Думание отключается во всех вызовах: модель по умолчанию «думает» и молча
 сжигает выходные токены на рассуждения — для наших коротких задач это вред.
-Параметр разный по семействам (см. _thinking_config): 2.5 понимает только
+Параметр разный по семействам (см. _thinking_for): 2.5 понимает только
 thinkingBudget, 3.x — только thinkingLevel, и каждое отвечает 400 на чужое.
 """
 
@@ -46,20 +46,6 @@ def api_key_from_env() -> str:
     return os.getenv("REDMOND_GEMINI_API_KEY", "")
 
 
-def _thinking_config(model: str) -> Dict[str, Any]:
-    """Как выключить размышления у конкретного семейства моделей.
-
-    Проверено на живом API 13.08.2026:
-      • 3.x + thinkingBudget=0 → 400 INVALID_ARGUMENT; без конфига думает всегда
-        и съедает весь maxOutputTokens (ответ приходит пустым, finish=MAX_TOKENS)
-      • 2.5 + thinkingLevel   → 400 «Thinking level is not supported for this model»
-    Незнакомое семейство → thinkingBudget (поведение до 3.x, безопасный дефолт).
-    Модель, которая сама сказала, что minimal не умеет, получает свой минимум
-    (_LEVEL_FLOOR).
-    """
-    return _thinking_for(model, "")[0]
-
-
 # Сколько выходных токенов добавить сверх ответа, если модели разрешено думать.
 # Размышления тратят тот же maxOutputTokens: без запаса ответ приходит пустым
 # (finish=MAX_TOKENS), что 13.08.2026 и заставило выключить думание совсем.
@@ -78,7 +64,13 @@ _LEVEL_FLOOR: Dict[str, str] = {}
 
 def _thinking_for(model: str, level: str) -> Tuple[Dict[str, Any], int]:
     """(thinkingConfig, доп. токены). Уровень применим только к 3.x; пусто —
-    самый низкий, который модель принимает."""
+    самый низкий, который модель принимает.
+
+    Проверено на живом API 13.08.2026:
+      • 3.x + thinkingBudget=0 → 400 INVALID_ARGUMENT; без конфига думает всегда
+        и съедает весь maxOutputTokens (ответ приходит пустым, finish=MAX_TOKENS)
+      • 2.5 + thinkingLevel   → 400 «Thinking level is not supported for this model»
+    Незнакомое семейство → thinkingBudget (поведение до 3.x, безопасный дефолт)."""
     model = model or DEFAULT_MODEL
     if not model.startswith("gemini-3"):
         return {"thinkingBudget": 0}, 0

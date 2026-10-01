@@ -95,9 +95,8 @@ class ShiftApplyResult:
 
 _DAY_NAMES = ["пн", "вт", "ср", "чт", "пт", "сб", "вс"]
 
-# Дорога (мин): работа — самокат от дома; универ — дом → Essen Hbf → SB16 (~34 мин) → кампус.
+# Дорога на работу (мин): самокат от дома.
 WORK_COMMUTE_MIN = 20
-UNI_COMMUTE_MIN = 60
 
 # Учебное расписание живёт в таблице `timetable`, НЕ в коде.
 #
@@ -205,7 +204,7 @@ def add_event(title: str, kind: str, start: str = "", end: str = "", *,
 
 def remove_event(row_id: int, on: date) -> str:
     """Убрать строку: разовую — удалить; еженедельную — закончить серию днём
-    раньше `on` (история «что действовало» остаётся, как у expire_timetable).
+    раньше `on` (история «что действовало» остаётся).
     Возвращает, что сделано."""
     row = db.query_one("SELECT * FROM timetable WHERE id=?", (int(row_id),))
     if row is None:
@@ -436,19 +435,6 @@ def set_timetable(entries: List[Tuple[int, str, str, str, str]], valid_from: str
     return n
 
 
-def expire_timetable(valid_to: str, source: str = "manual") -> int:
-    """Закрыть всё бессрочно действующее расписание датой valid_to.
-
-    Это «у меня каникулы» на языке данных: строки остаются, но перестают
-    действовать со следующего дня.
-    """
-    cur = db.execute(
-        "UPDATE timetable SET valid_to=?, source=? WHERE valid_to IS NULL AND date IS NULL",
-        (valid_to, source),
-    )
-    return cur.rowcount or 0
-
-
 def timetable_rows() -> List[Dict[str, Any]]:
     """Всё расписание целиком (для диагностики и ответа «что у меня записано»)."""
     return [dict(r) for r in db.query(
@@ -481,7 +467,7 @@ def seed_timetable_if_empty() -> int:
     logger.info(
         "Расписание перенесено из кода в таблицу timetable: %d строк, "
         "срок действия %s — %s (закрыто, владелец в каникулах). "
-        "Границы — допущения, правятся через set_timetable/expire_timetable.",
+        "Границы — допущения, правятся данными (timetable.valid_from/valid_to).",
         n, SEED_VALID_FROM, SEED_VALID_TO,
     )
     return n
@@ -587,25 +573,9 @@ def log_shift_event(date_str: str, action: str, source: str,
     )
 
 
-def shift_history(date_str: str) -> List[Dict[str, Any]]:
-    """История изменений по дате — для ответа «почему тут эта смена»."""
-    return [
-        {"ts": r["ts"], "action": r["action"], "source": r["source"],
-         "reason": r["reason"]}
-        for r in db.query(
-            "SELECT * FROM shift_events WHERE date=? ORDER BY id", (date_str,))
-    ]
-
-
 def get_shift(d: date, at: Optional[datetime] = None) -> Optional[Dict[str, Any]]:
     """Действующая смена дня, важная в момент `at`. Все смены дня — get_shifts()."""
     return _relevant(get_shifts(d), at)
-
-
-def save_shifts(items: List[Dict[str, Any]]) -> int:
-    """Совместимая обёртка: только количество сохранённого.
-    Конфликты видит apply_shifts — используй его, если надо о них сообщить."""
-    return apply_shifts(items).saved
 
 
 def apply_shifts(items: List[Dict[str, Any]]) -> ShiftApplyResult:
@@ -634,7 +604,7 @@ def apply_shifts(items: List[Dict[str, Any]]) -> ShiftApplyResult:
     updated = now_local().isoformat(timespec="minutes")
     with db.transaction() as conn:
         for it in items:
-            d, start, end = it.get("date"), it.get("start"), it.get("end")
+            d = it.get("date")
             if not d or not re.match(r"^\d{4}-\d{2}-\d{2}$", str(d)):
                 continue
             rows = [_shift_row(r) for r in conn.execute(

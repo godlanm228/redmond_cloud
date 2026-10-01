@@ -1,4 +1,3 @@
-import json
 import os
 import sys
 import tempfile
@@ -20,7 +19,7 @@ if "requests" not in sys.modules:
 
 from logic import coach_storage, pings
 from logic.tools import execute_tool
-from logic.week_schedule import get_shift, get_shift_record, save_shifts
+from logic.week_schedule import apply_shifts, get_shift, get_shift_record
 from utils.time import OWNER_TZ
 
 
@@ -50,7 +49,7 @@ class ScheduleToolTests(unittest.TestCase):
         self.assertEqual(coach_storage.read_diary(last_n=1)[0]["tags"], ["работа"])
 
     def test_cancel_shift_hides_it_from_active_schedule(self):
-        save_shifts([{"date": "2026-07-06", "start": "17:00", "end": "23:00"}])
+        apply_shifts([{"date": "2026-07-06", "start": "17:00", "end": "23:00"}])
 
         result = execute_tool(
             "set_work_shift_status",
@@ -108,7 +107,7 @@ class DayTickerTests(unittest.TestCase):
     def test_shift_confirmation_for_legacy_shift_only_once(self):
         self.fixed_now = datetime(2026, 7, 8, 15, 0, tzinfo=OWNER_TZ)
         self._mark_owner_seen_and_fed()
-        save_shifts([{
+        apply_shifts([{
             "date": "2026-07-08",
             "start": "17:00",
             "end": "23:00",

@@ -6,7 +6,6 @@ shifts=5». Эти тесты фиксируют, что теперь сохра
 модели, и что из него в итоге записали.
 """
 
-import json
 import os
 import sys
 import tempfile
@@ -68,12 +67,12 @@ class SaveTests(ArchiveBase):
         first = vision_archive.save(b"same", FOOD)
         second = vision_archive.save(b"same", FOOD)
         self.assertEqual(first, second)
-        self.assertEqual(vision_archive.stats()["records"], 1)
+        self.assertEqual(db.query_one("SELECT COUNT(*) c FROM vision_results")["c"], 1)
 
     def test_different_photos_are_separate(self):
         vision_archive.save(b"one", FOOD)
         vision_archive.save(b"two", SCHEDULE)
-        self.assertEqual(vision_archive.stats()["records"], 2)
+        self.assertEqual(db.query_one("SELECT COUNT(*) c FROM vision_results")["c"], 2)
 
     def test_empty_bytes_are_ignored(self):
         self.assertIsNone(vision_archive.save(b"", FOOD))
@@ -142,11 +141,6 @@ class SearchTests(ArchiveBase):
         self.assertTrue(found)
         self.assertEqual(found[0]["kind"], "other")
 
-    def test_label_is_searchable(self):
-        rec_id = vision_archive.save(b"four", OTHER)
-        vision_archive.set_label(rec_id, "зарплата за август")
-        found = vision_archive.search("зарплата")
-        self.assertTrue(any(r["id"] == rec_id for r in found))
 
     def test_nothing_found_gives_empty(self):
         self.assertEqual(vision_archive.search("зубоврачебный кабинет"), [])
@@ -182,12 +176,6 @@ class RetentionTests(ArchiveBase):
         finally:
             vision_archive.MAX_DIR_BYTES = original
 
-    def test_stats_report_files_and_bytes(self):
-        vision_archive.save(b"12345", FOOD)
-        stats = vision_archive.stats()
-        self.assertEqual(stats["records"], 1)
-        self.assertEqual(stats["files"], 1)
-        self.assertGreater(stats["bytes"], 0)
 
 
 class FindPhotoToolTests(ArchiveBase):

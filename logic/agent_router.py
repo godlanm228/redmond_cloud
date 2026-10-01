@@ -27,16 +27,14 @@ Smart router — выбирает агента когда нет явного @-
 from __future__ import annotations
 
 import logging
-import os
 import re
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
-import requests
 
 from utils import failures
 
-from logic.agents import (AGENTS, REDMOND, AgentConfig, agent_by_name,
+from logic.agents import (AGENTS, agent_by_name,
                           agent_by_username, default_agent, find_by_trigger)
 
 logger = logging.getLogger(__name__)

@@ -18,7 +18,6 @@
 
 import logging
 
-import pytest
 
 from utils import failures
 

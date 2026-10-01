@@ -110,14 +110,17 @@ class ConcurrentMutationTests(StorageBase):
         self.assertEqual(errors, [])
         self.assertEqual(len(coach_storage.read_diary(last_n=100)), n)
 
-    def test_parallel_gemini_bump_counts_every_call(self):
+    def test_parallel_read_modify_write_loses_nothing(self):
+        """Счётчик под транзакцией: 20 параллельных инкрементов — 20, а не 2
+        (так было на JSON и на отложенном BEGIN, см. utils/db.transaction)."""
         n = 20
-        threads = [threading.Thread(target=coach_storage.gemini_bump) for _ in range(n)]
+        threads = [threading.Thread(target=coach_storage.next_style_index, args=(10 ** 6,))
+                   for _ in range(n)]
         for t in threads:
             t.start()
         for t in threads:
             t.join()
-        self.assertEqual(coach_storage.gemini_count_today(), n)
+        self.assertEqual(coach_storage.next_style_index(10 ** 6), n)
 
     def test_parallel_deadline_adds_get_unique_ids(self):
         """Сквозной id не должен выдаваться дважды под нагрузкой."""

@@ -66,6 +66,14 @@ TIMETABLE = [
 ]
 
 
+def _import(text):
+    """Календарь целиком кодом: разбор → классы → запись → квитанция."""
+    parsed = ci.parse(text)
+    unplaced = ci.classify(parsed.events, university=parsed.university)
+    report = ci.apply(parsed.events, origin=parsed.origin, source="calendar", unplaced=unplaced)
+    return ci.describe(parsed.name, parsed.events, report, parsed.past, parsed.truncated)
+
+
 @pytest.fixture
 def today(monkeypatch):
     from datetime import datetime
@@ -225,7 +233,7 @@ def test_a_crashing_model_does_not_lose_the_import():
 
 def test_the_owners_file_lands_as_classes_with_the_project_week_left_empty(today):
     text = documents.inspect(campusnet_ics(TIMETABLE), "x.ics").text
-    receipt = ci.import_calendar_text(text)
+    receipt = _import(text)
 
     monday = ws.study_slots(date(2026, 10, 5))
     assert [s[:2] for s in monday] == [("12:20", "14:00"), ("14:05", "15:45")], \
@@ -239,19 +247,19 @@ def test_the_owners_file_lands_as_classes_with_the_project_week_left_empty(today
 
 def test_sending_the_same_export_again_does_not_duplicate(today):
     text = documents.inspect(campusnet_ics(TIMETABLE), "x.ics").text
-    ci.import_calendar_text(text)
-    ci.import_calendar_text(text)
+    _import(text)
+    _import(text)
     rows = db.query("SELECT COUNT(*) c FROM timetable WHERE date IS NOT NULL")
     assert rows[0]["c"] == len(TIMETABLE)
 
 
 def test_a_newer_export_removes_a_cancelled_class_but_nothing_from_other_calendars(today):
-    ci.import_calendar_text(documents.decode_text(campusnet_ics(TIMETABLE)))
+    _import(documents.decode_text(campusnet_ics(TIMETABLE)))
     ws.add_event("Tennis", "sport", "20:00", "21:30", weekly_from=date(2026, 10, 5))
     ws.add_event("Zahnarzt", "other", "09:00", "10:00", on=date(2026, 10, 12))
 
     without_b1 = [e for e in TIMETABLE if "UID:b1" not in e]
-    ci.import_calendar_text(documents.decode_text(campusnet_ics(without_b1)))
+    _import(documents.decode_text(campusnet_ics(without_b1)))
 
     titles = [r["title"] for r in ws.day_events(date(2026, 10, 12))]
     assert "Diskrete Mathematik - Vorlesung" not in titles, "отменённая пара должна уйти"
@@ -261,7 +269,7 @@ def test_a_newer_export_removes_a_cancelled_class_but_nothing_from_other_calenda
 def test_shift_events_from_a_calendar_go_to_shifts(today):
     events = [_event("20261007", "1700", "2300", "Spätschicht", "Bar", "s1")]
     text = documents.decode_text(campusnet_ics(events)).replace("CampusNet", "Dienstplan")
-    ci.import_calendar_text(text)
+    _import(text)
     shifts = ws.get_shifts(date(2026, 10, 7))
     assert [(s["start"], s["end"], s["source"]) for s in shifts] == [("17:00", "23:00", "calendar")]
     assert ws.day_events(date(2026, 10, 7)) == []
@@ -284,5 +292,5 @@ def test_screenshot_events_take_the_same_path_and_a_resent_day_replaces_itself(t
 
 def test_the_receipt_shows_the_weekly_pattern_not_every_event(today):
     text = documents.decode_text(campusnet_ics(TIMETABLE))
-    receipt = ci.import_calendar_text(text)
+    receipt = _import(text)
     assert "пн 12:20–14:00 Diskrete Mathematik - Vorlesung ×3" in receipt

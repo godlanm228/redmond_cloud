@@ -36,7 +36,6 @@
   "groq_whisper_model": "whisper-large-v3-turbo",
 
   "supergoals_file": "config/supergoals.json",
-  "personality_profile": "config/personality_profile.json",
   "owner_profile": "config/owner_profile.json",
 
   "baseline_db_path": "data/memory.sqlite",

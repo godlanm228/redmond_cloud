@@ -105,17 +105,6 @@ class DaySituation:
     def has_work_today(self) -> bool:
         return "работа" in self.tags
 
-    @property
-    def has_meal_today(self) -> bool:
-        return "питание" in self.tags
-
-    @property
-    def has_training_today(self) -> bool:
-        return "спорт" in self.tags
-
-    @property
-    def has_study_today(self) -> bool:
-        return bool({"учёба", "учеба"} & self.tags)
 
     def last_ping_at(self) -> Optional[datetime]:
         if not self.pings:

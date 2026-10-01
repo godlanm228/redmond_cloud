@@ -11,7 +11,7 @@ model check sees them.
 from __future__ import annotations
 
 import logging
-from typing import List, Optional, Sequence, Tuple, Union
+from typing import List, Sequence, Tuple, Union
 
 from utils import llm_gate
 

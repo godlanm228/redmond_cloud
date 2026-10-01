@@ -29,11 +29,21 @@ from logic.week_schedule import (
     get_shift_record,
     pending_conflicts,
     resolve_pending_conflicts,
-    save_shifts,
     set_conflict_policy,
-    shift_history,
 )
 from utils import db
+
+def save_shifts(items):
+    """Сколько записано — как в старом save_shifts (снят 01.10.2026)."""
+    return apply_shifts(items).saved
+
+
+def shift_history(date_str):
+    """Журнал смен по дате — для проверок «почему тут эта смена»."""
+    return [dict(r) for r in db.query(
+        "SELECT ts, action, source, reason FROM shift_events WHERE date=? ORDER BY id",
+        (date_str,))]
+
 
 
 class GoalTests(unittest.TestCase):
@@ -332,7 +342,6 @@ class DayStateAndPresenceTests(unittest.TestCase):
         self.assertIsNotNone(first)
         self.assertIsNone(second)
         self.assertEqual(first["tags"], ["сон"])
-        self.assertTrue(coach_storage.woke_today())
         self.assertEqual(coach_storage.wake_time_today(), "11:05")
         self.assertEqual(len(coach_storage.read_diary()), 1)
 
@@ -341,7 +350,7 @@ class DayStateAndPresenceTests(unittest.TestCase):
         coach_storage.now_local = lambda: real().replace(hour=3)
         try:
             self.assertIsNone(coach_storage.log_wake_if_first())
-            self.assertFalse(coach_storage.woke_today())
+            self.assertIsNone(coach_storage.wake_time_today())
         finally:
             coach_storage.now_local = real
 
@@ -390,16 +399,6 @@ class CountersTests(unittest.TestCase):
         self.assertTrue(coach_storage.radar_pinged(7))
         self.assertFalse(coach_storage.radar_pinged(8))
 
-    def test_gemini_counter_increments(self):
-        for expected in (1, 2, 3):
-            self.assertEqual(coach_storage.gemini_bump(), expected)
-        self.assertEqual(coach_storage.gemini_count_today(), 3)
-
-    def test_gemini_counter_resets_on_new_date(self):
-        coach_storage.gemini_bump()
-        db.kv_set("gemini_usage", {"date": "2020-01-01", "count": 500})
-        self.assertEqual(coach_storage.gemini_count_today(), 0)
-        self.assertEqual(coach_storage.gemini_bump(), 1)
 
 
 class WeekPlanTests(unittest.TestCase):

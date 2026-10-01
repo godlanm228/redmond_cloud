@@ -346,64 +346,10 @@ class MemoryStore:
             for r in cursor
         ]
 
-    def fetch(self, indices: List[int]) -> List[str]:
-        if not indices:
-            return []
-        placeholders = ",".join("?" * len(indices))
-        cursor = self.conn.execute(
-            f"""
-            SELECT m.user || ' => ' || m.bot
-            FROM memory m JOIN vector_map vm ON m.id = vm.memory_id
-            WHERE vm.vector_id IN ({placeholders})
-            """,
-            indices,
-        )
-        return [row[0] for row in cursor.fetchall()]
-
-    def fetch_by_ids(self, memory_ids: List[int]) -> List[Dict[str, Any]]:
-        if not memory_ids:
-            return []
-        placeholders = ",".join("?" * len(memory_ids))
-        cursor = self.conn.execute(
-            f"SELECT id, user, bot, important, timestamp FROM memory WHERE id IN ({placeholders})",
-            memory_ids,
-        )
-        return [
-            {
-                "id": r[0],
-                "user": r[1],
-                "bot": r[2],
-                "important": bool(r[3]),
-                "timestamp": r[4],
-            }
-            for r in cursor
-        ]
-
-    def mark_important(self, memory_id: int) -> None:
-        self.conn.execute("UPDATE memory SET important = 1 WHERE id = ?", (memory_id,))
-        self.conn.commit()
 
     def count(self) -> int:
         return self.conn.execute("SELECT COUNT(*) FROM memory").fetchone()[0]
 
-    def get_recent(self, limit: int = 10) -> List[Dict[str, Any]]:
-        cursor = self.conn.execute(
-            """
-            SELECT id, user, bot, important, timestamp
-            FROM memory ORDER BY timestamp DESC LIMIT ?
-            """,
-            (limit,),
-        )
-        return [
-            {
-                "id": r[0],
-                "user": r[1],
-                "bot": r[2],
-                "important": bool(r[3]),
-                "timestamp": r[4],
-            }
-            for r in cursor
-        ]
 
     def close(self) -> None:
         self.conn.close()

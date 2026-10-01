@@ -14,7 +14,6 @@ import unittest
 from datetime import date, timedelta
 
 from logic import week_schedule as ws
-from utils import db
 
 
 def _seed(valid_from, valid_to=None):
@@ -64,12 +63,6 @@ class TimetableIsData(unittest.TestCase):
         _seed(valid_from="2026-10-01")
         self.assertEqual(ws.study_slots(today), [])
 
-    def test_expire_closes_the_running_timetable(self):
-        """«У меня каникулы» должно уметь закрыть действующее расписание."""
-        _seed(valid_from="2026-04-01")
-        self.assertTrue(ws.study_slots(date(2026, 8, 17)))
-        ws.expire_timetable("2026-08-16")
-        self.assertEqual(ws.study_slots(date(2026, 8, 17)), [])
 
     def test_home_study_day_comes_from_data(self):
         self.assertFalse(ws.is_home_study_day(date(2026, 8, 19)))

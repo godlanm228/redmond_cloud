@@ -167,18 +167,6 @@ class BackupTests(DbTestBase):
         finally:
             conn.close()
 
-    def test_backup_creates_readable_copy(self):
-        db.kv_set("presence", {"wake_time": "13:37"})
-        dest = db.backup_to(Path("data/backup/hub-test.sqlite"))
-        self.assertTrue(dest.exists())
-        self.assertIn("13:37", self._read_kv(dest, "presence"))
-
-    def test_backup_overwrites_previous(self):
-        db.kv_set("presence", {"wake_time": "10:00"})
-        db.backup_to(Path("data/backup/snap.sqlite"))
-        db.kv_set("presence", {"wake_time": "11:00"})
-        dest = db.backup_to(Path("data/backup/snap.sqlite"))
-        self.assertIn("11:00", self._read_kv(dest, "presence"))
 
 
 class MigrationTests(DbTestBase):

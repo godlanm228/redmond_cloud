@@ -22,7 +22,6 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
-import shutil
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -149,17 +148,6 @@ def _search_text(description: str, tags: List[str], label: str) -> str:
     return " ".join([description, " ".join(tags), label]).lower()
 
 
-def set_label(record_id: int, label: str) -> None:
-    """Как Влад сам назвал фото («сохрани как график августа»)."""
-    row = db.query_one("SELECT description, tags FROM vision_results WHERE id=?",
-                       (record_id,))
-    if row is None:
-        return
-    tags = json.loads(row["tags"] or "[]")
-    db.execute("UPDATE vision_results SET label=?, search_text=? WHERE id=?",
-               (label.strip(), _search_text(row["description"], tags, label), record_id))
-
-
 def search(query: str, limit: int = 5) -> List[Dict[str, Any]]:
     """Поиск по описанию, тегам и метке. «Кинь тот график» → файл.
 
@@ -240,14 +228,3 @@ def enforce_limits() -> int:
     return removed
 
 
-def stats() -> Dict[str, Any]:
-    total = db.query_one("SELECT COUNT(*) c FROM vision_results")["c"]
-    with_file = sum(1 for r in db.query("SELECT file_path FROM vision_results")
-                    if Path(r["file_path"]).exists())
-    return {"records": total, "files": with_file, "bytes": dir_size()}
-
-
-def purge_all() -> None:
-    """Полная очистка — для тестов и ручного сброса."""
-    shutil.rmtree(_dir(), ignore_errors=True)
-    db.execute("DELETE FROM vision_results")

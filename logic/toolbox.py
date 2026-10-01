@@ -106,14 +106,6 @@ GROUPED: Dict[str, Tuple[str, str]] = {
 }
 
 
-def call_name(legacy: str) -> str:
-    """How the model calls an original tool: 'diary(action=add)' or the name itself."""
-    if legacy in GROUPED:
-        group, action = GROUPED[legacy]
-        return f"{group}(action={action})"
-    return legacy
-
-
 # Longest names first, so that e.g. `read_diary` never matches inside another name.
 # Not after `action=`: that is already the new form, so renaming is idempotent
 # (food(action=log_meal) stays as it is).

@@ -20,7 +20,6 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 import sqlite3
 import threading
 from contextlib import contextmanager
@@ -497,14 +496,3 @@ def _now() -> str:
     return now_local().isoformat(timespec="minutes")
 
 
-def backup_to(path: Any) -> Path:
-    """Консистентный снимок базы без остановки сервиса (VACUUM INTO).
-
-    Бэкапов у проекта не было вообще: потеря data/ означала потерю всего.
-    """
-    dest = Path(path)
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    if dest.exists():
-        os.remove(dest)
-    connect().execute("VACUUM INTO ?", (str(dest),))
-    return dest

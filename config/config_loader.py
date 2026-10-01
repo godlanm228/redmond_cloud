@@ -16,9 +16,6 @@ from config.config import AppConfig
 
 logger = logging.getLogger(__name__)
 
-class ConfigurationError(Exception):
-    """Ошибка конфигурации"""
-    pass
 
 def load_app_config(config_path: Optional[Union[Path, str, AppConfig]] = None) -> AppConfig:
     """
@@ -139,59 +136,6 @@ def get_supergoals(config_or_path: Optional[Union[Path, str, AppConfig]] = None)
     except json.JSONDecodeError as e:
         raise RuntimeError(f"Invalid JSON in supergoals file: {e}")
 
-def load_rules(rules_path: Optional[Union[Path, str]] = None) -> Any:
-    """Загружает правила системы"""
-    file = Path(rules_path) if rules_path else Path(__file__).parent / 'rules.json'
-
-    if not file.exists():
-        # Возвращаем дефолтные правила
-        logger.warning(f"Rules file not found: {file}, using defaults")
-        return {
-            "rules": [],
-            "forbidden_actions": [
-                "delete_system_files",
-                "modify_own_code",
-                "disable_safety"
-            ]
-        }
-
-    try:
-        data = json.loads(file.read_text(encoding='utf-8'))
-        return data
-    except json.JSONDecodeError as e:
-        raise RuntimeError(f"Invalid JSON in rules file: {e}")
-
-def load_personality_profile(profile_path: Optional[Union[Path, str]] = None) -> Dict[str, Any]:
-    """Загружает профиль личности"""
-    file = Path(profile_path) if profile_path else Path(__file__).parent / 'personality_profile.json'
-
-    default_profile = {
-        "name": "Redmond",
-        "style": "sarcastic but strict",
-        "traits": ["analytical", "protective", "efficient"],
-        "tone_variations": {
-            "normal": "professional",
-            "alert": "urgent",
-            "casual": "friendly"
-        }
-    }
-
-    if not file.exists():
-        logger.warning(f"Personality profile not found: {file}, using defaults")
-        return default_profile
-
-    try:
-        data = json.loads(file.read_text(encoding='utf-8'))
-
-        # Валидация и дополнение дефолтными значениями
-        profile = default_profile.copy()
-        profile.update(data)
-
-        return profile
-
-    except json.JSONDecodeError as e:
-        raise RuntimeError(f"Invalid JSON in personality profile: {e}")
-
 
 def load_owner_profile(profile_path: Optional[Union[Path, str]] = None) -> Dict[str, Any]:
     """
@@ -242,38 +186,3 @@ def load_owner_profile(profile_path: Optional[Union[Path, str]] = None) -> Dict[
         return default
 
 
-def save_owner_profile(profile: Dict[str, Any], profile_path: Optional[Union[Path, str]] = None) -> None:
-    """Сохраняет профиль владельца обратно на диск."""
-    file = Path(profile_path) if profile_path else Path(__file__).parent / 'owner_profile.json'
-    file.parent.mkdir(parents=True, exist_ok=True)
-    file.write_text(json.dumps(profile, indent=2, ensure_ascii=False), encoding='utf-8')
-
-def save_config(config: AppConfig, path: Optional[Union[Path, str]] = None) -> None:
-    """
-    Сохраняет конфигурацию в файл.
-
-    Args:
-        config: Объект конфигурации
-        path: Путь для сохранения
-    """
-    if not path:
-        path = Path.cwd() / 'config' / 'config.json'
-    else:
-        path = Path(path)
-
-    path.parent.mkdir(parents=True, exist_ok=True)
-
-    # Конвертируем в dict и сохраняем
-    data = config.dict()
-
-    # Преобразуем Path объекты в строки
-    for key, value in data.items():
-        if isinstance(value, Path):
-            data[key] = str(value)
-
-    path.write_text(
-        json.dumps(data, indent=2, ensure_ascii=False),
-        encoding='utf-8'
-    )
-
-    logger.info(f"Configuration saved to: {path}")

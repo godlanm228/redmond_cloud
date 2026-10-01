@@ -135,8 +135,6 @@ class Coordinator:
         self.bots = bots
         logger.info("Coordinator initialized with bots: %s", list(bots.keys()))
 
-    def has(self, agent_name: str) -> bool:
-        return agent_name in self.bots
 
     def bot_for(self, agent_name: str) -> Optional[Bot]:
         return self.bots.get(agent_name)

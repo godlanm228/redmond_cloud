@@ -355,18 +355,6 @@ def describe(parsed_name: str, events: List[CalendarEvent], report: ImportReport
     return "\n".join(lines)
 
 
-def import_calendar_text(text: str) -> str:
-    """Whole path for a calendar file. Returns the receipt; ValueError if the
-    file cannot be parsed as a calendar."""
-    parsed = parse(text)
-    unplaced = classify(parsed.events, university=parsed.university)
-    report = apply(parsed.events, origin=parsed.origin, source="calendar", unplaced=unplaced)
-    logger.info("Календарь «%s»: %d событий, %s; в расписание +%d/~%d/-%d, смен %d",
-                parsed.name, len(parsed.events), dict(report.by_kind), report.added,
-                report.updated, report.removed, report.shifts_saved)
-    return describe(parsed.name, parsed.events, report, parsed.past, parsed.truncated)
-
-
 def import_screenshot_events(raw_events: List[Dict[str, Any]]) -> Tuple[str, int]:
     """Events read from calendar screenshots (vision). Same classification and
     storage as a file; origin per screenshot day, so a re-sent screenshot of

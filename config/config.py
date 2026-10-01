@@ -62,7 +62,6 @@ class AppConfig(BaseModel):
 
     # ---------- профили и память ----------
     supergoals_file: str = Field(default="config/supergoals.json")
-    personality_profile: str = Field(default="config/personality_profile.json")
     owner_profile: str = Field(default="config/owner_profile.json")
     baseline_db_path: str = Field(default="data/memory.sqlite")
     max_memory_records: int = Field(default=50000, ge=100)

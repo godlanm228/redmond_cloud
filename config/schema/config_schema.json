@@ -37,7 +37,6 @@
     "groq_whisper_model": {"type": "string", "minLength": 1},
 
     "supergoals_file": {"type": "string"},
-    "personality_profile": {"type": "string"},
     "owner_profile": {"type": "string"},
     "baseline_db_path": {"type": "string"},
     "max_memory_records": {"type": "integer", "minimum": 100, "default": 50000},

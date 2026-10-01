@@ -462,11 +462,6 @@ def log_wake_if_first() -> Optional[Dict[str, Any]]:
     )
 
 
-def woke_today() -> bool:
-    presence = db.kv_get("presence", {}) or {}
-    return presence.get("last_wake_date") == now_local().strftime("%Y-%m-%d")
-
-
 def wake_time_today() -> Optional[str]:
     """«HH:MM» пробуждения, если зафиксировано сегодня."""
     presence = db.kv_get("presence", {}) or {}
@@ -595,7 +590,7 @@ def hard_muted_now() -> bool:
 
 
 # ============================================================================
-# Ротация стилей пингов, радар дедлайнов, счётчик Gemini
+# Ротация стилей пингов, радар дедлайнов
 # ============================================================================
 
 def next_style_index(n: int) -> int:
@@ -630,32 +625,3 @@ def mark_radar(deadline_id: Any) -> None:
             (json.dumps(data, ensure_ascii=False),
              now_local().isoformat(timespec="minutes")),
         )
-
-
-# Счётчик успешных запросов Gemini за день, всех моделей вместе, — для отчётов.
-# Не гард: лимит бесплатного тарифа — 20 запросов в сутки на КАЖДУЮ модель
-# (не «~1500 на проект», как считалось здесь до 29.09.2026), и ведёт его по
-# моделям utils/llm_gate.
-
-
-def gemini_bump() -> int:
-    """Инкремент под транзакцией: на JSON два параллельных вызова читали одно
-    и то же значение и счётчик отставал от реальности."""
-    today = now_local().strftime("%Y-%m-%d")
-    with db.transaction() as conn:
-        row = conn.execute("SELECT value FROM kv WHERE key='gemini_usage'").fetchone()
-        data = _json_load(row["value"] if row else None, {})
-        if data.get("date") != today:
-            data = {"date": today, "count": 0}
-        data["count"] = int(data.get("count", 0)) + 1
-        conn.execute(
-            "INSERT INTO kv(key, value, updated) VALUES('gemini_usage',?,?)"
-            " ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated=excluded.updated",
-            (json.dumps(data), now_local().isoformat(timespec="minutes")),
-        )
-    return data["count"]
-
-
-def gemini_count_today() -> int:
-    data = db.kv_get("gemini_usage", {}) or {}
-    return int(data.get("count", 0)) if data.get("date") == now_local().strftime("%Y-%m-%d") else 0

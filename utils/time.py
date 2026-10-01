@@ -34,14 +34,3 @@ def set_clock(clock) -> None:
     _clock = clock
 
 
-def current_time() -> str:
-    return now_local().strftime("%H:%M")
-
-
-def current_date() -> str:
-    return now_local().strftime("%Y-%m-%d")
-
-
-def is_night() -> bool:
-    hour = now_local().hour
-    return hour >= 21 or hour < 6

@@ -33,23 +33,23 @@ class ThinkingConfigTests(unittest.TestCase):
     def test_gemini_3_family_uses_thinking_level(self):
         for model in ("gemini-3.6-flash", "gemini-3.5-flash",
                       "gemini-3.1-flash-lite", "gemini-3-flash-preview"):
-            self.assertEqual(gemini._thinking_config(model),
+            self.assertEqual(gemini._thinking_for(model, "")[0],
                              {"thinkingLevel": "minimal"}, model)
 
     def test_gemini_25_uses_thinking_budget(self):
         # 2.5 отвечает 400 «Thinking level is not supported for this model»
-        self.assertEqual(gemini._thinking_config("gemini-2.5-flash"),
+        self.assertEqual(gemini._thinking_for("gemini-2.5-flash", "")[0],
                          {"thinkingBudget": 0})
 
     def test_unknown_family_falls_back_to_budget(self):
-        self.assertEqual(gemini._thinking_config("some-future-model"),
+        self.assertEqual(gemini._thinking_for("some-future-model", "")[0],
                          {"thinkingBudget": 0})
 
     def test_empty_model_follows_default_model(self):
         expected = ({"thinkingLevel": "minimal"}
                     if gemini.DEFAULT_MODEL.startswith("gemini-3")
                     else {"thinkingBudget": 0})
-        self.assertEqual(gemini._thinking_config(""), expected)
+        self.assertEqual(gemini._thinking_for("", "")[0], expected)
 
 
 class GenerateBodyTests(unittest.TestCase):

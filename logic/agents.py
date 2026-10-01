@@ -8,7 +8,6 @@ v2 (multi-bot): каждый агент = отдельный Telegram-бот с�
 
 Каждый агент имеет:
   - name / emoji / triggers (как его звать с @)
-  - system_prompt_builder — имя билдера в ResponseGenerator
   - allowed_tools — фильтр доступных tools
   - description — для router-LLM (если выбираем без явного @-меншина)
   - bot_username — TG @username бота (без @), нужен Coordinator'у
@@ -27,7 +26,6 @@ class AgentConfig:
     emoji: str
     triggers: List[str]            # @-меншины: ["@redmond", "@r"]
     description: str               # для router-LLM
-    system_prompt_builder: str     # имя метода в ResponseGenerator
     bot_username: str = ""         # TG @username бота (без @)
     executor: str = "groq"         # "groq" | "cipher_subprocess"
     allowed_tools: Optional[List[str]] = None  # None = все доступные
@@ -88,7 +86,6 @@ REDMOND = AgentConfig(
         "Повседневный ассистент: погода, факты, общие вопросы, веб-поиск, "
         "болтовня, время, информация. Дефолтный агент."
     ),
-    system_prompt_builder="build_redmond_system_prompt",
     bot_username="redmond_hub_bot",
     executor="groq",
     output_format="html",
@@ -108,7 +105,6 @@ IRIS = AgentConfig(
         "Использовать когда речь о планировании, отслеживании, рефлексии, мотивации, "
         "еде/готовке/продуктах, фиксации усталости/настроения, критическом разборе решений владельца."
     ),
-    system_prompt_builder="build_iris_system_prompt",
     bot_username="iris_redberry_bot",
     executor="groq",
     output_format="html",
@@ -153,7 +149,6 @@ NEWSER = AgentConfig(
         "Если не нашёл — честно говорит. Не делегирует. "
         "Использовать когда нужна актуальная информация: новости, события, факты, цены, релизы, обзоры."
     ),
-    system_prompt_builder="build_newser_system_prompt",
     bot_username="newser_redmond_bot",
     executor="groq",
     output_format="html",  # ссылки кликабельные через <a href>
@@ -173,8 +168,7 @@ CIPHER = AgentConfig(
         "Код, архитектура, разработка, рефакторинг, написание/правка функций бота, "
         "анализ ошибок в логах, имплементация новых tools. Может оркестрировать (просить Newser найти инфу). "
         "Использовать только когда нужна реальная разработка или серьёзный технический анализ — лимит Pro ~45 msg/5h."
-    ),
-    system_prompt_builder="build_cipher_system_prompt",  # не используется (subprocess)
+    ),  # не используется (subprocess)
     bot_username="cipher_redberry_bot",
     executor="cipher_subprocess",
     output_format="html",
@@ -217,7 +211,3 @@ def agent_by_username(username: str) -> Optional[AgentConfig]:
     return None
 
 
-def all_bot_usernames() -> List[str]:
-    """Все @username наших ботов. Используется для авторизации
-    inter-bot сообщений (бот→бот делегирование)."""
-    return [a.bot_username for a in AGENTS if a.bot_username]

@@ -12,7 +12,6 @@ LOWER() опускает только ASCII. То есть по-русски п�
 избегаем.
 """
 
-import json
 import os
 import sys
 import tempfile
@@ -25,7 +24,7 @@ if str(ROOT) not in sys.path:
 
 from logic import coach_storage
 from logic.tools import execute_tool
-from logic.week_schedule import apply_shifts, get_shift, shift_history
+from logic.week_schedule import apply_shifts
 from utils import db, vision_archive
 from utils.memory import MemoryStore
 
@@ -127,7 +126,8 @@ class ShiftCyrillicTests(unittest.TestCase):
                        "source": "text"}])
         apply_shifts([{"date": "2026-09-11", "start": "18:00", "end": "23:30",
                        "source": "photo"}])
-        reasons = [e["reason"] for e in shift_history("2026-09-11") if e["reason"]]
+        reasons = [r["reason"] for r in db.query(
+            "SELECT reason FROM shift_events WHERE date=?", ("2026-09-11",)) if r["reason"]]
         self.assertTrue(any("расходится" in r for r in reasons))
 
 
@@ -162,10 +162,6 @@ class VisionArchiveCyrillicTests(unittest.TestCase):
     def test_german_word_in_description_is_searchable(self):
         self.assertTrue(vision_archive.search("spüle"))
 
-    def test_russian_label_is_searchable_in_any_case(self):
-        rec = vision_archive.recent(1)[0]
-        vision_archive.set_label(rec["id"], "График Августа")
-        self.assertTrue(vision_archive.search("график августа"))
 
     def test_sqlite_builtin_lower_is_indeed_ascii_only(self):
         """Фиксируем ПРИЧИНУ бага, чтобы её не «починили» обратно."""

@@ -23,7 +23,7 @@ if "requests" not in sys.modules:
     sys.modules["requests"] = requests_stub
 
 from logic import prompt_budget
-from logic.prompt_budget import describe, estimate_tokens, select_tools
+from logic.prompt_budget import describe, estimate_tokens
 
 
 def tool(name, description):
@@ -84,34 +84,7 @@ class DescribeTests(unittest.TestCase):
         self.assertEqual(describe(self.messages, None)["tool_schemas"], 0)
 
 
-class SelectToolsTests(unittest.TestCase):
-    def _names(self, text):
-        return {t["function"]["name"] for t in select_tools(text, TOOLS)}
-
-    def test_core_tools_always_present(self):
-        names = self._names("абсолютно ничего общего")
-        self.assertTrue(prompt_budget.CORE_TOOLS <= names)
-
-    def test_relevant_tool_is_picked(self):
-        self.assertIn("log_meal", self._names("запиши что я поел, калории"))
-
-    def test_crypto_question_picks_crypto_tool(self):
-        self.assertIn("get_crypto_market", self._names("какой курс биткоина"))
-
-    def test_selection_is_smaller_than_full_catalog(self):
-        picked = select_tools("какая погода", TOOLS, max_selected=4)
-        self.assertLessEqual(len(picked), 4)
-        self.assertLess(estimate_tokens(picked), estimate_tokens(TOOLS))
-
-    def test_empty_catalog_is_safe(self):
-        self.assertEqual(select_tools("что угодно", []), [])
-
-    def test_yesterday_case_keeps_web_search(self):
-        """«Почему гемини упал?» → модель пошла в web_search. Отбор обязан его дать."""
-        self.assertIn("web_search", self._names("Почему гемини упал ?"))
-
-
-class ShadowLoggingTests(unittest.TestCase):
+class SizeLoggingTests(unittest.TestCase):
     def setUp(self):
         self.records = []
         self.handler = logging.Handler()
@@ -125,26 +98,13 @@ class ShadowLoggingTests(unittest.TestCase):
 
     def test_oversized_prompt_warns(self):
         huge = [{"role": "user", "content": "x" * (prompt_budget.GROQ_TPM_LIMIT * 4)}]
-        prompt_budget.log_shadow("Redmond", "вопрос", huge, TOOLS)
+        prompt_budget.log_size("Redmond", huge, TOOLS)
         self.assertTrue(any(r.levelno == logging.WARNING for r in self.records))
 
     def test_small_prompt_does_not_warn(self):
         small = [{"role": "user", "content": "коротко"}]
-        prompt_budget.log_shadow("Redmond", "коротко", small, TOOLS)
+        prompt_budget.log_size("Redmond", small, TOOLS)
         self.assertFalse(any(r.levelno == logging.WARNING for r in self.records))
-
-    def test_miss_is_reported(self):
-        prompt_budget.log_selection_miss("Redmond", "get_weather", {"web_search"})
-        self.assertTrue(any("Shadow-промах" in r.getMessage() for r in self.records))
-
-    def test_hit_is_not_reported(self):
-        prompt_budget.log_selection_miss("Redmond", "web_search", {"web_search"})
-        self.assertFalse(any("Shadow-промах" in r.getMessage() for r in self.records))
-
-    def test_empty_selection_is_not_a_miss(self):
-        """Отбор не считался (не тот хоп) — это не промах."""
-        prompt_budget.log_selection_miss("Redmond", "get_weather", set())
-        self.assertFalse(any("Shadow-промах" in r.getMessage() for r in self.records))
 
 
 if __name__ == "__main__":

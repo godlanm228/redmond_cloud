@@ -2508,18 +2508,6 @@ def _extract_sections(text: str, include_ids: Tuple[str, ...]) -> str:
     return "\n\n".join(out)
 
 
-def _filter_dossier(text: str, exclude_section_ids: Tuple[str, ...]) -> str:
-    """Вернуть досье без указанных разделов."""
-    blocks = re.split(r"(?=^## \d{2}\s)", text, flags=re.MULTILINE)
-    out = []
-    for b in blocks:
-        m = re.match(r"^## (\d{2})\s", b)
-        if m and m.group(1) in exclude_section_ids:
-            continue
-        out.append(b.rstrip())
-    return "\n\n".join(out)
-
-
 # ============================================================================
 # Profile update
 # ============================================================================

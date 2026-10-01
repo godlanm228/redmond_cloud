@@ -1,7 +1,6 @@
 import logging
 from typing import Dict, List, Tuple
 
-from config.config_loader import load_app_config
 
 logger = logging.getLogger(__name__)
 
@@ -22,7 +21,7 @@ class WebSearcher:
     """
 
     def __init__(self, config=None):
-        cfg = config or load_app_config()
+        del config  # совместимость вызова: поиску конфиг не нужен
         self._ddg_available = False
         try:
             from ddgs import DDGS  # noqa: F401

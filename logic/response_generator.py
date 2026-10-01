@@ -1,6 +1,5 @@
 import json
 import logging
-import os
 import math
 import re
 import threading
@@ -8,13 +7,10 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
-import requests
 
 from config.config_loader import (
     load_app_config,
     load_owner_profile,
-    load_personality_profile,
-    save_owner_profile,
 )
 from logic import prompt_budget
 from logic.intent_recognizer import Intent
@@ -32,22 +28,6 @@ logger = logging.getLogger(__name__)
 _OWNER_WAIT_SEC = 30.0
 _BACKGROUND_WAIT_SEC = 45.0
 
-DEFAULT_PERSONA = {
-    "name": "Redmond",
-    "style": "sarcastic but strict",
-    "traits": ["analytical", "protective", "direct"],
-    "communication_rules": {
-        "address_mode": "respectful",
-        "verbosity": "balanced",
-        "avoid_hallucination": True,
-    },
-    "tone_variations": {
-        "normal": "professional",
-        "alert": "urgent",
-        "casual": "friendly",
-        "owner": "respectful",
-    },
-}
 
 # Таймаут одного Groq-вызова (сек). Без него SDK на 429/TPD спит десятками
 # секунд и виснет в потоке — пул потоков забивается, хаб встаёт.
@@ -195,7 +175,6 @@ _STATE_CHANGING_TOOLS = frozenset({
     "resolve_shift_conflict", "postpone_deadline", "mute_notifications",
     "handoff_to_iris",
 })
-
 
 
 def _tool_status_label(name: str, args: Dict[str, Any]) -> Optional[str]:
@@ -669,12 +648,6 @@ class ResponseGenerator:
         llm_gate.configure_from(self.config)
 
         try:
-            self.persona = load_personality_profile(self.config.personality_profile)
-        except Exception as e:
-            logger.warning("Не удалось загрузить персону: %s", e)
-            self.persona = DEFAULT_PERSONA.copy()
-
-        try:
             self.owner_profile = load_owner_profile(self.config.owner_profile)
         except Exception as e:
             logger.debug("Owner profile недоступен: %s", e)
@@ -696,7 +669,6 @@ class ResponseGenerator:
         self._history_loaded: set = set()
         self.max_history = getattr(self.config, "max_history", 6)
         self.top_k = getattr(self.config, "top_k", 3)
-        self.last_response: str = ""
 
         self._init_memory()
         self._init_searcher()
@@ -850,7 +822,6 @@ class ResponseGenerator:
             elif not _is_system_prompt(user_text):
                 self._save_interaction(user_text, "(ответа не было — модели не ответили)",
                                        chat_id, agent=who, history_only=True)
-            self.last_response = response
             return Reply(response, failed=ctx.failed)
         except Exception:
             logger.exception("Generation error")
@@ -1303,13 +1274,6 @@ class ResponseGenerator:
     # _execute_tool удалён в v2 — заменён на execute_tool() из logic/tools.py
     # (полный набор tools, единый dispatcher, agent-filter поддержка).
 
-    @staticmethod
-    def _safe_json_loads(s: str) -> dict:
-        import json
-        try:
-            return json.loads(s) if s else {}
-        except json.JSONDecodeError:
-            return {}
 
     def _generate_with_gemini_tools(self, ctx: GenerationContext) -> Optional[str]:
         """Gemini function-calling петля — аналог Groq-пути, но через Gemini
