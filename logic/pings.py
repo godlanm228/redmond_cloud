@@ -36,6 +36,11 @@ from utils.time import now_local
 logger = logging.getLogger(__name__)
 
 MAX_PINGS_PER_DAY = 5
+# Приветствие — только в первые полтора часа после пробуждения. Без верхней
+# границы оно ждало конца тишины: 01.10.2026 тишина кончилась в 16:45, и в
+# 17:00 Iris «поздоровалась» про «проснулся недавно (в 11:59)» после часа
+# переписки, повторив то, что уже обсудили.
+GREETING_WINDOW_MIN = 90
 MIN_GAP_MIN = 90
 # Окно пинга «обед» в часах [с, до). Вечером про обед не спрашиваем.
 MEAL_WINDOW = (14, 17)
@@ -127,7 +132,8 @@ def _slot_decision(situation, now) -> Optional[Tuple[str, str]]:
     wake = situation.wake_time
     if wake and "greeting" not in pings:
         ws = parse_hm(wake, now)
-        if ws is not None and now >= ws + timedelta(minutes=15):
+        if ws is not None and (ws + timedelta(minutes=15) <= now
+                               <= ws + timedelta(minutes=GREETING_WINDOW_MIN)):
             return ("greeting", (
                 f"Влад проснулся недавно (в {wake}) и на связи. Поздоровайся тепло и "
                 f"коротко, по-человечески, дай сводку дня из STATE (смена/лекции/горящие "

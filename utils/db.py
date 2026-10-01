@@ -136,7 +136,7 @@ def _ensure_schema_once(conn: sqlite3.Connection, path: Path) -> None:
 # Схема
 # ---------------------------------------------------------------------------
 
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 9
 
 _SCHEMA = """
 -- Цели и дедлайны: id остаётся сквозным, как в JSON (на него ссылаются tools).
@@ -181,8 +181,14 @@ CREATE TABLE IF NOT EXISTS pantry (
 );
 
 -- Смены: текущее состояние. История — в shift_events (append-only).
+-- Несколько смен в день (v9). До 01.10.2026 ключом была дата, и каждая
+-- следующая запись на тот же день молча затирала предыдущую: шесть скринов
+-- учебного расписания легли сюда «сменами», и из десяти слотов выжили три.
+-- Какая запись — «та же смена», решает пересечение по времени
+-- (week_schedule.apply_shifts), а не дата.
 CREATE TABLE IF NOT EXISTS shifts (
-    date              TEXT PRIMARY KEY,
+    id                INTEGER PRIMARY KEY AUTOINCREMENT,
+    date              TEXT NOT NULL,
     start             TEXT,
     end               TEXT,
     status            TEXT NOT NULL DEFAULT 'planned',
@@ -192,6 +198,7 @@ CREATE TABLE IF NOT EXISTS shifts (
     last_confirmed_at TEXT,
     note              TEXT
 );
+CREATE INDEX IF NOT EXISTS idx_shifts_date ON shifts(date, start);
 
 -- Журнал изменений смен: отвечает на «откуда тут взялась эта смена».
 -- 12.08.2026 в график попали чужие смены с фото, и восстановить это можно
@@ -281,7 +288,14 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_vision_sha ON vision_results(sha256);
 -- Утверждение о жизни владельца обязано жить в данных и иметь срок действия:
 -- вне интервала [valid_from, valid_to] строка не видна никому.
 -- valid_to = NULL — бессрочно (действует, пока не закроют).
--- kind: lecture — пара с местом и временем; home_study — день домашней учёбы.
+-- kind: lecture — учебное занятие; home_study — день домашней учёбы;
+--       sport, work (не смена: встреча, собеседование), rest, other.
+-- Строка либо еженедельная (date IS NULL: weekday + срок действия), либо
+-- разовая на дату (date, v9): вузовские календари (CampusNet) выгружают
+-- конкретные даты с дырами — проектная неделя, праздники, — и «каждый
+-- понедельник» эти дыры бы затёр.
+-- uid/origin — для повторного импорта календаря: тот же файл обновляет свои
+-- строки, а не множит их; origin — какой календарь (PRODID + имя).
 CREATE TABLE IF NOT EXISTS timetable (
     id         INTEGER PRIMARY KEY AUTOINCREMENT,
     weekday    INTEGER NOT NULL,              -- 0 = понедельник
@@ -292,9 +306,14 @@ CREATE TABLE IF NOT EXISTS timetable (
     valid_from TEXT NOT NULL,                 -- YYYY-MM-DD
     valid_to   TEXT,                          -- YYYY-MM-DD или NULL
     source     TEXT NOT NULL DEFAULT 'manual',
-    created    TEXT NOT NULL
+    created    TEXT NOT NULL,
+    date       TEXT,                          -- YYYY-MM-DD у разовой строки
+    location   TEXT NOT NULL DEFAULT '',
+    uid        TEXT,
+    origin     TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS idx_timetable_day ON timetable(weekday, valid_from);
+CREATE INDEX IF NOT EXISTS idx_timetable_date ON timetable(date);
 
 -- Векторы текста для смыслового поиска (память, дневник, инструменты). v8.
 -- Кэш, а не данные: пересчитывается, если текст (hash) или модель сменились.
@@ -317,7 +336,45 @@ CREATE TABLE IF NOT EXISTS embeddings (
 _ADDED_COLUMNS = [
     ("diary", "data", "TEXT"),                                   # v3
     ("vision_results", "search_text", "TEXT NOT NULL DEFAULT ''"),  # v6
+    ("timetable", "date", "TEXT"),                               # v9
+    ("timetable", "location", "TEXT NOT NULL DEFAULT ''"),       # v9
+    ("timetable", "uid", "TEXT"),                                # v9
+    ("timetable", "origin", "TEXT NOT NULL DEFAULT ''"),         # v9
 ]
+
+
+def _shifts_keyed_by_date(conn: sqlite3.Connection) -> bool:
+    """Таблица смен ещё в старой форме «одна строка на дату» (до v9)."""
+    columns = {r["name"] for r in conn.execute("PRAGMA table_info(shifts)")}
+    return bool(columns) and "id" not in columns
+
+
+def _rebuild_shifts(conn: sqlite3.Connection) -> None:
+    """v9: смены с суррогатным id вместо даты-ключа. SQLite не меняет первичный
+    ключ на месте, поэтому таблица пересобирается; строки переносятся как есть."""
+    if not _shifts_keyed_by_date(conn):
+        return
+    logger.info("Схема: пересобираю shifts — несколько смен в день (v9)")
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        conn.execute(
+            "CREATE TABLE shifts_v9 ("
+            " id INTEGER PRIMARY KEY AUTOINCREMENT, date TEXT NOT NULL, start TEXT,"
+            " end TEXT, status TEXT NOT NULL DEFAULT 'planned',"
+            " source TEXT NOT NULL DEFAULT 'unknown',"
+            " confidence TEXT NOT NULL DEFAULT 'medium', updated TEXT NOT NULL,"
+            " last_confirmed_at TEXT, note TEXT)")
+        conn.execute(
+            "INSERT INTO shifts_v9(date, start, end, status, source, confidence,"
+            " updated, last_confirmed_at, note)"
+            " SELECT date, start, end, status, source, confidence, updated,"
+            " last_confirmed_at, note FROM shifts ORDER BY date")
+        conn.execute("DROP TABLE shifts")
+        conn.execute("ALTER TABLE shifts_v9 RENAME TO shifts")
+    except Exception:
+        conn.execute("ROLLBACK")
+        raise
+    conn.execute("COMMIT")
 
 
 def _add_missing_columns(conn: sqlite3.Connection) -> None:
@@ -337,6 +394,7 @@ def init_schema(conn: sqlite3.Connection) -> None:
     """Идемпотентно: создаёт недостающие таблицы и колонки, поднимает user_version.
     Вызывается под _schema_lock из _ensure_schema_once (или напрямую в тестах)."""
     _add_missing_columns(conn)
+    _rebuild_shifts(conn)
     conn.executescript(_SCHEMA)
     version = conn.execute("PRAGMA user_version").fetchone()[0]
     if version < SCHEMA_VERSION:

@@ -94,6 +94,15 @@ MODULES = [
         "- Work shift confirmation/cancel without changed hours («в силе», «не иду»,",
         "  «отменили», «под вопросом») → set_work_shift_status. If he says he goes later",
         "  and gives new hours, use save_work_shift with the new start/end instead.",
+        "- Two shifts a day are possible. Shift MOVED to non-overlapping hours → save_work_shift",
+        "  with replaces=true; otherwise new hours are a second shift.",
+    ]),
+    ("events", {"add_schedule_event", "remove_schedule_event"}, [
+        "CLASSES & EVENTS (not shifts):",
+        "- University class, training, appointment he tells you about → add_schedule_event",
+        "  (kind lecture/sport/work/rest/other; weekly=true for «каждый пн / по понедельникам»).",
+        "- Calendar files and schedule screenshots are imported by code — never re-add them.",
+        "- Remove/stop → get_week_schedule (#id) → remove_schedule_event.",
     ]),
     ("deadlines", {"add_deadline", "list_deadlines", "mark_deadline_done", "delete_deadline",
                    "postpone_deadline", "add_goal", "list_goals", "mark_goal_done"}, [

@@ -23,7 +23,9 @@ from core.coordinator import Coordinator
 from core.dispatcher import Dispatcher
 from handlers.multi_bot import (
     _gate,
+    redmond_document_handler,
     redmond_handler,
+    redmond_other_media_handler,
     redmond_photo_handler,
     redmond_voice_handler,
     slim_agent_handler,
@@ -105,6 +107,13 @@ def _build_app(
         app.add_handler(MessageHandler(filters.PHOTO, redmond_photo_handler))
         # Голосовые → Groq Whisper → обычный роутинг (тоже только Redmond-app)
         app.add_handler(MessageHandler(filters.VOICE, redmond_voice_handler))
+        # Файлы (календари .ics и прочее): что это — решает содержимое. GIF в
+        # Telegram тоже документ, поэтому исключён — он уходит в «прочие медиа».
+        app.add_handler(MessageHandler(filters.Document.ALL & ~filters.ANIMATION,
+                                       redmond_document_handler))
+        app.add_handler(MessageHandler(
+            filters.Sticker.ALL | filters.ANIMATION | filters.VIDEO | filters.VIDEO_NOTE
+            | filters.AUDIO, redmond_other_media_handler))
     else:
         app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, slim_agent_handler))
 

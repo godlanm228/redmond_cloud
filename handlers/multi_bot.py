@@ -236,6 +236,7 @@ async def _generate(
                 status_cb=status_cb,
                 force_tool=force_tool,
                 understanding=(meta or {}).get("understanding"),
+                needs=(meta or {}).get("needs"),
             ),
             timeout=GENERATION_TIMEOUT_SEC,
         )
@@ -465,11 +466,19 @@ async def _generate_cipher(user_text: str, context: ContextTypes.DEFAULT_TYPE,
 
 # ---------- Photo handler (скрин графика смен → расписание) ----------
 
+# Альбом приходит отдельными апдейтами с общим media_group_id; ждём, пока
+# долетят остальные фото, и разбираем пачкой. 01.10.2026 шесть скринов
+# расписания обработались поштучно: шесть разборов, три плана недели от Iris
+# подряд и сгоревшие минутные лимиты моделей.
+ALBUM_WAIT_SEC = 2.5
+
+
 async def redmond_photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """
-    Фото от Влада: один vision-вызов классифицирует (смены / еда / другое) и
-    маршрутизирует. Раньше ВСЕ фото слепо парсились как график смен (фото ужина →
-    «смен не увидел»), а на «что видишь?» текстовая модель врала «не вижу картинки».
+    Фото от Влада: один vision-вызов классифицирует (смены / календарь / еда /
+    другое) и маршрутизирует. Раньше ВСЕ фото слепо парсились как график смен
+    (фото ужина → «смен не увидел»), а на «что видишь?» текстовая модель врала
+    «не вижу картинки».
     """
     if not await _gate(update, context):
         return
@@ -479,148 +488,305 @@ async def redmond_photo_handler(update: Update, context: ContextTypes.DEFAULT_TY
     if chat_id is None:
         return
 
+    photo = update.message.photo[-1]  # максимальное разрешение
+    group_id = update.message.media_group_id
+    if not group_id:
+        await _process_photos([photo], chat_id, context)
+        await _route_caption(update, context, chat_id)
+        return
+    bot_data = context.application.bot_data
+    albums: dict = bot_data.setdefault("albums", {})
+    if group_id not in albums:
+        albums[group_id] = {"photos": [], "caption": "", "update": update}
+        task = asyncio.create_task(_process_album_later(group_id, chat_id, context))
+        # Ссылка держит задачу живой до конца (иначе её может собрать GC).
+        tasks: set = bot_data.setdefault("album_tasks", set())
+        tasks.add(task)
+        task.add_done_callback(tasks.discard)
+    albums[group_id]["photos"].append(photo)
+    if update.message.caption:
+        albums[group_id]["caption"] = update.message.caption
+
+
+async def _process_album_later(group_id: str, chat_id: int,
+                               context: ContextTypes.DEFAULT_TYPE) -> None:
+    await asyncio.sleep(ALBUM_WAIT_SEC)
+    album = context.application.bot_data.get("albums", {}).pop(group_id, None) or {}
+    photos = album.get("photos") or []
+    try:
+        await _process_photos(photos, chat_id, context)
+        if album.get("caption"):
+            await _route_caption(album["update"], context, chat_id, album["caption"])
+    except Exception:
+        logger.exception("Альбом из %d фото не обработан", len(photos))
+        await context.application.bot_data["coordinator"].respond_as(
+            "Redmond", chat_id,
+            f"Не смог обработать пачку из {len(photos)} фото — сбой у меня, пришли ещё раз.",
+            "🦞", "plain")
+
+
+async def _process_photos(photos: list, chat_id: int,
+                          context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Одно фото или альбом: один разбор зрением на всех, один ответ на вид."""
     coordinator = context.application.bot_data["coordinator"]
     dispatcher = context.application.bot_data["dispatcher"]
 
     import base64
-    photo = update.message.photo[-1]  # максимальное разрешение
-    tg_file = await photo.get_file()
-    raw = bytes(await tg_file.download_as_bytearray())
-    image_b64 = base64.b64encode(raw).decode()
-
-    logger.info("Photo from owner (%d KB) — vision analyze", len(raw) // 1024)
-    from logic.vision import analyze_image
+    raws = [bytes(await (await p.get_file()).download_as_bytearray()) for p in photos]
+    logger.info("Photo from owner: %d шт. (%s KB) — vision analyze", len(raws),
+                ", ".join(str(len(r) // 1024) for r in raws))
+    from logic.vision import analyze_images
     async with coordinator.typing("Redmond", chat_id):
-        result = await asyncio.to_thread(
-            analyze_image, image_b64, dispatcher.config.groq_api_key,
-        )
-    logger.info("Vision: type=%s, shifts=%d", result.get("type"), len(result.get("shifts") or []))
+        results = await asyncio.to_thread(
+            analyze_images, [base64.b64encode(r).decode() for r in raws])
 
     # Архив: фото + полный ответ модели. Без него на вопрос «почему распознал
     # криво» отвечать нечем — 12.08 в логе была ровно одна строка про тип.
     from utils import vision_archive
     from utils.gemini import DEFAULT_MODEL
-    archive_id = await asyncio.to_thread(
-        vision_archive.save, raw, result, chat_id, DEFAULT_MODEL,
-    )
+    archive_ids = []
+    for raw, result in zip(raws, results):
+        logger.info("Vision: type=%s, shifts=%d, events=%d", result.get("type"),
+                    len(result.get("shifts") or []), len(result.get("events") or []))
+        archive_ids.append(await asyncio.to_thread(
+            vision_archive.save, raw, result, chat_id, DEFAULT_MODEL))
+        # Описание фото → в историю чата, чтобы последующие текстовые вопросы
+        # («что на фото?») имели контекст и модель не галлюцинировала («ракумаки»).
+        if result.get("description"):
+            try:
+                dispatcher.response_generator.note_to_history(
+                    chat_id, "(прислал фото)", f"На фото: {result['description']}",
+                    agent="Redmond")
+            except Exception:
+                logger.warning("note_to_history failed", exc_info=True)
 
-    # Описание фото → в историю чата, чтобы последующие текстовые вопросы
-    # («что на фото?») имели контекст и модель не галлюцинировала (кейс «ракумаки»).
-    vdesc = result.get("description") or ""
-    if vdesc:
+    if all(r.get("error") and not r.get("description") for r in results):
+        await coordinator.respond_as(
+            "Redmond", chat_id,
+            "Не разобрал картинку — попробуй ещё раз или опиши текстом."
+            if len(results) == 1 else
+            f"Не разобрал ни одно из {len(results)} фото — попробуй ещё раз или опиши текстом.",
+            "🦞", "plain",
+        )
+        return
+
+    pairs = list(zip(archive_ids, results))
+    shift_photos = [(a, r) for a, r in pairs
+                    if r.get("type") == "shift_schedule" and r.get("shifts")]
+    calendar_photos = [(a, r) for a, r in pairs
+                       if r.get("type") == "calendar" and r.get("events")]
+    food_photos = [(a, r) for a, r in pairs if r.get("type") == "food"]
+    handled = {id(r) for _, r in shift_photos + calendar_photos + food_photos}
+    other_photos = [(a, r) for a, r in pairs if id(r) not in handled]
+
+    if shift_photos:
+        await _apply_shift_photos(shift_photos, chat_id, context)
+    if calendar_photos:
+        await _apply_calendar_photos(calendar_photos, chat_id, context)
+    for archive_id, result in food_photos:
+        await _handle_food_photo(result, archive_id, chat_id, context)
+    if other_photos:
+        # Что угодно ещё → Redmond описывает, что видит (без вранья «не вижу картинок»)
+        descs = [r.get("description") or "Вижу картинку, но не пойму, что именно на ней."
+                 for _, r in other_photos]
+        for archive_id, _ in other_photos:
+            await asyncio.to_thread(vision_archive.set_applied, archive_id, "ничего не записано")
+        text = descs[0] if len(descs) == 1 else "\n".join(
+            f"{i}. {d}" for i, d in enumerate(descs, 1))
+        await coordinator.respond_as("Redmond", chat_id, text, "🦞", "plain")
+
+
+async def _apply_shift_photos(photos: list, chat_id: int,
+                              context: ContextTypes.DEFAULT_TYPE) -> None:
+    """График смен (одно фото или пачка) → одна запись, одна квитанция, один план."""
+    from logic.week_schedule import apply_shifts, describe_conflicts, describe_saved_shifts
+    from utils import vision_archive
+    coordinator = context.application.bot_data["coordinator"]
+    items = [{**s, "status": "planned", "source": "photo", "confidence": "high"}
+             for _, r in photos for s in r["shifts"]]
+    outcome = await asyncio.to_thread(apply_shifts, items)
+    note = f"смен сохранено: {outcome.saved}, спорных: {len(outcome.conflicts)}"
+    for archive_id, _ in photos:
+        await asyncio.to_thread(vision_archive.set_applied, archive_id, note)
+    if outcome.applied:
+        await coordinator.respond_as(
+            "Redmond", chat_id, describe_saved_shifts(outcome.applied, outcome.saved),
+            "🦞", "html")
+    # Расхождение с тем, что Влад говорил текстом, — не повод молча
+    # отклонить: он решит, что график обновился. Спрашиваем сразу.
+    if outcome.conflicts:
+        await coordinator.respond_as(
+            "Redmond", chat_id, describe_conflicts(outcome.conflicts), "🦞", "plain")
+    if outcome.saved > 0:
+        iris = agent_by_name("Iris")
+        if iris is not None:
+            plan_prompt = (
+                "(scheduled week-plan) Влад загрузил новый график смен. Составь "
+                "план недели по правилам WEEK PLANNING и сохрани его."
+            )
+            async with coordinator.typing(iris.name, chat_id):
+                plan = await _generate_with_status(iris, plan_prompt, context, chat_id,
+                                                   meta={"needs": ["schedule"]})
+            if plan.startswith(DELEGATION_MARKER):
+                await _run_delegation(iris, plan[len(DELEGATION_MARKER):], context, chat_id)
+            else:
+                await coordinator.respond_as(iris.name, chat_id, plan, iris.emoji,
+                                             iris.output_format)
+
+
+async def _apply_calendar_photos(photos: list, chat_id: int,
+                                 context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Скрины календаря/расписания → тот же разбор по видам, что у .ics."""
+    from logic.calendar_import import import_screenshot_events
+    from utils import vision_archive
+    coordinator = context.application.bot_data["coordinator"]
+    dispatcher = context.application.bot_data["dispatcher"]
+    events = [e for _, r in photos for e in r["events"]]
+    receipt, n = await asyncio.to_thread(import_screenshot_events, events)
+    for archive_id, _ in photos:
+        await asyncio.to_thread(vision_archive.set_applied, archive_id,
+                                f"календарь: событий {n}")
+    if receipt:
+        await coordinator.respond_as("Redmond", chat_id, receipt, "🦞", "plain")
         try:
             dispatcher.response_generator.note_to_history(
-                chat_id, "(прислал фото)", f"На фото: {vdesc}",
-            )
+                chat_id, f"(прислал скрины календаря: {len(photos)})", receipt,
+                agent="Redmond")
         except Exception:
             logger.warning("note_to_history failed", exc_info=True)
 
-    if result.get("error") and not result.get("description"):
-        await coordinator.respond_as(
-            "Redmond", chat_id,
-            "Не разобрал картинку — попробуй ещё раз или опиши текстом.", "🦞", "plain",
+
+async def _handle_food_photo(result: dict, archive_id, chat_id: int,
+                             context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Еда → Iris. meal: фиксирует рацион (log_meal с оценками vision) + реакция.
+    groceries/receipt: пополняем запас детерминированно в коде + тёплое подтверждение."""
+    from utils import vision_archive
+    coordinator = context.application.bot_data["coordinator"]
+    iris = agent_by_name("Iris")
+    if iris is None:
+        return
+    food_kind = result.get("food_kind") or "meal"
+    items = result.get("items") or []
+
+    if food_kind in ("groceries", "receipt") and items:
+        # Запас обновляем кодом (надёжно), Iris только реагирует — не гоняем её
+        # повторно писать инструментом то, что уже записано.
+        from logic.coach_storage import pantry_update
+        data = await asyncio.to_thread(pantry_update, items, None)
+        n = len(data.get("items") or [])
+        barcode = result.get("barcode") or ""
+        bc_hint = f" Штрихкод: {barcode}." if barcode else ""
+        prompt = (
+            f"(фото продуктов) Влад пополнил запас: {', '.join(items)}.{bc_hint} "
+            f"Я уже добавила это в его запас продуктов (сейчас {n} позиций) — в запас "
+            "повторно НЕ добавляй. Можешь вызвать food(action=lookup) (штрихкод или название) для "
+            "точной нутриции, затем тёпло и коротко подтвердить + ОДНУ идею что приготовить. "
+            "Без лекций."
         )
-        return
-
-    ptype = result.get("type")
-    shifts = result.get("shifts") or []
-
-    # 1. График смен → сохранить + план недели от Iris
-    if ptype == "shift_schedule" and shifts:
-        from logic.week_schedule import apply_shifts, describe_conflicts, describe_saved_shifts
-        shift_items = [
-            {**s, "status": "planned", "source": "photo", "confidence": "high"}
-            for s in shifts
-        ]
-        outcome = await asyncio.to_thread(apply_shifts, shift_items)
-        n = outcome.saved
-        await asyncio.to_thread(
-            vision_archive.set_applied, archive_id,
-            f"смен сохранено: {n}, спорных: {len(outcome.conflicts)}")
-        saved_dates = {c.date for c in outcome.conflicts}
-        await coordinator.respond_as(
-            "Redmond", chat_id,
-            describe_saved_shifts([s for s in shifts if s.get("date") not in saved_dates], n),
-            "🦞", "html",
+    else:
+        desc = result.get("dish") or result.get("description") or "тарелка с едой"
+        kcal_lo, kcal_hi = result.get("kcal_low"), result.get("kcal_high")
+        prot = result.get("protein_g")
+        est = []
+        if kcal_lo or kcal_hi:
+            est.append(f"{kcal_lo or kcal_hi}–{kcal_hi or kcal_lo} ккал")
+        if prot:
+            est.append(f"~{prot} г белка")
+        est_line = (" Оценка по фото (честный диапазон, можешь поправить): "
+                    + ", ".join(est) + ".") if est else ""
+        prompt = (
+            f"(фото еды) Влад прислал фото еды: «{desc}».{est_line} "
+            "Запиши через food(action=log_meal) (dish + эти оценки; place определи по STATE: смена "
+            "сейчас → 'работа', иначе 'дом'). Дай короткую тёплую реакцию — без лекций о диете."
         )
-        # Расхождение с тем, что Влад говорил текстом, — не повод молча
-        # отклонить: он решит, что график обновился. Спрашиваем сразу.
-        if outcome.conflicts:
-            await coordinator.respond_as(
-                "Redmond", chat_id, describe_conflicts(outcome.conflicts), "🦞", "plain",
-            )
-        if n > 0:
-            iris = agent_by_name("Iris")
-            if iris is not None:
-                plan_prompt = (
-                    "(scheduled week-plan) Влад загрузил новый график смен. Составь "
-                    "план недели по правилам WEEK PLANNING и сохрани его."
-                )
-                async with coordinator.typing(iris.name, chat_id):
-                    plan = await _generate_with_status(iris, plan_prompt, context, chat_id)
-                if plan.startswith(DELEGATION_MARKER):
-                    await _run_delegation(iris, plan[len(DELEGATION_MARKER):], context, chat_id)
-                else:
-                    await coordinator.respond_as(iris.name, chat_id, plan, iris.emoji, iris.output_format)
+
+    async with coordinator.typing(iris.name, chat_id):
+        resp = await _generate_with_status(iris, prompt, context, chat_id,
+                                           meta={"needs": ["food"]})
+    await asyncio.to_thread(vision_archive.set_applied, archive_id, f"еда: {food_kind}")
+    if not resp.startswith(DELEGATION_MARKER):
+        await coordinator.respond_as(iris.name, chat_id, resp, iris.emoji, iris.output_format)
+    # Sticky → Iris: текстовый follow-up после фото-еды держим за ней.
+    st: RouterState = get_state(context.application.bot_data["router_states"], chat_id)
+    st.add("assistant", resp, iris.name)
+    st.last_agent_name = iris.name
+
+
+async def redmond_document_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Файл от Влада. До 01.10.2026 обработчика файлов не было вовсе: календарь
+    (.ics) ушёл в пустоту — ни ответа, ни строки в логе, а на «че это за файл?»
+    бот спросил «какой файл?». Что это за файл, решает содержимое, не имя
+    (logic/documents); ничего не исполняется и не распаковывается."""
+    if not await _gate(update, context):
         return
-
-    # 2. Еда → Iris. meal: фиксирует рацион (log_meal с оценками vision) + реакция.
-    #    groceries/receipt: пополняем запас детерминированно в коде + тёплое подтверждение.
-    if ptype == "food":
-        iris = agent_by_name("Iris")
-        if iris is None:
-            return
-        food_kind = result.get("food_kind") or "meal"
-        items = result.get("items") or []
-
-        if food_kind in ("groceries", "receipt") and items:
-            # Запас обновляем кодом (надёжно), Iris только реагирует — не гоняем её
-            # повторно писать инструментом то, что уже записано.
-            from logic.coach_storage import pantry_update
-            data = await asyncio.to_thread(pantry_update, items, None)
-            n = len(data.get("items") or [])
-            barcode = result.get("barcode") or ""
-            bc_hint = f" Штрихкод: {barcode}." if barcode else ""
-            prompt = (
-                f"(фото продуктов) Влад пополнил запас: {', '.join(items)}.{bc_hint} "
-                f"Я уже добавила это в его запас продуктов (сейчас {n} позиций) — в запас "
-                "повторно НЕ добавляй. Можешь вызвать food(action=lookup) (штрихкод или название) для "
-                "точной нутриции, затем тёпло и коротко подтвердить + ОДНУ идею что приготовить. "
-                "Без лекций."
-            )
-        else:
-            desc = result.get("dish") or result.get("description") or "тарелка с едой"
-            kcal_lo, kcal_hi = result.get("kcal_low"), result.get("kcal_high")
-            prot = result.get("protein_g")
-            est = []
-            if kcal_lo or kcal_hi:
-                est.append(f"{kcal_lo or kcal_hi}–{kcal_hi or kcal_lo} ккал")
-            if prot:
-                est.append(f"~{prot} г белка")
-            est_line = (" Оценка по фото (честный диапазон, можешь поправить): "
-                        + ", ".join(est) + ".") if est else ""
-            prompt = (
-                f"(фото еды) Влад прислал фото еды: «{desc}».{est_line} "
-                "Запиши через food(action=log_meal) (dish + эти оценки; place определи по STATE: смена "
-                "сейчас → 'работа', иначе 'дом'). Дай короткую тёплую реакцию — без лекций о диете."
-            )
-
-        async with coordinator.typing(iris.name, chat_id):
-            resp = await _generate_with_status(iris, prompt, context, chat_id)
-        await asyncio.to_thread(vision_archive.set_applied, archive_id,
-                                f"еда: {food_kind}")
-        if not resp.startswith(DELEGATION_MARKER):
-            await coordinator.respond_as(iris.name, chat_id, resp, iris.emoji, iris.output_format)
-        # Sticky → Iris: текстовый follow-up после фото-еды держим за ней.
-        st: RouterState = get_state(context.application.bot_data["router_states"], chat_id)
-        st.add("assistant", resp, iris.name)
-        st.last_agent_name = iris.name
+    if not _is_from_owner(update) or not update.message or not update.message.document:
         return
+    chat_id = update.effective_chat.id if update.effective_chat else None
+    if chat_id is None:
+        return
+    coordinator = context.application.bot_data["coordinator"]
+    dispatcher = context.application.bot_data["dispatcher"]
+    doc = update.message.document
+    name = doc.file_name or "файл"
+    logger.info("IN [owner] файл «%s» (%s, %d KB)", name, doc.mime_type,
+                (doc.file_size or 0) // 1024)
 
-    # 3. Что угодно ещё → Redmond описывает, что видит (без вранья «не вижу картинок»)
-    desc = result.get("description") or "Вижу картинку, но не пойму, что именно на ней."
-    await asyncio.to_thread(vision_archive.set_applied, archive_id, "ничего не записано")
-    await coordinator.respond_as("Redmond", chat_id, desc, "🦞", "plain")
+    from logic import calendar_import, documents
+    if doc.file_size and doc.file_size > documents.MAX_BYTES:
+        verdict = documents.FileVerdict(
+            "unknown", False, f"файл больше {documents.MAX_BYTES // (1024 * 1024)} МБ — не открываю")
+    else:
+        raw = bytes(await (await doc.get_file()).download_as_bytearray())
+        verdict = await asyncio.to_thread(documents.inspect, raw, name)
+    logger.info("Файл «%s»: %s%s", name, verdict.kind,
+                "" if verdict.ok else f" — {verdict.reason}")
+
+    if not verdict.ok:
+        reply = f"«{name}»: {verdict.reason}."
+    else:
+        try:
+            async with coordinator.typing("Redmond", chat_id):
+                reply = await asyncio.to_thread(calendar_import.import_calendar_text,
+                                                verdict.text)
+        except Exception as e:  # noqa: BLE001 — владелец должен узнать, что не записано
+            logger.exception("Календарь «%s» не импортирован", name)
+            reply = (f"«{name}» — календарь, но разобрать его не смог "
+                     f"({type(e).__name__}). Ничего не записал.")
+    await coordinator.respond_as("Redmond", chat_id, reply, "🦞", "plain")
+    try:
+        dispatcher.response_generator.note_to_history(
+            chat_id, f"(прислал файл «{name}»)", reply, agent="Redmond")
+    except Exception:
+        logger.warning("note_to_history failed", exc_info=True)
+    await _route_caption(update, context, chat_id)
+
+
+async def _route_caption(update: Update, context: ContextTypes.DEFAULT_TYPE,
+                         chat_id: int, caption: str = "") -> None:
+    """Подпись к файлу/фото — это его слова, а не украшение: «вот расписание,
+    составь план» должно дойти до агентов, как обычное сообщение."""
+    text = (caption or (update.message.caption if update.message else "") or "").strip()
+    if text:
+        await _route_and_respond(text, context, chat_id, update.effective_user)
+
+
+async def redmond_other_media_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Стикеры, GIF, видео, аудио. Читать их нечем, но и пропадать молча они
+    не должны: в логе видно, что пришло, а на видео/аудио — честный ответ.
+    Стикер и GIF — реакция, отвечать на них нечего."""
+    if not await _gate(update, context):
+        return
+    msg = update.message
+    if not _is_from_owner(update) or msg is None:
+        return
+    kind = ("стикер" if msg.sticker else "GIF" if msg.animation else "видео" if msg.video
+            else "кружок" if msg.video_note else "аудио" if msg.audio else "медиа")
+    logger.info("IN [owner] %s — не разбираю", kind)
+    if kind in ("видео", "кружок", "аудио"):
+        await context.application.bot_data["coordinator"].respond_as(
+            "Redmond", update.effective_chat.id,
+            f"{kind.capitalize()} пока не разбираю — опиши словами или пришли голосовым.",
+            "🦞", "plain")
 
 
 # ---------- Routing core (текст и голос идут одним путём) ----------

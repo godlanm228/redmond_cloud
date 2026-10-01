@@ -103,8 +103,11 @@ def _migrate_shifts(conn) -> Tuple[int, int]:
     for date, s in data.items():
         if not isinstance(s, dict):
             continue
+        # В shifts.json была одна смена на дату; повторный перенос заменяет её,
+        # а не добавляет вторую (ключ таблицы с v9 — id, не дата).
+        conn.execute("DELETE FROM shifts WHERE date=?", (date,))
         conn.execute(
-            "INSERT OR REPLACE INTO shifts"
+            "INSERT INTO shifts"
             "(date, start, end, status, source, confidence, updated,"
             " last_confirmed_at, note) VALUES(?,?,?,?,?,?,?,?,?)",
             (date, s.get("start"), s.get("end"), s.get("status", "planned"),

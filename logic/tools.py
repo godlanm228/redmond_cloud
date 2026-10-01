@@ -558,7 +558,8 @@ TOOL_SCHEMAS = [
         "function": {
             "name": "get_week_schedule",
             "description": (
-                "Owner's schedule for the next days: work shifts (bar) + university classes. "
+                "Owner's schedule for the next days: work shifts (bar) + university classes, "
+                "training and other planned events (#id for removal). "
                 "Call when planning, or when owner asks «когда у меня смены/пары», or to "
                 "check if today/tomorrow is busy."
             ),
@@ -590,8 +591,68 @@ TOOL_SCHEMAS = [
                     },
                     "start": {"type": "string", "description": "Start time HH:MM, e.g. 17:00"},
                     "end": {"type": "string", "description": "End time HH:MM, e.g. 23:00"},
+                    "replaces": {
+                        "type": ["boolean", "null"],
+                        "description": (
+                            "true only when he says the day's shift was MOVED to these "
+                            "hours («перенесли на утро»). Otherwise hours that don't "
+                            "overlap an existing shift are a SECOND shift that day."
+                        ),
+                    },
                 },
                 "required": ["start", "end"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "add_schedule_event",
+            "description": (
+                "Add a class, training, appointment or other planned event to his "
+                "schedule (NOT a work shift — that is save_work_shift). One-off on a "
+                "date, or weekly («теннис по понедельникам 20-21:30» → weekly=true, "
+                "date = the first such day). Calendar files and screenshots are "
+                "imported by code — don't re-add their events."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "title": {"type": "string", "description": "What it is, as he named it"},
+                    "kind": {
+                        "type": "string",
+                        "enum": ["lecture", "sport", "work", "rest", "other"],
+                        "description": "lecture = any university class",
+                    },
+                    "date": {"type": ["string", "null"],
+                             "description": "YYYY-MM-DD: the day, or the first day of a weekly series"},
+                    "start": {"type": "string", "description": "HH:MM; omit for all day"},
+                    "end": {"type": "string", "description": "HH:MM; omit for all day"},
+                    "weekly": {"type": ["boolean", "null"], "description": "Repeats every week"},
+                    "until": {"type": ["string", "null"],
+                              "description": "YYYY-MM-DD last day of a weekly series; null = open"},
+                },
+                "required": ["title", "kind", "date"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "remove_schedule_event",
+            "description": (
+                "Remove a class/training/event from his schedule by the #id that "
+                "get_week_schedule shows. A weekly one stops from `date` on (earlier "
+                "weeks stay in history)."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "event_id": {"type": "integer", "description": "#id from get_week_schedule"},
+                    "date": {"type": ["string", "null"],
+                             "description": "YYYY-MM-DD from which a weekly event stops; null = today"},
+                },
+                "required": ["event_id"],
             },
         },
     },
@@ -765,6 +826,7 @@ OUTPUT_ESSENTIALS: Dict[str, str] = {
     "list_goals": "ids",
     "list_deadlines": "ids",
     "find_photo": "ids",
+    "get_week_schedule": "ids",
     # пишущие — отдают ссылку на только что созданную или изменённую запись
     "add_goal": "ids",
     "mark_goal_done": "ids",
@@ -920,6 +982,7 @@ RECORD_KIND: Dict[str, str] = {
     "mark_deadline_done": "deadline", "delete_deadline": "deadline",
     "postpone_deadline": "deadline",
     "find_photo": "photo",
+    "get_week_schedule": "event", "remove_schedule_event": "event",
 }
 
 # Инструменты, которые обращаются к СУЩЕСТВУЮЩЕЙ записи по номеру, и поля,
@@ -930,11 +993,13 @@ ADDRESSED_RECORDS: Dict[str, Tuple[str, ...]] = {
     "postpone_deadline": ("deadline_id",),
     "mark_deadline_done": ("deadline_id",),
     "mark_goal_done": ("goal_id",),
+    "remove_schedule_event": ("event_id",),
 }
 
 # Чем модель может получить настоящие номера.
 _READ_HINT = {"diary": "read_diary", "goal": "list_goals",
-              "deadline": "list_deadlines", "photo": "find_photo"}
+              "deadline": "list_deadlines", "photo": "find_photo",
+              "event": "get_week_schedule"}
 
 _REF_RX = re.compile(r"#(\d+)")
 
@@ -1131,6 +1196,10 @@ def _dispatch_tool(name: str, args: Dict[str, Any], rg=None) -> str:
         return format_week(int(args.get("days", 8)))
     if name == "save_work_shift":
         return _tool_save_work_shift(args)
+    if name == "add_schedule_event":
+        return _tool_add_schedule_event(args)
+    if name == "remove_schedule_event":
+        return _tool_remove_schedule_event(args)
     if name == "set_work_shift_status":
         return _tool_set_work_shift_status(args)
     if name == "resolve_shift_conflict":
@@ -1355,12 +1424,12 @@ def _norm_hm(raw: Any) -> Optional[str]:
 
 def _tool_save_work_shift(args: Dict[str, Any]) -> str:
     from logic import coach_storage
-    from logic.week_schedule import save_shifts
+    from logic.week_schedule import apply_shifts, get_shifts
     from utils.time import now_local
 
     shift_date = str(args.get("date") or "").strip() or now_local().strftime("%Y-%m-%d")
     try:
-        datetime.strptime(shift_date, "%Y-%m-%d")
+        dt = datetime.strptime(shift_date, "%Y-%m-%d").date()
     except ValueError:
         return f"Дата смены «{shift_date}» не в формате YYYY-MM-DD — смену не сохранила."
 
@@ -1369,29 +1438,93 @@ def _tool_save_work_shift(args: Dict[str, Any]) -> str:
     if not start or not end:
         return "Нужны часы смены в формате HH:MM — смену не сохранила."
 
-    n = save_shifts([{
+    outcome = apply_shifts([{
         "date": shift_date,
         "start": start,
         "end": end,
         "status": "confirmed",
         "source": "text",
         "confidence": "high",
+        "replaces": bool(args.get("replaces")),
     }])
-    if not n:
+    if not outcome.saved:
         return "Смену не сохранила — не хватило даты или времени."
 
-    # Дневниковый факт нужен вечернему итогу, shifts.json — будущим пингам.
+    # Дневниковый факт нужен вечернему итогу, таблица смен — будущим пингам.
     coach_storage.add_diary_entry(
         f"Смена {shift_date} с {start} до {end}",
         tags=["работа"],
         data={"date": shift_date, "start": start, "end": end},
     )
-    return f"Смена сохранена в расписание: {shift_date} {start}–{end}."
+    reply = f"Смена сохранена в расписание: {shift_date} {start}–{end}."
+    day = get_shifts(dt)
+    if len(day) > 1:
+        # Вторая смена в день — не ошибка (утро + вечер), но и не то, что
+        # стоит записать молча: если это был перенос, старая осталась бы висеть.
+        listed = ", ".join(f"{s['start']}–{s['end']}" for s in day)
+        reply += (f" В этот день теперь смен: {len(day)} ({listed}). Если это был "
+                  f"перенос, а не вторая смена — уточни у него и отмени лишнюю.")
+    return reply
+
+
+def _tool_add_schedule_event(args: Dict[str, Any]) -> str:
+    from logic.week_schedule import add_event, describe_event
+
+    try:
+        first = datetime.strptime(str(args.get("date") or "").strip(), "%Y-%m-%d").date()
+    except ValueError:
+        return "Нужна дата YYYY-MM-DD — событие не добавила."
+    until = None
+    if args.get("until"):
+        try:
+            until = datetime.strptime(str(args["until"]).strip(), "%Y-%m-%d").date()
+        except ValueError:
+            return f"Дата конца серии «{args['until']}» не в формате YYYY-MM-DD — не добавила."
+    start = _norm_hm(args.get("start")) or ""
+    end = _norm_hm(args.get("end")) or ""
+    weekly = bool(args.get("weekly"))
+    try:
+        row_id = add_event(
+            str(args.get("title") or ""), str(args.get("kind") or "").strip().lower(),
+            start, end, on=None if weekly else first, weekly_from=first if weekly else None,
+            until=until if weekly else None, source="text",
+        )
+    except ValueError as e:
+        return f"Не добавила: {e}."
+    from logic.week_schedule import timetable_rows
+    row = next((r for r in timetable_rows() if r["id"] == row_id), {})
+    when = (f"каждый {_WEEKDAY_ACC[first.weekday()]} с {first:%d.%m}"
+            + (f" по {until:%d.%m}" if until else "")) if weekly else f"{first:%d.%m}"
+    return f"Добавила в расписание: {describe_event(row)} — {when}."
+
+
+_WEEKDAY_ACC = ["понедельник", "вторник", "среду", "четверг", "пятницу", "субботу",
+                "воскресенье"]
+
+
+def _tool_remove_schedule_event(args: Dict[str, Any]) -> str:
+    from logic.week_schedule import describe_event, remove_event, timetable_rows
+    from utils.time import now_local
+
+    try:
+        row_id = int(args.get("event_id"))
+    except (TypeError, ValueError):
+        return "Нужен #id события из расписания — ничего не убрала."
+    raw = str(args.get("date") or "").strip()
+    try:
+        on = datetime.strptime(raw, "%Y-%m-%d").date() if raw else now_local().date()
+    except ValueError:
+        return f"Дата «{raw}» не в формате YYYY-MM-DD — ничего не убрала."
+    row = next((r for r in timetable_rows() if r["id"] == row_id), None)
+    if row is None:
+        return f"События #{row_id} в расписании нет — ничего не убрала."
+    done = remove_event(row_id, on)
+    return f"Убрала из расписания: {describe_event(row)} — {done}."
 
 
 def _tool_set_work_shift_status(args: Dict[str, Any]) -> str:
     from logic import coach_storage
-    from logic.week_schedule import get_shift_record, save_shifts
+    from logic.week_schedule import apply_shifts, get_shift_records
     from utils.time import now_local
 
     shift_date = str(args.get("date") or "").strip() or now_local().strftime("%Y-%m-%d")
@@ -1404,20 +1537,19 @@ def _tool_set_work_shift_status(args: Dict[str, Any]) -> str:
     if status not in {"confirmed", "cancelled", "uncertain"}:
         return "Статус смены должен быть confirmed/cancelled/uncertain."
 
-    current = get_shift_record(dt) or {}
-    item: Dict[str, Any] = {
+    # Статус — к каждой смене дня с её же часами (их может быть несколько).
+    # Без часов в базе пройдёт только отмена: отметка «смена отменена».
+    base: Dict[str, Any] = {
         "date": shift_date,
         "status": status,
         "source": "text",
         "confidence": "high" if status in {"confirmed", "cancelled"} else "medium",
         "note": str(args.get("note") or "").strip(),
     }
-    if current.get("start"):
-        item["start"] = current["start"]
-    if current.get("end"):
-        item["end"] = current["end"]
+    with_hours = [s for s in get_shift_records(dt) if s.get("start") and s.get("end")]
+    items = [{**base, "start": s["start"], "end": s["end"]} for s in with_hours] or [base]
 
-    n = save_shifts([item])
+    n = apply_shifts(items).saved
     if not n:
         return "Не нашла смену с часами на эту дату. Если часы известны — сохрани через save_work_shift."
 
@@ -1430,8 +1562,8 @@ def _tool_set_work_shift_status(args: Dict[str, Any]) -> str:
     else:
         text = f"Смена {shift_date} под вопросом"
         reply = f"Смена {shift_date} помечена как под вопросом."
-    if item["note"]:
-        text += f": {item['note']}"
+    if base["note"]:
+        text += f": {base['note']}"
 
     coach_storage.add_diary_entry(text, tags=["работа"], data={"date": shift_date, "status": status})
     return reply

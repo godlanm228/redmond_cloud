@@ -221,12 +221,17 @@ def parse(raw: str, message: str) -> Optional[Understanding]:
 # The call
 # ---------------------------------------------------------------------------
 
-def tools_needed(u: "Understanding") -> set:
-    """Model-facing tool names the reading says the answer needs."""
+def tools_for_needs(needs) -> set:
+    """Model-facing tool names for a list of needs (diary, food, schedule…)."""
     out: set = set()
-    for n in u.needs:
+    for n in needs or ():
         out |= NEEDS.get(n, set())
     return out
+
+
+def tools_needed(u: "Understanding") -> set:
+    """Model-facing tool names the reading says the answer needs."""
+    return tools_for_needs(u.needs)
 
 
 def build_input(message: str, history: Sequence[Dict[str, str]], now: str,

@@ -13,7 +13,7 @@ from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional
 
 from logic import coach_storage
-from logic.week_schedule import get_shift, study_slots
+from logic.week_schedule import day_events, describe_event, get_shifts
 from utils.time import now_local
 
 _IMPORTANCE_RANK = {"high": 0, "medium": 1, "low": 2}
@@ -121,9 +121,10 @@ def build_day_context() -> str:
         lines.append("  Недавнее (последняя запись по теме — не говори «нет записей» вслепую):")
         lines += recent_lines
 
-    shift = get_shift(now.date() + timedelta(days=1))
-    if shift:
-        lines.append(f"  Завтра: смена {shift['start']}–{shift['end']}")
+    tomorrow = get_shifts(now.date() + timedelta(days=1))
+    if tomorrow:
+        lines.append("  Завтра: " + "; ".join(
+            f"смена {s['start']}–{s['end']}" for s in tomorrow))
 
     lines.append("  ПРАВИЛО: план дня — только вперёд от «Сейчас», прошедшие часы не планировать.")
     return "\n".join(lines)
@@ -165,11 +166,9 @@ def build_priorities_block() -> str:
         )
 
     day_parts: List[str] = []
-    shift = get_shift(today)
-    if shift:
+    for shift in get_shifts(today):
         day_parts.append(f"смена {shift['start']}–{shift['end']}")
-    for start, end, what in study_slots(today):
-        day_parts.append(f"{start}–{end} {what}")
+    day_parts += [describe_event(r) for r in day_events(today)]
     if day_parts:
         label = f"{_DAY_NAMES[today.weekday()]} {today.strftime('%d.%m')}"
         lines.append(f"TODAY ({label}): " + "; ".join(day_parts))

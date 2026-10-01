@@ -586,6 +586,10 @@ class GenerationContext:
     # записал факты, выполнил команды. None — шаг понимания был недоступен.
     understanding: Any = None
     code_actions: List[Tuple[str, Dict[str, Any], str]] = field(default_factory=list)
+    # Что нужно ответу, по словам кода, который сам написал промпт (разбор
+    # фото → schedule/food). Те же имена, что needs у прочтения. None — код
+    # ничего не сказал.
+    needs: Optional[List[str]] = None
     # Какие модели дали ходы этого ответа (по шагу на вызов): без этого в логе
     # не видно, кто ответил, если отвечала основная модель пула.
     models: List[str] = field(default_factory=list)
@@ -677,6 +681,7 @@ class ResponseGenerator:
         force_tool: Optional[str] = None,
         include_history: bool = True,
         understanding: Any = None,
+        needs: Optional[List[str]] = None,
     ) -> str:
         """
         Stateless по entry-point — все per-chat данные ходят через chat_id.
@@ -708,6 +713,7 @@ class ResponseGenerator:
             distress=include_history and distress.detect(user_text),
             # Без истории зовут только плановые задачи (скедулер).
             priority=llm_gate.OWNER if include_history else llm_gate.BACKGROUND,
+            needs=list(needs) if needs is not None else None,
         )
         if understanding is not None and include_history:
             # Срочность — из прочтения с цитатой, а не из списка слов: «в больнице
@@ -767,11 +773,16 @@ class ResponseGenerator:
             # попадают всегда: 29.09.2026 его план («довести Redmond до
             # презентабельности…») ушёл в сбой моделей и пропал, и на «че за
             # галлюцинации, я же сказал план» Iris нечего было зафиксировать.
+            # Кто ответил — в историю: по нему после рестарта восстанавливается
+            # sticky роутера, и агенты видят, чья это была реплика. До 01.10.2026
+            # имя здесь не передавалось: в базе у всех реплик agent='', и после
+            # рестарта роутер считал, что последним говорил Redmond.
+            who = ctx.agent.name if ctx.agent else "Redmond"
             if not ctx.failed:
-                self._save_interaction(user_text, response, chat_id)
+                self._save_interaction(user_text, response, chat_id, agent=who)
             elif not _is_system_prompt(user_text):
                 self._save_interaction(user_text, "(ответа не было — модели не ответили)",
-                                       chat_id, history_only=True)
+                                       chat_id, agent=who, history_only=True)
             self.last_response = response
             return Reply(response, failed=ctx.failed)
         except Exception:
@@ -1502,6 +1513,21 @@ class ResponseGenerator:
     def _select_tools(self, ctx: GenerationContext, agent_name: str,
                       tools: List[dict]) -> Tuple[List[dict], List[dict]]:
         from logic import tool_select
+        needs = getattr(ctx, "needs", None)
+        if needs is not None:
+            # Промпт написал код и сам назвал, что нужно ответу. До 01.10.2026
+            # такие промпты получали ВЕСЬ набор агента: Iris на фото графика
+            # шла с ~6.5K токенов против ~3.5K в чате, и Groq отвечал 413.
+            from logic import understanding as understanding_mod
+            # Дневник — только если код его назвал, как и на пути прочтения.
+            core = set(tool_select.CORE.get(agent_name, {"get_current_time"})) - {"diary"}
+            want = understanding_mod.tools_for_needs(needs) | core
+            offered = [s for s in tools if s["function"]["name"] in want]
+            deferred = [s for s in tools if s["function"]["name"] not in want]
+            logger.info("Отбор [%s, код: %s]: %s; в запасе %d", agent_name,
+                        ", ".join(needs) or "ничего",
+                        ", ".join(s["function"]["name"] for s in offered), len(deferred))
+            return offered, deferred
         if ctx.understanding is not None and not _is_system_prompt(ctx.user_text):
             # Какие инструменты нужны, говорит прочтение (оно уже читало сообщение
             # сильной моделью). Векторный отбор всегда давал топ-3, даже на

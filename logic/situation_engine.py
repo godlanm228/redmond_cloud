@@ -148,8 +148,9 @@ class DaySituation:
 
 
 def _build_shift_situation(now: datetime) -> ShiftSituation:
-    record = get_shift_record(now.date())
-    active = get_shift(now.date())
+    # Смен в день может быть несколько (v9): пингам важна идущая или ближайшая.
+    record = get_shift_record(now.date(), at=now)
+    active = get_shift(now.date(), at=now)
     start_at = parse_hm(active.get("start"), now) if active else None
     end_at = parse_hm(active.get("end"), now) if active else None
     return ShiftSituation(

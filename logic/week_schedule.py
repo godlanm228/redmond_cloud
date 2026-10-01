@@ -1,14 +1,17 @@
 """
-Недельное расписание владельца: рабочие смены (из скрина графика, парсинг в
-logic/vision.py) + учебное расписание.
+Недельное расписание владельца: рабочие смены (скрин графика, календарь,
+текст) + учёба и прочие события (пары, спорт, встречи).
 
-Смены: таблица shifts (одна строка на дату) + append-only журнал shift_events.
+Смены: таблица shifts (несколько смен в день, v9) + append-only журнал
+shift_events. «Та же смена» — та, что пересекается по времени: план 17:00 и
+факт 17:14 — одна смена, утренняя и вечерняя — две.
 Метаданные: status/source/confidence/last_confirmed_at/updated/note.
-Форма словаря сохранена как в старом shifts.json — вызывающие не менялись.
 
-Учёба: таблица timetable со сроком действия (с 21.08.2026; до этого была
-константой в коде и поэтому не отменялась ничем — см. комментарий у
-_SEED_TIMETABLE). Читать только через study_slots() / is_home_study_day().
+Учёба и события: таблица timetable — еженедельные строки со сроком действия
+(с 21.08.2026; до этого расписание было константой в коде и не отменялось
+ничем — см. комментарий у _SEED_TIMETABLE) и разовые строки на дату (v9:
+вузовский календарь выгружает конкретные даты). Читать только через
+study_slots() / day_events() / is_home_study_day().
 """
 
 from __future__ import annotations
@@ -28,7 +31,10 @@ logger = logging.getLogger(__name__)
 # человек: 12.08.2026 фото графика с двумя сотрудниками записало чужие смены,
 # а бот при этом сам предлагал «поправь текстом» — и следующее фото стёрло бы
 # правку обратно. Равный или больший приоритет побеждает.
-SOURCE_PRIORITY = {"manual": 3, "text": 2, "photo": 1, "scheduler": 1, "unknown": 0}
+# Календарь (.ics) — выгрузка из системы, где смены и ведут: точнее фото,
+# поэтому на уровне слов владельца.
+SOURCE_PRIORITY = {"manual": 3, "text": 2, "calendar": 2, "photo": 1, "scheduler": 1,
+                   "unknown": 0}
 
 # Что делать, когда фото противоречит уже сказанному текстом.
 #   ask        — спросить Влада (дефолт): молча отклонить мало, он об этом
@@ -76,6 +82,10 @@ class ShiftConflict:
 class ShiftApplyResult:
     saved: int = 0
     conflicts: List[ShiftConflict] = field(default_factory=list)
+    # Что реально легло в таблицу — для квитанции. Пересказывать разобранное,
+    # а не записанное, нельзя: 01.10 бот отчитался «смен сохранено: 4», а в
+    # базе от этих четырёх осталась одна.
+    applied: List[Dict[str, Any]] = field(default_factory=list)
 
     def __int__(self) -> int:
         return self.saved
@@ -118,12 +128,20 @@ def _iso(d: date) -> str:
     return d.strftime("%Y-%m-%d")
 
 
+# Виды строк timetable. Учебные — те, что зовут «на пары» и глушат пинги.
+EVENT_KINDS = ("lecture", "home_study", "sport", "work", "rest", "other")
+STUDY_KINDS = ("lecture", "home_study")
+KIND_LABELS = {"lecture": "учёба", "home_study": "дом. учёба", "sport": "спорт",
+               "work": "работа", "rest": "отдых", "other": "дело"}
+
+
 def _rows_for(d: date, kind: Optional[str] = None) -> List[Dict[str, Any]]:
-    """Строки расписания, ДЕЙСТВУЮЩИЕ на дату d. Вне срока — не существуют."""
+    """Строки расписания, ДЕЙСТВУЮЩИЕ на дату d: еженедельные в своём сроке
+    действия и разовые на эту дату. Вне срока — не существуют."""
     day = _iso(d)
-    sql = ("SELECT * FROM timetable WHERE weekday=? AND valid_from<=?"
-           " AND (valid_to IS NULL OR valid_to>=?)")
-    params: List[Any] = [d.weekday(), day, day]
+    sql = ("SELECT * FROM timetable WHERE ((date IS NULL AND weekday=? AND valid_from<=?"
+           " AND (valid_to IS NULL OR valid_to>=?)) OR date=?)")
+    params: List[Any] = [d.weekday(), day, day, day]
     if kind:
         sql += " AND kind=?"
         params.append(kind)
@@ -131,9 +149,121 @@ def _rows_for(d: date, kind: Optional[str] = None) -> List[Dict[str, Any]]:
 
 
 def study_slots(d: date) -> List[Tuple[str, str, str]]:
-    """Занятия с часами на дату: [(start, end, что)]. Пусто вне срока действия."""
+    """Учебные занятия с часами на дату: [(start, end, что)]. Пусто вне срока."""
     return [(r["start"], r["end"], r["title"])
-            for r in _rows_for(d) if r["start"] and r["end"]]
+            for r in _rows_for(d) if r["start"] and r["end"] and r["kind"] in STUDY_KINDS]
+
+
+def day_events(d: date) -> List[Dict[str, Any]]:
+    """Все строки расписания на дату (учёба, спорт, встречи…), по времени."""
+    return _rows_for(d)
+
+
+def _check_event(title: str, kind: str, start: str, end: str) -> str:
+    """Причина отказа или ''."""
+    if not str(title or "").strip():
+        return "нет названия"
+    if kind not in EVENT_KINDS:
+        return f"неизвестный вид «{kind}» (есть: {', '.join(EVENT_KINDS)})"
+    if bool(start) != bool(end):
+        return "нужны и начало, и конец (или ни того, ни другого — на весь день)"
+    for hm in (start, end):
+        if hm and not re.match(r"^([01]\d|2[0-3]):[0-5]\d$", hm):
+            return f"время «{hm}» не в формате HH:MM"
+    return ""
+
+
+def add_event(title: str, kind: str, start: str = "", end: str = "", *,
+              on: Optional[date] = None, weekly_from: Optional[date] = None,
+              until: Optional[date] = None, location: str = "",
+              source: str = "manual") -> int:
+    """Одна строка расписания: разовая (on=дата) или еженедельная (weekly_from —
+    первое занятие, until — последнее включительно). Возвращает id.
+    ValueError с причиной — если данные неполные."""
+    why = _check_event(title, kind, start, end)
+    if not why and (on is None) == (weekly_from is None):
+        why = "нужна либо дата, либо начало еженедельной серии"
+    if why:
+        raise ValueError(why)
+    created = now_local().isoformat(timespec="minutes")
+    first = on or weekly_from
+    cur = db.execute(
+        "INSERT INTO timetable(weekday, start, end, title, kind, valid_from, valid_to,"
+        " source, created, date, location) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+        (first.weekday(), start or "", end or "", str(title).strip()[:200], kind,
+         _iso(first), _iso(until) if until else None, source, created,
+         _iso(on) if on else None, str(location or "").strip()[:200]),
+    )
+    return int(cur.lastrowid)
+
+
+def remove_event(row_id: int, on: date) -> str:
+    """Убрать строку: разовую — удалить; еженедельную — закончить серию днём
+    раньше `on` (история «что действовало» остаётся, как у expire_timetable).
+    Возвращает, что сделано."""
+    row = db.query_one("SELECT * FROM timetable WHERE id=?", (int(row_id),))
+    if row is None:
+        return ""
+    if row["date"]:
+        db.execute("DELETE FROM timetable WHERE id=?", (int(row_id),))
+        return "удалено"
+    last = _iso(on - timedelta(days=1))
+    if last < row["valid_from"]:
+        db.execute("DELETE FROM timetable WHERE id=?", (int(row_id),))
+        return "серия удалена целиком"
+    db.execute("UPDATE timetable SET valid_to=? WHERE id=?", (last, int(row_id)))
+    return f"серия закончена {last}"
+
+
+@dataclass
+class EventImportResult:
+    added: int = 0
+    updated: int = 0
+    removed: int = 0  # были в прошлой выгрузке этого календаря, в новой нет
+
+
+def import_events(events: List[Dict[str, Any]], origin: str, source: str,
+                  date_from: date, date_to: date) -> EventImportResult:
+    """Разовые события одного календаря за [date_from, date_to].
+
+    Повторная выгрузка того же календаря — снимок, а не добавка: события с тем
+    же uid обновляются, а исчезнувшие из выгрузки (отменённая пара) удаляются —
+    но только в пределах периода этой выгрузки и только этого календаря
+    (origin), чтобы файл с работы не стёр пары. events: date (YYYY-MM-DD),
+    start, end, title, kind, location, uid.
+    """
+    result = EventImportResult()
+    created = now_local().isoformat(timespec="minutes")
+    uids = [str(e["uid"]) for e in events if e.get("uid")]
+    with db.transaction() as conn:
+        placeholders = ",".join("?" * len(uids)) or "''"
+        cur = conn.execute(
+            f"DELETE FROM timetable WHERE origin=? AND date BETWEEN ? AND ?"
+            f" AND (uid IS NULL OR uid NOT IN ({placeholders}))",
+            (origin, _iso(date_from), _iso(date_to), *uids),
+        )
+        result.removed = cur.rowcount or 0
+        for e in events:
+            d = datetime.strptime(e["date"], "%Y-%m-%d").date()
+            values = (d.weekday(), e.get("start") or "", e.get("end") or "",
+                      str(e["title"]).strip()[:200], e["kind"], e["date"], source,
+                      e["date"], str(e.get("location") or "").strip()[:200])
+            row = conn.execute("SELECT id FROM timetable WHERE origin=? AND uid=?",
+                               (origin, e.get("uid"))).fetchone() if e.get("uid") else None
+            if row is not None:
+                conn.execute(
+                    "UPDATE timetable SET weekday=?, start=?, end=?, title=?, kind=?,"
+                    " valid_from=?, source=?, date=?, location=? WHERE id=?",
+                    (*values, row["id"]))
+                result.updated += 1
+            else:
+                conn.execute(
+                    "INSERT INTO timetable(weekday, start, end, title, kind, valid_from,"
+                    " source, date, location, created, uid, origin)"
+                    " VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+                    (*values, created, e.get("uid"), origin))
+                result.added += 1
+    return result
 
 
 def is_home_study_day(d: date) -> bool:
@@ -169,7 +299,7 @@ def expire_timetable(valid_to: str, source: str = "manual") -> int:
     действовать со следующего дня.
     """
     cur = db.execute(
-        "UPDATE timetable SET valid_to=?, source=? WHERE valid_to IS NULL",
+        "UPDATE timetable SET valid_to=?, source=? WHERE valid_to IS NULL AND date IS NULL",
         (valid_to, source),
     )
     return cur.rowcount or 0
@@ -224,9 +354,10 @@ def _is_active_shift(shift: Optional[Dict[str, Any]]) -> bool:
 
 
 def _shift_row(r) -> Dict[str, Any]:
-    """Строка таблицы → тот же словарь, что раньше лежал в shifts.json.
+    """Строка таблицы → словарь в форме старого shifts.json (+ id строки).
     Пустые поля опускаем: у вызывающих есть проверки на их отсутствие."""
     out: Dict[str, Any] = {
+        "id": r["id"], "date": r["date"],
         "start": r["start"], "end": r["end"], "status": r["status"],
         "source": r["source"], "confidence": r["confidence"],
         "updated": r["updated"],
@@ -238,10 +369,60 @@ def _shift_row(r) -> Dict[str, Any]:
     return out
 
 
-def get_shift_record(d: date) -> Optional[Dict[str, Any]]:
-    """Raw record for a date, including cancelled/uncertain metadata."""
-    row = db.query_one("SELECT * FROM shifts WHERE date=?", (d.strftime("%Y-%m-%d"),))
-    return _shift_row(row) if row is not None else None
+def _minutes(hm: Any) -> Optional[int]:
+    m = re.match(r"^(\d{1,2}):(\d{2})$", str(hm or "").strip())
+    return int(m.group(1)) * 60 + int(m.group(2)) if m else None
+
+
+def _interval(start: Any, end: Any) -> Optional[Tuple[int, int]]:
+    """Минуты от начала дня; конец не позже начала = через полночь (16:00–00:00)."""
+    s, e = _minutes(start), _minutes(end)
+    if s is None or e is None:
+        return None
+    return (s, e + 24 * 60 if e <= s else e)
+
+
+def _overlap(a: Optional[Tuple[int, int]], b: Optional[Tuple[int, int]]) -> int:
+    if a is None or b is None:
+        return 0
+    return max(0, min(a[1], b[1]) - max(a[0], b[0]))
+
+
+def get_shift_records(d: date) -> List[Dict[str, Any]]:
+    """Все записи смен на дату (вкл. отменённые), по времени начала."""
+    return [_shift_row(r) for r in db.query(
+        "SELECT * FROM shifts WHERE date=? ORDER BY start, id", (_iso(d),))]
+
+
+def get_shifts(d: date) -> List[Dict[str, Any]]:
+    """Действующие смены на дату, по времени начала."""
+    return [s for s in get_shift_records(d) if _is_active_shift(s)]
+
+
+def _relevant(records: List[Dict[str, Any]], at: Optional[datetime]) -> Optional[Dict[str, Any]]:
+    """Из нескольких смен дня — та, что важна сейчас: идущая, иначе ближайшая
+    впереди, иначе последняя. Без момента времени — первая по началу."""
+    if not records:
+        return None
+    if at is None:
+        return records[0]
+    now_min = at.hour * 60 + at.minute
+    upcoming = None
+    for r in records:
+        iv = _interval(r.get("start"), r.get("end"))
+        if iv is None:
+            continue
+        if iv[0] <= now_min < iv[1]:
+            return r
+        if iv[0] > now_min and upcoming is None:
+            upcoming = r
+    return upcoming or records[-1]
+
+
+def get_shift_record(d: date, at: Optional[datetime] = None) -> Optional[Dict[str, Any]]:
+    """Запись смены дня, важная в момент `at` (см. _relevant), вкл. отменённые.
+    Все смены дня — get_shift_records()."""
+    return _relevant(get_shift_records(d), at)
 
 
 def log_shift_event(date_str: str, action: str, source: str,
@@ -272,10 +453,9 @@ def shift_history(date_str: str) -> List[Dict[str, Any]]:
     ]
 
 
-def get_shift(d: date) -> Optional[Dict[str, Any]]:
-    """Active shift only. Cancelled records are visible via get_shift_record()."""
-    shift = get_shift_record(d)
-    return shift if _is_active_shift(shift) else None
+def get_shift(d: date, at: Optional[datetime] = None) -> Optional[Dict[str, Any]]:
+    """Действующая смена дня, важная в момент `at`. Все смены дня — get_shifts()."""
+    return _relevant(get_shifts(d), at)
 
 
 def save_shifts(items: List[Dict[str, Any]]) -> int:
@@ -296,6 +476,14 @@ def apply_shifts(items: List[Dict[str, Any]]) -> ShiftApplyResult:
     обновился. Поэтому по умолчанию (policy='ask') такие случаи возвращаются
     как конфликты, и вызывающий спрашивает. Заранее заданная политика
     ('keep_mine'/'photo_wins') снимает вопрос.
+
+    Какую запись правит пункт (с v9, несколько смен в день): ту, что
+    пересекается с ним по времени (план 17:00 → факт 17:14 — та же смена).
+    Не пересекается ни с одной — это ещё одна смена в этот день, а не замена:
+    до 01.10.2026 любая запись на дату затирала предыдущую. Перенос на
+    непересекающиеся часы — пункт с replaces=True (сказано «перенесли»).
+    Пункт без часов (только статус: «сегодня не иду») относится ко всем
+    действующим сменам дня.
     """
     result = ShiftApplyResult()
     policy = get_conflict_policy()
@@ -305,77 +493,10 @@ def apply_shifts(items: List[Dict[str, Any]]) -> ShiftApplyResult:
             d, start, end = it.get("date"), it.get("start"), it.get("end")
             if not d or not re.match(r"^\d{4}-\d{2}-\d{2}$", str(d)):
                 continue
-
-            row = conn.execute("SELECT * FROM shifts WHERE date=?", (d,)).fetchone()
-            prev = _shift_row(row) if row is not None else {}
-            status = str(it.get("status") or prev.get("status") or "planned").strip().lower()
-            source = str(it.get("source") or prev.get("source")
-                         or ("text" if status == "cancelled" else "unknown"))
-
-            # Одинаковые значения конфликтом не считаем: фото, подтверждающее
-            # уже известную смену, ничего не портит и вопроса не стоит.
-            if prev and _priority(source) < _priority(prev.get("source", "")):
-                same = (prev.get("start") == start and prev.get("end") == end
-                        and prev.get("status") == status)
-                if not same and policy != "photo_wins":
-                    conn.execute(
-                        "INSERT INTO shift_events(ts, date, action, source, payload, reason)"
-                        " VALUES(?,?,?,?,?,?)",
-                        (updated, d, "conflict" if policy == "ask" else "reject", source,
-                         _dumps(dict(it)),
-                         (f"{source} расходится с {prev.get('source')} "
-                          f"({prev.get('start')}–{prev.get('end')}), политика: {policy}")),
-                    )
-                    logger.info("Смена %s: %s расходится с %s (политика %s)",
-                                d, source, prev.get("source"), policy)
-                    if policy == "ask":
-                        result.conflicts.append(
-                            ShiftConflict(date=d, incoming=dict(it), existing=dict(prev)))
-                    continue
-
-            if status == "cancelled":
-                record = {
-                    **prev,
-                    "status": "cancelled",
-                    "source": source,
-                    "confidence": it.get("confidence") or prev.get("confidence") or "high",
-                    "updated": updated,
-                }
-            else:
-                if not (start and end):
-                    continue
-                record = {
-                    **prev,
-                    "start": start,
-                    "end": end,
-                    "status": status,
-                    "source": source,
-                    "confidence": it.get("confidence") or prev.get("confidence") or "medium",
-                    "updated": updated,
-                }
-                if status == "confirmed":
-                    record["last_confirmed_at"] = updated
-            if it.get("note"):
-                record["note"] = str(it["note"]).strip()
-
-            conn.execute(
-                "INSERT INTO shifts(date, start, end, status, source, confidence,"
-                " updated, last_confirmed_at, note) VALUES(?,?,?,?,?,?,?,?,?)"
-                " ON CONFLICT(date) DO UPDATE SET start=excluded.start,"
-                " end=excluded.end, status=excluded.status, source=excluded.source,"
-                " confidence=excluded.confidence, updated=excluded.updated,"
-                " last_confirmed_at=excluded.last_confirmed_at, note=excluded.note",
-                (d, record.get("start"), record.get("end"), record["status"],
-                 record["source"], record["confidence"], record["updated"],
-                 record.get("last_confirmed_at"), record.get("note")),
-            )
-            conn.execute(
-                "INSERT INTO shift_events(ts, date, action, source, payload, reason)"
-                " VALUES(?,?,?,?,?,?)",
-                (updated, d, "cancel" if status == "cancelled" else "set",
-                 record["source"], _dumps(record), None),
-            )
-            result.saved += 1
+            rows = [_shift_row(r) for r in conn.execute(
+                "SELECT * FROM shifts WHERE date=? ORDER BY start, id", (d,))]
+            for prev in _targets(rows, it) or [{}]:
+                _apply_one(conn, it, prev, policy, updated, result)
 
     # Незакрытые конфликты держим до ответа Влада: без этого его «бери с фото»
     # применять не к чему — разобранные смены к тому моменту уже забыты.
@@ -385,6 +506,104 @@ def apply_shifts(items: List[Dict[str, Any]]) -> ShiftApplyResult:
             "items": [c.incoming for c in result.conflicts],
         })
     return result
+
+
+def _targets(rows: List[Dict[str, Any]], it: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Записи дня, которые правит пункт. [] — новая смена."""
+    iv = _interval(it.get("start"), it.get("end"))
+    active = [r for r in rows if _is_active_shift(r)]
+    if iv is None:
+        # Только статус, без часов: относится к действующим сменам дня; нет
+        # их — к отметке «отменена» без часов, если она уже есть.
+        return active or [r for r in rows if not (r.get("start") and r.get("end"))][:1]
+    best = max(rows, key=lambda r: _overlap(iv, _interval(r.get("start"), r.get("end"))),
+               default=None)
+    if best is not None and _overlap(iv, _interval(best.get("start"), best.get("end"))) > 0:
+        return [best]
+    if it.get("replaces") and len(active) == 1:
+        return active
+    # Отметка «смена отменена» без часов — дневной факт: смена с часами его заменяет.
+    return [r for r in rows if not (r.get("start") and r.get("end"))][:1]
+
+
+def _apply_one(conn, it: Dict[str, Any], prev: Dict[str, Any], policy: str,
+               updated: str, result: ShiftApplyResult) -> None:
+    """Один пункт против одной записи (prev={} — новая смена)."""
+    d = it["date"]
+    start = it.get("start") or prev.get("start")
+    end = it.get("end") or prev.get("end")
+    status = str(it.get("status") or prev.get("status") or "planned").strip().lower()
+    source = str(it.get("source") or prev.get("source")
+                 or ("text" if status == "cancelled" else "unknown"))
+
+    # Одинаковые значения конфликтом не считаем: фото, подтверждающее
+    # уже известную смену, ничего не портит и вопроса не стоит.
+    if prev and _priority(source) < _priority(prev.get("source", "")):
+        same = (prev.get("start") == start and prev.get("end") == end
+                and prev.get("status") == status)
+        if not same and policy != "photo_wins":
+            conn.execute(
+                "INSERT INTO shift_events(ts, date, action, source, payload, reason)"
+                " VALUES(?,?,?,?,?,?)",
+                (updated, d, "conflict" if policy == "ask" else "reject", source,
+                 _dumps(dict(it)),
+                 (f"{source} расходится с {prev.get('source')} "
+                  f"({prev.get('start')}–{prev.get('end')}), политика: {policy}")),
+            )
+            logger.info("Смена %s: %s расходится с %s (политика %s)",
+                        d, source, prev.get("source"), policy)
+            if policy == "ask":
+                result.conflicts.append(
+                    ShiftConflict(date=d, incoming=dict(it), existing=dict(prev)))
+            return
+
+    if status == "cancelled":
+        record = {
+            **prev,
+            "status": "cancelled",
+            "source": source,
+            "confidence": it.get("confidence") or prev.get("confidence") or "high",
+            "updated": updated,
+        }
+    else:
+        if not (start and end):
+            return
+        record = {
+            **prev,
+            "start": start,
+            "end": end,
+            "status": status,
+            "source": source,
+            "confidence": it.get("confidence") or prev.get("confidence") or "medium",
+            "updated": updated,
+        }
+        if status == "confirmed":
+            record["last_confirmed_at"] = updated
+    if it.get("note"):
+        record["note"] = str(it["note"]).strip()
+
+    values = (record.get("start"), record.get("end"), record["status"], record["source"],
+              record["confidence"], record["updated"], record.get("last_confirmed_at"),
+              record.get("note"))
+    if prev.get("id"):
+        conn.execute(
+            "UPDATE shifts SET start=?, end=?, status=?, source=?, confidence=?,"
+            " updated=?, last_confirmed_at=?, note=? WHERE id=?", (*values, prev["id"]))
+    else:
+        conn.execute(
+            "INSERT INTO shifts(start, end, status, source, confidence, updated,"
+            " last_confirmed_at, note, date) VALUES(?,?,?,?,?,?,?,?,?)", (*values, d))
+    record.pop("id", None)
+    record.pop("date", None)
+    conn.execute(
+        "INSERT INTO shift_events(ts, date, action, source, payload, reason)"
+        " VALUES(?,?,?,?,?,?)",
+        (updated, d, "cancel" if status == "cancelled" else "set",
+         record["source"], _dumps(record), None),
+    )
+    result.saved += 1
+    result.applied.append({"date": d, "start": record.get("start"),
+                           "end": record.get("end"), "status": record["status"]})
 
 
 def pending_conflicts() -> List[Dict[str, Any]]:
@@ -429,9 +648,10 @@ def _dumps(obj: Any) -> str:
 
 
 def describe_saved_shifts(items: List[Dict[str, str]], n: int) -> str:
-    """Человекочитаемое подтверждение сохранённых смен для чата."""
+    """Человекочитаемое подтверждение сохранённых смен для чата.
+    items — ShiftApplyResult.applied: то, что легло в базу, а не то, что разобрали."""
     lines = []
-    for it in sorted(items, key=lambda x: x.get("date", "")):
+    for it in sorted(items, key=lambda x: (x.get("date", ""), x.get("start") or "")):
         try:
             d = datetime.strptime(it["date"], "%Y-%m-%d").date()
             lines.append(f"• {_DAY_NAMES[d.weekday()]} {d.strftime('%d.%m')}: {it['start']}–{it['end']}")
@@ -443,21 +663,38 @@ def describe_saved_shifts(items: List[Dict[str, str]], n: int) -> str:
     )
 
 
+def describe_shift(s: Dict[str, Any]) -> str:
+    if not (s.get("start") and s.get("end")):
+        return "смена отменена"
+    tail = " отменена" if s.get("status") == "cancelled" else ""
+    return f"смена {s['start']}–{s['end']}{tail}"
+
+
+def describe_event(r: Dict[str, Any], with_id: bool = False) -> str:
+    """«14:05–15:45 Diskrete Mathematik» / «20:00–21:30 Tennis (спорт, еженедельно)»."""
+    when = f"{r['start']}–{r['end']}" if r.get("start") and r.get("end") else "весь день"
+    notes = [] if r.get("kind") == "lecture" else [KIND_LABELS.get(r.get("kind"), r.get("kind"))]
+    if not r.get("date"):
+        notes.append("еженедельно")
+    tail = f" ({', '.join(notes)})" if notes else ""
+    ref = f" #{r['id']}" if with_id and r.get("id") else ""
+    return f"{when} {r['title']}{tail}{ref}"
+
+
 def format_week(days: int = 8) -> str:
-    """Человекочитаемое расписание на N дней вперёд: смены + пары. Для tool/пингов."""
+    """Расписание на N дней вперёд: все смены дня + пары, спорт, встречи.
+    #id у событий — чтобы инструмент мог убрать именно это."""
     out: List[str] = []
     today = now_local().date()
     for i in range(days):
         d = today + timedelta(days=i)
         parts: List[str] = []
-        shift_record = get_shift_record(d)
-        shift = get_shift(d)
-        if shift:
-            parts.append(f"смена {shift['start']}–{shift['end']} (дорога ~{WORK_COMMUTE_MIN} мин)")
-        elif shift_record and shift_record.get("status") == "cancelled":
-            parts.append("смена отменена")
-        for start, end, what in study_slots(d):
-            parts.append(f"{start}–{end} {what}")
+        for s in get_shift_records(d):
+            text = describe_shift(s)
+            if _is_active_shift(s):
+                text += f" (дорога ~{WORK_COMMUTE_MIN} мин)"
+            parts.append(text)
+        parts += [describe_event(r, with_id=True) for r in day_events(d)]
         label = f"{_DAY_NAMES[d.weekday()]} {d.strftime('%d.%m')}"
         out.append(f"{label}: " + ("; ".join(parts) if parts else "свободен"))
     return "\n".join(out)

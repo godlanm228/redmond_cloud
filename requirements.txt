@@ -24,6 +24,10 @@ ddgs>=4.0.0
 # PDF text extraction for web_fetch (расписания/прайсы в выдаче часто PDF)
 pypdf>=4.0.0
 
+# Calendar files (.ics) from the owner: parsing, recurring rules, custom time zones
+icalendar>=6.0
+recurring-ical-events>=3.3
+
 # Тесты. Изоляция базы по тестам живёт в tests/conftest.py — без pytest
 # состояние течёт между тестами, и прогон выглядит как каскад падений.
 pytest>=8.0.0
