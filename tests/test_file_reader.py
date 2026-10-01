@@ -331,3 +331,18 @@ def test_what_counts_as_a_question():
     assert _asks("До какого числа продлить?")
     assert _asks("Продлить до 12.02?\n\n🗓 Расписание продлено: …")
     assert not _asks("Готово, продлила до 12.02.")
+
+
+def test_a_claimed_action_without_one_is_marked():
+    """01.10.2026: «Записала: расписание продлено…» — ни одной записи в этом ходе."""
+    from logic.response_generator import _unbacked_claim
+    empty = SimpleNamespace(actions=[], code_actions=[])
+    assert _unbacked_claim("Записала: расписание продлено до 12 февраля.", empty)
+    assert _unbacked_claim("По части Iris — передаю задачу ей.", empty)
+    did = SimpleNamespace(actions=[("extend_schedule", {}, "Расписание продлено")], code_actions=[])
+    assert _unbacked_claim("Продлила до 12.02.", did) == ""
+    asked = SimpleNamespace(actions=[("ask_iris", {}, "DELEGATE")], code_actions=[])
+    assert _unbacked_claim("Передаю Iris.", asked) == ""
+    read_only = SimpleNamespace(actions=[("get_week_schedule", {}, "…")], code_actions=[])
+    assert _unbacked_claim("Добавила теннис.", read_only), "чтение — не запись"
+    assert _unbacked_claim("В понедельник у тебя три пары.", empty) == ""

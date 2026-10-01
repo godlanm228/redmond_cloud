@@ -446,6 +446,30 @@ def _owner_words_to_iris(result: str, ctx: "GenerationContext") -> str:
     return DELEGATION_MARKER + json.dumps(payload, ensure_ascii=False)
 
 
+# «Записала», «добавил», «продлила», «передаю Iris» — утверждения о действии.
+# 01.10.2026: Redmond «передаю задачу Iris» без передачи; Iris «Записала:
+# расписание продлено…» без единой записи в этом ходе.
+_CLAIM_RX = re.compile(
+    r"\b(записал[аи]?|добавил[аи]?|сохранил[аи]?|продлил[аи]?|удалил[аи]?|убрал[аи]?|"
+    r"отметил[аи]?|поставил[аи]?|перен[её]с(?:ла|ли)?|передаю|передал[аи]?)\b",
+    re.IGNORECASE)
+_DELEGATING = {"ask_iris", "delegate_research", "handoff_to_iris"}
+
+
+def _unbacked_claim(response: str, ctx: "GenerationContext") -> str:
+    """Глагол действия в ответе при пустом ходе. '' — всё честно.
+
+    Считаются записи этого хода (инструменты из квитанции, передачи) и то, что
+    код сделал по сообщению сам. Утверждение о прошлом («вчера записала») тоже
+    поймается — но пометка говорит ровно факт: в ЭТОМ ответе ничего не сделано."""
+    m = _CLAIM_RX.search(re.split(r"\n\s*📝", str(response or ""))[0])
+    if not m:
+        return ""
+    did = [n for n, _a, r in list(ctx.actions) + list(ctx.code_actions or [])
+           if n in _RECEIPT_ICON or n in _DELEGATING]
+    return "" if did else m.group(0)
+
+
 def _asks(response: str) -> bool:
     """Ответ заканчивается вопросом владельцу (квитанция под ним не в счёт)."""
     text = re.split(r"\n\s*(?:📝|🗓|🗑|⏰|🎯|✅|👤|🍽|🧺|🔕|📎)", str(response or ""))[0]
@@ -791,7 +815,14 @@ class ResponseGenerator:
                 response = distress.FALLBACK_REPLY
                 if ctx.code_actions:
                     response = f"{response}\n\n{_receipt(ctx.code_actions)}"
-            elif not ctx.failed and ctx.actions and (not ctx.distress or ctx.code_actions):
+            if not ctx.failed:
+                unbacked = _unbacked_claim(response, ctx)
+                if unbacked:
+                    logger.warning("Ответ [%s] утверждает «%s», а действий в этом ходе не было",
+                                   getattr(ctx.agent, "name", "Redmond"), unbacked)
+                    response = (f"{response.rstrip()}\n\n⚠ Проверка кода: в этом ответе "
+                                f"ничего не записано и не передано.")
+            if not ctx.failed and ctx.actions and (not ctx.distress or ctx.code_actions):
                 receipt = _receipt(ctx.actions)
                 if receipt:
                     response = f"{response.rstrip()}\n\n{receipt}"
