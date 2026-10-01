@@ -1,14 +1,14 @@
 {
   "data_dir": "data",
 
-  "llm_provider_order": ["groq", "gemini"],
+  "llm_provider_order": ["gemini", "groq"],
 
   "groq_model": "openai/gpt-oss-120b",
   "groq_fallback_model": "qwen/qwen3.8-27b",
   "groq_api_base": "https://api.groq.com",
 
   "gemini_model": "gemini-3.6-flash",
-  "gemini_thinking_level": "low",
+  "gemini_thinking_level": "medium",
 
   "model_pools": {
     "chat_groq": ["openai/gpt-oss-120b", "qwen/qwen3.8-27b"],

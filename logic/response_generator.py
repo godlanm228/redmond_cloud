@@ -1759,8 +1759,19 @@ class ResponseGenerator:
             "это неправда; если речь о только что присланном фото, оно уже разобрано.",
         ]
 
+        # ---- Его день — общий для команды ----
+        # До 01.10.2026 картину дня видела только Iris: Redmond отвечал, не зная,
+        # что владелец сегодня делал и что у него завтра (а это говорилось в
+        # том же чате). Знание о владельце одно на всех ботов.
+        day: List[str] = []
+        try:
+            from logic.priorities import build_day_context
+            day = ["", build_day_context()]
+        except Exception as e:  # noqa: BLE001 — без картины дня ответ всё равно нужен
+            logger.warning("Day context for Redmond failed: %s", e)
+
         # ---- Owner facts (структурно, компактно) ----
-        return "\n".join(core + voice + ([""] + owner_facts if owner_facts else []) + ([""] + comm_prefs if comm_prefs else []))
+        return "\n".join(core + voice + day + ([""] + owner_facts if owner_facts else []) + ([""] + comm_prefs if comm_prefs else []))
 
     def _build_iris_system_prompt(self, ctx: GenerationContext) -> str:
         """
