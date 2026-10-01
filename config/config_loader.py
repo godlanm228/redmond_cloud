@@ -94,7 +94,7 @@ def get_supergoals(config_or_path: Optional[Union[Path, str, AppConfig]] = None)
         List[str]: Список супер-целей
 
     Raises:
-        ConfigurationError: Если файл не найден или невалидный
+        RuntimeError: Если файл не найден или невалидный
     """
     # Получаем конфигурацию
     if isinstance(config_or_path, AppConfig):

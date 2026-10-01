@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional
 
@@ -165,8 +166,36 @@ def list_deadlines(upcoming_days: Optional[int] = None) -> List[Dict[str, Any]]:
     return [d for _, d in dated] + undated
 
 
+def _same_task(a: str, b: str) -> bool:
+    norm = lambda s: " ".join(re.findall(r"\w+", (s or "").lower()))  # noqa: E731
+    return norm(a) == norm(b)
+
+
+def find_open_duplicate(title: str, due: str) -> Optional[Dict[str, Any]]:
+    """Открытый дедлайн с тем же названием и сроком ±1 день — это тот же.
+    Июль 2026: «Матан: 6 открытых тестов» лёг трижды (#3, #4, #5)."""
+    try:
+        target = datetime.strptime(due, "%Y-%m-%d").date()
+    except (ValueError, TypeError):
+        return None
+    for d in list_deadlines():
+        if d.get("status") != "pending" or not _same_task(d.get("title", ""), title):
+            continue
+        try:
+            if abs((datetime.strptime(d["due"], "%Y-%m-%d").date() - target).days) <= 1:
+                return d
+        except (ValueError, TypeError):
+            continue
+    return None
+
+
 def add_deadline(title: str, due: str, importance: str = "medium") -> Dict[str, Any]:
-    """due: YYYY-MM-DD. importance: low/medium/high."""
+    """due: YYYY-MM-DD. importance: low/medium/high.
+    Тот же открытый дедлайн (find_open_duplicate) не дублируется: возвращается
+    существующий с пометкой duplicate=True."""
+    existing = find_open_duplicate(title, due)
+    if existing:
+        return {**existing, "duplicate": True}
     deadline = {
         "id": None,
         "title": title.strip(),
@@ -249,6 +278,15 @@ def update_deadline(
 # Diary
 # ============================================================================
 
+# Пометки на данных (01.10.2026, правило владельца: данные не удаляются, а
+# помечаются — иначе непонятно, актуальны они или нет). У записи дневника в
+# data: source — кто записал (owner — его словами, кодом из сообщения; agent —
+# агент инструментом; code — код сам, напр. «проснулся»); status — retracted,
+# если запись оказалась ошибкой: она остаётся в истории с причиной, но не
+# участвует ни в итогах, ни в «последнем по теме», ни в слотах пингов.
+RETRACTED = "retracted"
+
+
 def _diary_row(r) -> Dict[str, Any]:
     out = {"id": r["id"], "timestamp": r["ts"], "text": r["text"],
            "tags": _json_load(r["tags"], [])}
@@ -258,10 +296,32 @@ def _diary_row(r) -> Dict[str, Any]:
     return out
 
 
+def is_retracted(entry: Dict[str, Any]) -> bool:
+    return (entry.get("data") or {}).get("status") == RETRACTED
+
+
+def retract_diary_entry(entry_id: int, reason: str) -> Optional[Dict[str, Any]]:
+    """Пометить запись ошибочной, не удаляя: текст и время остаются, рядом —
+    причина и когда отозвана."""
+    with db.transaction() as conn:
+        row = conn.execute("SELECT * FROM diary WHERE id=?", (int(entry_id),)).fetchone()
+        if row is None:
+            return None
+        entry = _diary_row(row)
+        data = dict(entry.get("data") or {})
+        data.update(status=RETRACTED, reason=str(reason or "").strip()[:300],
+                    retracted=now_local().isoformat(timespec="minutes"))
+        conn.execute("UPDATE diary SET data=? WHERE id=?",
+                     (json.dumps(data, ensure_ascii=False), int(entry_id)))
+    entry["data"] = data
+    return entry
+
+
 def add_diary_entry(
     text: str,
     tags: Optional[List[str]] = None,
     data: Optional[Dict[str, Any]] = None,
+    source: str = "",
 ) -> Optional[Dict[str, Any]]:
     """Запись в дневник. Возвращает None если писать нечего (пустышка) или это
     точный дубль последней записи — анти-шум (Iris логировала мета/повторы).
@@ -272,6 +332,8 @@ def add_diary_entry(
     text = (text or "").strip()
     if len(text) < 3:
         return None
+    if source:
+        data = {**(data or {}), "source": source}
     entry = {
         "id": None,
         "timestamp": now_local().isoformat(timespec="minutes"),
@@ -299,6 +361,8 @@ def add_diary_entry(
 
 
 def read_diary(last_n: int = 10, tag: Optional[str] = None) -> List[Dict[str, Any]]:
+    """Записи вместе с отозванными — они помечены (is_retracted), чтобы на
+    «что я записывал» ответ был полным, но отозванное не выдавалось за факт."""
     rows = [_diary_row(r) for r in db.query("SELECT * FROM diary ORDER BY id")]
     if tag:
         rows = [d for d in rows if tag in (d.get("tags") or [])]
@@ -336,6 +400,8 @@ def last_entry_per_tag(tags: List[str]) -> Dict[str, Dict[str, Any]]:
     out: Dict[str, Dict[str, Any]] = {}
     for r in db.query("SELECT * FROM diary ORDER BY id"):
         entry = _diary_row(r)
+        if is_retracted(entry):
+            continue
         for t in entry.get("tags") or []:
             if t in tags:
                 out[t] = entry
@@ -346,7 +412,9 @@ def today_tags() -> set:
     """Все теги дневника за сегодня — тикер проверяет закрыт ли слот (питание/спорт/…)."""
     today = now_local().strftime("%Y-%m-%d")
     tags: set = set()
-    for r in db.query("SELECT tags FROM diary WHERE ts LIKE ?", (f"{today}%",)):
+    for r in db.query("SELECT tags, data FROM diary WHERE ts LIKE ?", (f"{today}%",)):
+        if (_json_load(r["data"], None) or {}).get("status") == RETRACTED:
+            continue
         tags.update(_json_load(r["tags"], []))
     return tags
 
@@ -355,8 +423,8 @@ def entries_today() -> int:
     """Сколько записей дневника за сегодня. Вечерний итог при 0 записей и
     отсутствовавшем Владе молчит — не спамит «день получился спокойный»."""
     today = now_local().strftime("%Y-%m-%d")
-    row = db.query_one("SELECT COUNT(*) AS c FROM diary WHERE ts LIKE ?", (f"{today}%",))
-    return int(row["c"])
+    return sum(1 for r in db.query("SELECT data FROM diary WHERE ts LIKE ?", (f"{today}%",))
+               if (_json_load(r["data"], None) or {}).get("status") != RETRACTED)
 
 
 # ============================================================================
@@ -416,13 +484,33 @@ def pantry_age_days() -> Optional[int]:
 # или по запросу «составь план недели», правится словами через чат)
 # ============================================================================
 
+def _monday(d) -> str:
+    return (d - timedelta(days=d.weekday())).strftime("%Y-%m-%d")
+
+
 def get_week_plan() -> Dict[str, Any]:
-    return db.kv_get("week_plan", {}) or {}
+    """План + пометка актуальности: current — составлен на эту неделю.
+
+    01.10.2026 инструмент отдавал план на 13–19 августа без единого слова о
+    том, что он протух, и Iris подтягивала его в ответы. Неделя плана — та,
+    на которую он составлен (week_of); у старых записей — неделя сохранения."""
+    plan = db.kv_get("week_plan", {}) or {}
+    if not plan:
+        return {}
+    week_of = plan.get("week_of")
+    if not week_of and plan.get("updated"):
+        try:
+            week_of = _monday(datetime.fromisoformat(plan["updated"]).date())
+        except ValueError:
+            week_of = None
+    return {**plan, "week_of": week_of,
+            "current": week_of == _monday(now_local().date())}
 
 
 def save_week_plan(text: str) -> Dict[str, Any]:
     plan = {
         "updated": now_local().isoformat(timespec="minutes"),
+        "week_of": _monday(now_local().date()),
         "text": text.strip(),
     }
     db.kv_set("week_plan", plan)
@@ -436,6 +524,12 @@ def save_week_plan(text: str) -> Dict[str, Any]:
 # Окно пробуждения: первое сообщение Влада в этом интервале считается подъёмом.
 # Сообщения 00:00–05:00 — ночные посиделки, не подъём.
 _WAKE_WINDOW = (5, 15)  # часы, [from, to). До 15: ловим поздние подъёмы (бар → встаёт поздно)
+
+
+# Сколько дней запас и просроченные дедлайны считаются актуальными без
+# подтверждения. Дальше — пометка «устарел» и один вопрос владельцу.
+PANTRY_STALE_DAYS = 14
+DEADLINE_STALE_DAYS = 14
 
 
 def log_wake_if_first() -> Optional[Dict[str, Any]]:
@@ -459,6 +553,7 @@ def log_wake_if_first() -> Optional[Dict[str, Any]]:
     return add_diary_entry(
         f"Проснулся — первое сообщение в {presence['wake_time']}",
         tags=["сон"],
+        source="code",
     )
 
 

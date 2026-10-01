@@ -33,6 +33,14 @@ def _pending_deadlines() -> List[Dict[str, Any]]:
     return out
 
 
+def stale_deadlines() -> List[Dict[str, Any]]:
+    """Открытые, но просроченные больше DEADLINE_STALE_DAYS дней: скорее всего
+    сданы или потеряли смысл, а закрыть забыли. Не приоритет — вопрос."""
+    today = now_local().date()
+    return [d for d in _pending_deadlines()
+            if (today - d["_due"]).days > coach_storage.DEADLINE_STALE_DAYS]
+
+
 def top_priorities(max_items: int = 4) -> List[Dict[str, Any]]:
     """Pending-дедлайны по срочности (дата, потом важность), просроченные сверху.
 
@@ -41,14 +49,15 @@ def top_priorities(max_items: int = 4) -> List[Dict[str, Any]]:
     на неделю, исчезал из промпта совсем — то есть чем дольше владелец тянул,
     тем реже коуч напоминал, а через семь дней замолкал вовсе.
     """
-    items = list(_pending_deadlines())
+    stale = {d["id"] for d in stale_deadlines()}
+    items = [d for d in _pending_deadlines() if d["id"] not in stale]
     items.sort(key=lambda d: (d["_due"], _IMPORTANCE_RANK.get(d.get("importance"), 1)))
     return items[:max_items]
 
 
 def pending_count() -> int:
-    """Сколько всего pending-дедлайнов — чтобы блок промпта не обрезал молча."""
-    return len(_pending_deadlines())
+    """Сколько актуальных pending-дедлайнов — чтобы блок промпта не обрезал молча."""
+    return len(_pending_deadlines()) - len(stale_deadlines())
 
 
 def crunch_deadline(days: int = 3) -> Optional[Dict[str, Any]]:
@@ -135,6 +144,20 @@ def build_day_context() -> str:
     return "\n".join(lines)
 
 
+def _stale_question_due() -> bool:
+    """Вопрос про устаревшие дедлайны — не чаще раза в неделю."""
+    from utils import db
+    last = db.kv_get("stale_deadlines_asked", "")
+    today = now_local().date()
+    try:
+        if last and (today - datetime.strptime(last, "%Y-%m-%d").date()).days < 7:
+            return False
+    except ValueError:
+        pass  # битая дата — считаем, что не спрашивали
+    db.kv_set("stale_deadlines_asked", today.strftime("%Y-%m-%d"))
+    return True
+
+
 def build_priorities_block() -> str:
     """Блок для системного промпта Iris. Пустая строка если показывать нечего."""
     now = now_local()
@@ -160,6 +183,14 @@ def build_priorities_block() -> str:
         if hidden > 0:
             # Молчаливое обрезание читается как «это всё» — а это не всё.
             lines.append(f"  …и ещё {hidden} незакрытых — спроси list_deadlines")
+
+    stale = stale_deadlines()
+    if stale and _stale_question_due():
+        listing = "; ".join(f"#{d['id']} «{d['title']}» ({d['due']})" for d in stale[:5])
+        lines.append(
+            f"⚠ УСТАРЕВШИЕ ДЕДЛАЙНЫ (просрочены больше {coach_storage.DEADLINE_STALE_DAYS} дн., "
+            f"не закрыты): {listing}. Спроси его ОДИН раз, закрыть ли их; не дави и не "
+            f"выдавай за срочное.")
 
     crunch = crunch_tonight()
     if crunch:

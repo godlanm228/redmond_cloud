@@ -135,7 +135,7 @@ def set_applied(record_id: Optional[int], applied: str) -> None:
     try:
         db.execute("UPDATE vision_results SET applied=? WHERE id=?", (applied, record_id))
     except Exception:
-        logger.debug("Архив зрения: applied не записан", exc_info=True)
+        logger.warning("Архив: пометка «что записано» не обновилась", exc_info=True)
 
 
 def _search_text(description: str, tags: List[str], label: str) -> str:
@@ -224,7 +224,7 @@ def enforce_limits() -> int:
             logger.warning("Архив зрения упёрся в потолок %d МБ — удаляю старое",
                            MAX_DIR_BYTES // 1024 ** 2)
     except Exception:
-        logger.debug("Архив зрения: ретеншн не отработал", exc_info=True)
+        logger.warning("Архив: очистка старых файлов не отработала", exc_info=True)
     return removed
 
 

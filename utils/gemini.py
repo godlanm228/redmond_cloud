@@ -103,14 +103,6 @@ def _raise_level_floor(model: str, body: Dict[str, Any], error_text: str) -> boo
     return True
 
 
-def _bump_usage() -> None:
-    """Инкремент дневного счётчика запросов Gemini (статистика; лимиты по
-    моделям ведёт utils/llm_gate). Никогда не роняет генерацию."""
-    try:
-        from logic import coach_storage
-        coach_storage.gemini_bump()
-    except Exception:
-        pass
 
 
 def _post_generate(key: str, body: Dict[str, Any], model: str, timeout: float) -> Optional[dict]:
@@ -147,7 +139,6 @@ def _post_generate(key: str, body: Dict[str, Any], model: str, timeout: float) -
             llm_gate.report(model, resp.status_code,
                             body=None if failure is None else _full_body(resp))
             if failure is None:
-                _bump_usage()
                 return resp.json()
             last = failure
             if failure.status == 400 and _raise_level_floor(model, body, resp.text):
@@ -377,8 +368,8 @@ def grounded_search(
     """
     system = (
         "You are a web search assistant. Answer factually based on Google "
-        "Search results, concise and specific. Reply in the language of "
-        "the query. No preamble. "
+        "Search results, concise and specific. Reply in Russian (the owner's "
+        "language), keep names and terms in the original. No preamble. "
         "The user is Ukrainian: do NOT use, cite, or repeat claims from Russian "
         "state / propaganda / aggregator sources (ria, tass, rt, lenta, rbc, "
         "gazeta, vesti, regnum, iz.ru, kp.ru, etc.). For any Russia/Ukraine war "
@@ -414,5 +405,19 @@ def grounded_search(
         web = ch.get("web") or {}
         uri = web.get("uri", "")
         if uri:
-            sources.append((web.get("title", "") or "источник", uri))
+            sources.append((web.get("title", "") or "источник", _real_url(uri)))
     return text, sources
+
+
+def _real_url(uri: str) -> str:
+    """Адрес источника вместо redirect-ссылки Google (vertexaisearch…), чтобы
+    было видно, откуда факт. Не раскрылась — остаётся рабочая redirect-ссылка."""
+    if "grounding-api-redirect" not in uri:
+        return uri
+    try:
+        r = requests.head(uri, allow_redirects=False, timeout=3)
+        location = r.headers.get("Location") or r.headers.get("location") or ""
+        return location or uri
+    except Exception as e:  # noqa: BLE001 — источник всё равно доступен по redirect
+        logger.warning("Источник поиска не раскрыт (%s) — оставляю redirect", e)
+        return uri

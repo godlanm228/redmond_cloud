@@ -34,7 +34,9 @@ class ScheduleToolTests(unittest.TestCase):
         os.chdir(self.old_cwd)
         self.tmp.cleanup()
 
-    def test_save_work_shift_updates_schedule_and_diary(self):
+    def test_save_work_shift_updates_schedule_not_diary(self):
+        """С 01.10.2026 смена живёт в расписании, а не в дневнике: от отменённой
+        смены в дневнике осталась запись «Смена 13.10», которой не было."""
         result = execute_tool(
             "save_work_shift",
             {"date": "2026-07-06", "start": "17", "end": "23"},
@@ -46,7 +48,7 @@ class ScheduleToolTests(unittest.TestCase):
         self.assertEqual(shift["end"], "23:00")
         self.assertEqual(shift["status"], "confirmed")
         self.assertEqual(shift["source"], "text")
-        self.assertEqual(coach_storage.read_diary(last_n=1)[0]["tags"], ["работа"])
+        self.assertEqual(coach_storage.read_diary(last_n=5), [])
 
     def test_cancel_shift_hides_it_from_active_schedule(self):
         apply_shifts([{"date": "2026-07-06", "start": "17:00", "end": "23:00"}])

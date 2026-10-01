@@ -50,8 +50,8 @@ def remember(where: str, what: Any) -> None:
         text = " ".join(detail(what).split())[:160]
         with _RECENT_GUARD:
             _RECENT.append((time.time(), where, text))
-    except Exception:  # noqa: BLE001
-        pass
+    except Exception:  # noqa: BLE001 — сам сбой уже залогирован вызывающим
+        logger.warning("failures: сбой «%s» не попал в блок фактов", where, exc_info=True)
 
 
 def recent(hours: float = 24.0, limit: int = 3) -> List[Tuple[float, str, str]]:
@@ -137,4 +137,4 @@ def report(where: str, err: Any, *, consequence: str, **context: Any) -> None:
         try:
             logger.error("%s: сбой, причину записать не удалось", where)
         except Exception:  # noqa: BLE001
-            pass
+            pass  # не работает сам логгер — сообщить некуда

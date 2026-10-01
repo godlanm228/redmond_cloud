@@ -41,6 +41,24 @@ def _parse(product: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
     }
 
 
+def _why(e: Exception) -> str:
+    """Короткая причина сбоя для владельца: «HTTP 503», «таймаут», «нет связи»."""
+    status = getattr(getattr(e, "response", None), "status_code", None)
+    if status:
+        return f"HTTP {status}"
+    name = type(e).__name__
+    if "Timeout" in name:
+        return "таймаут"
+    if "Connection" in name:
+        return "нет связи"
+    return name
+
+
+def _found(product: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    parsed = _parse(product or {})
+    return {**parsed, "found": True} if parsed else {"found": False}
+
+
 def lookup_barcode(barcode: str, timeout: float = 8.0) -> Optional[Dict[str, Any]]:
     digits = "".join(ch for ch in str(barcode) if ch.isdigit())
     if len(digits) < 8:
@@ -50,13 +68,16 @@ def lookup_barcode(barcode: str, timeout: float = 8.0) -> Optional[Dict[str, Any
             f"{_BASE}/api/v2/product/{digits}.json",
             params={"fields": _FIELDS}, headers=_UA, timeout=timeout,
         )
+        if r.status_code == 404:
+            return {"found": False}  # штрихкода нет в базе — это ответ, не сбой
         r.raise_for_status()
         d = r.json()
         if d.get("status") == 1 or d.get("product"):
-            return _parse(d.get("product") or {})
-    except Exception as e:
-        logger.debug("OFF barcode lookup failed (%s): %s", barcode, e)
-    return None
+            return _found(d.get("product"))
+        return {"found": False}
+    except Exception as e:  # noqa: BLE001 — сервис лёг ≠ продукта нет
+        logger.warning("OFF barcode lookup failed (%s): %s", barcode, e)
+        return {"found": False, "error": _why(e)}
 
 
 def search_name(query: str, timeout: float = 8.0) -> Optional[Dict[str, Any]]:
@@ -75,15 +96,30 @@ def search_name(query: str, timeout: float = 8.0) -> Optional[Dict[str, Any]]:
         r.raise_for_status()
         products = r.json().get("products") or []
         if products:
-            return _parse(products[0])
-    except Exception as e:
-        logger.debug("OFF name search failed (%s): %s", query, e)
-    return None
+            return _found(products[0])
+        return {"found": False}
+    except Exception as e:  # noqa: BLE001 — сервис лёг ≠ продукта нет
+        logger.warning("OFF name search failed (%s): %s", query, e)
+        return {"found": False, "error": _why(e)}
 
 
 def lookup(barcode: str = "", name: str = "") -> Optional[Dict[str, Any]]:
-    """Штрихкод (точно) → название (fallback). None если ничего не нашли."""
-    res = lookup_barcode(barcode) if barcode else None
-    if not res and name:
-        res = search_name(name)
-    return res
+    """Штрихкод (точно) → название (запасной путь).
+
+    Три разных ответа, а не два: {"found": True, …} — нашли; {"found": False} —
+    в базе нет; {"found": False, "error": "HTTP 503"} — сервис не ответил.
+    01.10.2026 OpenFoodFacts лежал (503), а бот говорил «продукт не найден».
+    None — искать было нечем."""
+    results = []
+    if barcode:
+        results.append(lookup_barcode(barcode))
+    if name and not (results and results[-1] and results[-1].get("found")):
+        results.append(search_name(name))
+    results = [r for r in results if r]
+    for r in results:
+        if r.get("found"):
+            return r
+    errors = [r["error"] for r in results if r.get("error")]
+    if errors:
+        return {"found": False, "error": "; ".join(errors)}
+    return {"found": False} if results else None

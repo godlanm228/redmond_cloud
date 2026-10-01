@@ -337,7 +337,8 @@ def apply(u: "Understanding", execute=None) -> List[tuple]:
         from logic import coach_storage
         recent = {normalize(e.get("text", "")) for e in coach_storage.read_diary(last_n=15)}
     except Exception:  # noqa: BLE001 — without the check a repeat is written twice, not lost
-        logger.debug("diary read for repeats failed", exc_info=True)
+        logger.warning("Дневник не прочитан для проверки повторов — повтор может записаться",
+                       exc_info=True)
     for f in u.facts:
         if not f.diary:
             continue
@@ -345,7 +346,7 @@ def apply(u: "Understanding", execute=None) -> List[tuple]:
         if not text or normalize(text) in recent:
             continue
         tags = [t for t in (WHEN_TAG.get(f.when, ""), f.topic.strip().lower()) if t]
-        args = {"text": text, "tags": tags}
+        args = {"text": text, "tags": tags, "_source": "owner"}
         done.append(("add_diary_entry", args, run("add_diary_entry", args)))
         recent.add(normalize(text))
     return done

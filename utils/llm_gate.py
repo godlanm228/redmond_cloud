@@ -227,7 +227,8 @@ def _save(force: bool = False) -> None:
         from utils import db
         db.kv_set(_KV_KEY, {m: asdict(s) for m, s in _states.items()})
     except Exception:  # noqa: BLE001
-        logger.debug("llm_gate: состояние не сохранено", exc_info=True)
+        logger.warning("llm_gate: состояние лимитов не сохранено — после рестарта шлюз "
+                       "не будет знать об исчерпанных моделях", exc_info=True)
 
 
 def _state(model: str) -> ModelState:
@@ -298,7 +299,7 @@ def report(model: str, status: Optional[int], headers: Optional[Mapping[str, str
         with _lock:
             _report(model, status, {k.lower(): v for k, v in (headers or {}).items()}, body)
     except Exception:  # noqa: BLE001
-        logger.debug("llm_gate.report failed", exc_info=True)
+        logger.warning("llm_gate: ответ модели не учтён в лимитах", exc_info=True)
 
 
 def _report(model: str, status: Optional[int], headers: Dict[str, str], body: Any) -> None:
@@ -402,11 +403,12 @@ def _gemini_quota(data: Any) -> Tuple[str, Optional[int], Optional[float]]:
                 try:
                     value = value or int(v.get("quotaValue"))
                 except (TypeError, ValueError):
-                    pass
+                    pass  # значение квоты не число — остаётся неизвестным
             if "retryDelay" in d:
                 retry = parse_duration(d.get("retryDelay"))
     except Exception:  # noqa: BLE001
-        pass
+        logger.warning("llm_gate: тело ошибки Gemini не разобрано — квота неизвестна",
+                       exc_info=True)
     return quota, value, retry
 
 
@@ -437,7 +439,8 @@ def wait_for(model: str, tokens: int = 0, priority: str = OWNER) -> float:
         with _lock:
             return _wait_for(model, max(0, int(tokens)), priority)
     except Exception:  # noqa: BLE001
-        logger.debug("llm_gate.wait_for failed", exc_info=True)
+        logger.warning("llm_gate: ожидание не посчитано — модель берётся без ожидания",
+                       exc_info=True)
         return 0.0
 
 
@@ -535,8 +538,8 @@ def acquire(models: Sequence[str], tokens: int = 0, priority: str = OWNER,
         if on_wait:
             try:
                 on_wait(model, wait)
-            except Exception:  # noqa: BLE001
-                pass
+            except Exception:  # noqa: BLE001 — статус «жду лимит» не дошёл, ждём всё равно
+                logger.warning("llm_gate: статус ожидания не отправлен", exc_info=True)
         (sleep or time.sleep)(wait)
     return model
 
@@ -586,7 +589,7 @@ def describe(models: Optional[Sequence[str]] = None) -> List[str]:
                 elif st.rpd and _requests_left(st) is not None and _requests_left(st) <= 0:
                     out.append(f"{m}: дневной лимит исчерпан")
     except Exception:  # noqa: BLE001
-        logger.debug("llm_gate.describe failed", exc_info=True)
+        logger.warning("llm_gate: состояние моделей не описано", exc_info=True)
     return out
 
 

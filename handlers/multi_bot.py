@@ -267,8 +267,8 @@ async def _understand(text: str, context: ContextTypes.DEFAULT_TYPE, chat_id: in
     try:
         from logic import system_facts
         notes.append(system_facts._mute_line())
-    except Exception:  # noqa: BLE001
-        pass
+    except Exception:  # noqa: BLE001 — прочтение пройдёт и без строки о тишине
+        logger.warning("Строка о тишине не добавлена в прочтение", exc_info=True)
     if reply_to_agent:
         notes.append(f"сообщение — реплай на реплику агента {reply_to_agent}")
     try:

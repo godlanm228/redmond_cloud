@@ -650,7 +650,7 @@ class ResponseGenerator:
         try:
             self.owner_profile = load_owner_profile(self.config.owner_profile)
         except Exception as e:
-            logger.debug("Owner profile недоступен: %s", e)
+            logger.warning("Профиль владельца не загружен — агенты не знают фактов о нём: %s", e)
             self.owner_profile = {}
 
         # Хранилище и поиск
@@ -985,7 +985,7 @@ class ResponseGenerator:
                 try:
                     prompt_budget.log_size(agent_name, messages, hop_tools)
                 except Exception:
-                    logger.debug("prompt_budget size failed", exc_info=True)
+                    logger.warning("Размер промпта не посчитан", exc_info=True)
 
             # Модель на этот шаг выбирает шлюз: первая по предпочтению, у которой
             # хватает токенов в минуте; если ни у одной — ждём ближайшую (владелец
@@ -1721,7 +1721,18 @@ class ResponseGenerator:
 
         if not lines:
             return []
-        return ["OWNER FACTS:"] + [f"  • {l}" for l in lines]
+        # Пометка давности: факт без даты подтверждения выглядит как сегодняшний.
+        confirmed = current.get("_last_updated") or ""
+        head = "OWNER FACTS:"
+        if confirmed:
+            try:
+                age = (datetime.now().date() - datetime.strptime(confirmed, "%Y-%m-%d").date()).days
+            except ValueError:
+                age = None
+            head = f"OWNER FACTS (учёба/работа подтверждены {confirmed}"
+            head += (", давно — если факт важен для ответа, уточни у него):" if age and age > 90
+                     else "):")
+        return [head] + [f"  • {l}" for l in lines]
 
     def _compact_comm_prefs(self) -> List[str]:
         """Что НЕ делать в общении (одной строкой)."""

@@ -258,7 +258,8 @@ TOOL_SCHEMAS = [
             "name": "read_dossier_section",
             "description": (
                 "Read a section of the AI-generated owner dossier (core=DEFAULT, "
-                "strengths, thinking, directives, all=avoid). Never quote verbatim — "
+                "strengths, thinking, directives, current=study/work/job search now, "
+                "all=avoid). Never quote verbatim — "
                 "it is AI interpretation, not owner's words."
             ),
             "parameters": {
@@ -266,7 +267,7 @@ TOOL_SCHEMAS = [
                 "properties": {
                     "section": {
                         "type": "string",
-                        "enum": ["core", "strengths", "thinking", "directives", "all"],
+                        "enum": ["core", "strengths", "thinking", "directives", "current", "all"],
                         "description": "Section name. Default: core.",
                     }
                 },
@@ -381,7 +382,9 @@ TOOL_SCHEMAS = [
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "upcoming_days": {"type": "integer", "description": "Only deadlines in next N days"}
+                    "upcoming_days": {"type": "integer", "description": "Only deadlines in next N days"},
+                    "include_done": {"type": ["boolean", "null"],
+                                     "description": "Also closed ones (marked ✓). Default: open only"},
                 },
             },
         },
@@ -1299,7 +1302,12 @@ def _dispatch_tool(name: str, args: Dict[str, Any], rg=None) -> str:
         plan = get_week_plan()
         if not plan.get("text"):
             return "План недели ещё не составлен."
-        return f"План недели (обновлён {plan.get('updated', '?')}):\n\n{plan['text']}"
+        if not plan.get("current"):
+            return (f"Плана на ЭТУ неделю нет. Последний был составлен на неделю с "
+                    f"{plan.get('week_of') or '?'} — он устарел, не используй его. "
+                    f"Нужен план — составь новый по get_week_schedule.")
+        return (f"План недели с {plan['week_of']} (обновлён {plan.get('updated', '?')}):"
+                f"\n\n{plan['text']}")
     if name == "save_week_plan":
         from logic.coach_storage import save_week_plan
         t = str(args.get("text", "")).strip()
@@ -1393,6 +1401,9 @@ def _tool_add_deadline(args: Dict[str, Any]) -> str:
         due=args.get("due", ""),
         importance=args.get("importance", "medium"),
     )
+    if d.get("duplicate"):
+        return (f"Такой дедлайн уже есть: #{d['id']} «{d['title']}» → {d['due']} — "
+                f"нового не создано. Перенос — postpone_deadline.")
     return f"Дедлайн #{d['id']} «{d['title']}» → {d['due']} ({d['importance']})"
 
 
@@ -1441,21 +1452,34 @@ def _tool_list_deadlines(args: Dict[str, Any]) -> str:
     days = args.get("upcoming_days")
     if days is not None:
         days = int(days)
-    deadlines = coach_storage.list_deadlines(upcoming_days=days)
+    # До 01.10.2026 сюда шли и закрытые: шесть дедлайнов, сданных в июне–августе,
+    # показывались как «ПРОСРОЧЕН на 111 дн», и Iris пересказывала их владельцу.
+    include_done = bool(args.get("include_done"))
+    deadlines = [d for d in coach_storage.list_deadlines(upcoming_days=days)
+                 if include_done or d.get("status", "pending") == "pending"]
     if not deadlines:
-        scope = f"в ближайшие {days} дн." if days else ""
-        return f"Дедлайнов {scope} нет."
+        scope = f"в ближайшие {days} дн. " if days else ""
+        closed = "" if include_done else " (закрытые — include_done=true)"
+        return f"Открытых дедлайнов {scope}нет{closed}."
     from datetime import datetime as _dt
     from utils.time import now_local
     today = now_local().date()
     lines = [f"Дедлайны ({len(deadlines)}):"]
     for d in deadlines:
-        try:
-            left = (_dt.strptime(d.get("due", ""), "%Y-%m-%d").date() - today).days
-            mark = (f"ПРОСРОЧЕН на {-left} дн" if left < 0
-                    else "СЕГОДНЯ" if left == 0 else f"осталось {left} дн")
-        except (ValueError, TypeError):
-            mark = "дата не читается — поправь"
+        if d.get("status", "pending") != "pending":
+            mark = f"✓ закрыт {d.get('closed') or ''}".rstrip()
+        else:
+            try:
+                left = (_dt.strptime(d.get("due", ""), "%Y-%m-%d").date() - today).days
+                if left < -coach_storage.DEADLINE_STALE_DAYS:
+                    mark = (f"просрочен на {-left} дн — УСТАРЕЛ? не закрыт: спроси, "
+                            f"сдан ли / закрыть ли")
+                elif left < 0:
+                    mark = f"ПРОСРОЧЕН на {-left} дн"
+                else:
+                    mark = "СЕГОДНЯ" if left == 0 else f"осталось {left} дн"
+            except (ValueError, TypeError):
+                mark = "дата не читается — поправь"
         lines.append(f"  #{d['id']} {d['due']} — {d['title']} "
                      f"[{d.get('importance', '?')}] — {mark}")
     return "\n".join(lines)
@@ -1466,6 +1490,9 @@ def _tool_add_diary_entry(args: Dict[str, Any]) -> str:
     e = coach_storage.add_diary_entry(
         text=args.get("text", ""),
         tags=args.get("tags") or [],
+        # _source ставит только код (шаг понимания пишет его словами); схема
+        # модели этого поля не знает.
+        source=str(args.get("_source") or "agent"),
     )
     if not e or not e.get("id"):
         return "Пустая/служебная заметка — в дневник не пишу."
@@ -1490,7 +1517,11 @@ def _tool_read_diary(args: Dict[str, Any]) -> str:
     for e in entries:
         tags = ", ".join(e.get("tags") or [])
         tag_part = f" [{tags}]" if tags else ""
-        lines.append(f"  #{e.get('id', '?')} {e['timestamp']}{tag_part}: {e['text'][:200]}")
+        line = f"  #{e.get('id', '?')} {e['timestamp']}{tag_part}: {e['text'][:200]}"
+        if coach_storage.is_retracted(e):
+            # Запись-ошибка остаётся в истории, но фактом не считается.
+            line += f" — ✗ отозвана: {(e.get('data') or {}).get('reason') or 'ошибка'}; НЕ факт"
+        lines.append(line)
     return "\n".join(lines)
 
 
@@ -1511,7 +1542,6 @@ def _norm_hm(raw: Any) -> Optional[str]:
 
 
 def _tool_save_work_shift(args: Dict[str, Any]) -> str:
-    from logic import coach_storage
     from logic.week_schedule import apply_shifts, get_shifts
     from utils.time import now_local
 
@@ -1538,12 +1568,9 @@ def _tool_save_work_shift(args: Dict[str, Any]) -> str:
     if not outcome.saved:
         return "Смену не сохранила — не хватило даты или времени."
 
-    # Дневниковый факт нужен вечернему итогу, таблица смен — будущим пингам.
-    coach_storage.add_diary_entry(
-        f"Смена {shift_date} с {start} до {end}",
-        tags=["работа"],
-        data={"date": shift_date, "start": start, "end": end},
-    )
+    # В дневник смена больше не пишется: дневник — что было, а смена живёт в
+    # расписании. 01.10.2026 от отменённой смены осталась запись «Смена 13.10»,
+    # которой не было. Вечерний итог берёт смены из расписания.
     reply = f"Смена сохранена в расписание: {shift_date} {start}–{end}."
     day = get_shifts(dt)
     if len(day) > 1:
@@ -1789,7 +1816,8 @@ def _tool_set_work_shift_status(args: Dict[str, Any]) -> str:
     if base["note"]:
         text += f": {base['note']}"
 
-    coach_storage.add_diary_entry(text, tags=["работа"], data={"date": shift_date, "status": status})
+    coach_storage.add_diary_entry(text, tags=["работа"], data={"date": shift_date, "status": status},
+                                  source="agent")
     return reply
 
 
@@ -1907,7 +1935,8 @@ def _tool_log_meal(args: Dict[str, Any]) -> str:
         data["place"] = place
 
     summary = dish + (f" ({place})" if place else "")
-    e = coach_storage.add_diary_entry(f"Поел: {summary}", tags=["питание"], data=data)
+    e = coach_storage.add_diary_entry(f"Поел: {summary}", tags=["питание"], data=data,
+                                      source="agent")
     if not e or not e.get("id"):
         return "Дубль/пусто — в рацион не пишу."
 
@@ -1928,7 +1957,10 @@ def _tool_get_pantry() -> str:
         return "Запас пуст — спроси у Влада, что есть из продуктов."
     head = f"Запас (обновлён {data.get('updated', '?')}"
     age = coach_storage.pantry_age_days()
-    if age is not None and age >= 5:
+    if age is not None and age > coach_storage.PANTRY_STALE_DAYS:
+        head += (f", {age} дн. назад — УСТАРЕЛ: не предлагай блюда из него, сначала "
+                 f"спроси, что сейчас есть")
+    elif age is not None and age >= 5:
         head += f", {age} дн. назад — уточни, ещё актуально"
     return head + "):\n" + ", ".join(items)
 
@@ -1940,7 +1972,11 @@ def _tool_lookup_food(args: Dict[str, Any]) -> str:
     if not barcode and not name:
         return "Нужен штрихкод или название продукта."
     res = openfoodfacts.lookup(barcode=barcode, name=name)
-    if not res:
+    if res is None or res.get("error"):
+        why = (res or {}).get("error") or "нет ответа"
+        return (f"OpenFoodFacts сейчас недоступен ({why}) — точных цифр нет. Оценка "
+                f"будет примерной, так и скажи.")
+    if not res.get("found"):
         return f"«{name or barcode}» в OpenFoodFacts не найдено — дай честную оценку."
     title = res["name"] or name or "продукт"
     if res.get("brands"):
@@ -2337,8 +2373,9 @@ def _tool_get_crypto_market(symbols: Optional[List[str]] = None) -> str:
     try:
         fng = requests.get(_FNG_URL, timeout=10).json()["data"][0]
         lines.append(f"Fear & Greed: {fng['value']} ({fng['value_classification']})")
-    except Exception:
-        logger.debug("FnG API failed", exc_info=True)
+    except Exception as e:  # noqa: BLE001 — без индекса сводка неполная, и это видно
+        logger.warning("Fear & Greed API failed: %s", e)
+        lines.append("(Fear & Greed сейчас недоступен)")
 
     lines.append("(сырые данные рынка, не торговый сигнал)")
     return "\n".join(lines)
@@ -2362,7 +2399,7 @@ def _tool_handoff_to_iris(args: Dict[str, Any]) -> str:
         "info": ["факт"],
     }
     tags = ["от Redmond"] + tags_by_kind.get(kind, ["факт"])
-    coach_storage.add_diary_entry(obs, tags=tags)
+    coach_storage.add_diary_entry(obs, tags=tags, source="agent")
     out = [f"Передано Iris (дневник, {kind})."]
 
     due = str(args.get("due", "")).strip()
@@ -2455,7 +2492,15 @@ _DOSSIER_SECTION_MAP: Dict[str, Tuple[str, ...]] = {
     "strengths": ("02",),      # Сильные стороны
     "thinking": ("03",),       # Стиль работы / коммуникации
     "directives": ("04",),     # Рекомендованные директивы для AI-агентов
+    "current": ("05",),        # Актуально: учёба, работа, поиск работы
 }
+
+
+def _dossier_sections(text: str) -> Dict[str, str]:
+    """Номер раздела → заголовок, прямо из файла: новый раздел досье доступен
+    сразу. 01.10.2026 раздел «05 Актуально» (добавлен 28.09) не читался ничем."""
+    return {m.group(1): m.group(2).strip()
+            for m in re.finditer(r"^## (\d{2})\s+(.+)$", text, flags=re.MULTILINE)}
 
 
 def _tool_read_dossier_section(section: str) -> str:
@@ -2471,9 +2516,11 @@ def _tool_read_dossier_section(section: str) -> str:
     if section == "all":
         return text
 
-    ids = _DOSSIER_SECTION_MAP.get(section)
+    found = _dossier_sections(text)
+    ids = _DOSSIER_SECTION_MAP.get(section) or ((section,) if section in found else None)
     if not ids:
-        return f"Неизвестная секция: {section}. Доступны: core, strengths, thinking, directives, all."
+        names = ", ".join(f"{k} ({found.get(v[0], '—')})" for k, v in _DOSSIER_SECTION_MAP.items())
+        return f"Неизвестная секция: {section}. Доступны: {names}, all."
 
     extracted = _extract_sections(text, ids)
     if not extracted.strip():
@@ -2585,15 +2632,23 @@ def _tool_update_profile(args: Dict[str, Any], rg) -> str:
     else:
         return f"Неизвестное действие: {action}"
 
+    today = datetime.now().strftime("%Y-%m-%d")
     if category == "current":
-        profile.setdefault("current", {})["_last_updated"] = datetime.now().strftime("%Y-%m-%d")
+        profile.setdefault("current", {})["_last_updated"] = today
+    # Когда факт подтверждён — отдельно по каждому полю: иначе «где учится» из
+    # весны и «где работает» со вчера выглядят одинаково достоверными.
+    profile.setdefault("_confirmed", {})[f"{category}.{field}"] = today
 
-    profile_path.write_text(json.dumps(profile, ensure_ascii=False, indent=2), encoding="utf-8")
+    # Атомарно: обрыв посреди записи не оставит полупустой профиль.
+    tmp = profile_path.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(profile, ensure_ascii=False, indent=2), encoding="utf-8")
+    tmp.replace(profile_path)
 
     if rg is not None:
         try:
             rg.owner_profile = profile
-        except Exception:
-            logger.debug("owner_profile in-memory sync failed", exc_info=True)
+        except Exception:  # noqa: BLE001
+            logger.warning("Профиль записан в файл, но копия в памяти не обновилась — "
+                           "до рестарта агенты видят старый", exc_info=True)
 
     return f"OK: {category}.{field} {action} {value[:80]}"
