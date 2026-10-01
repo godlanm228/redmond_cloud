@@ -324,6 +324,8 @@ _RECEIPT_ICON = {
     "update_profile": "👤", "log_meal": "🍽", "update_pantry": "🧺",
     "save_week_plan": "🗓", "save_work_shift": "🗓", "set_work_shift_status": "🗓",
     "resolve_shift_conflict": "🗓",
+    "add_schedule_event": "🗓", "remove_schedule_event": "🗑", "extend_schedule": "🗓",
+    "stop_schedule_extension": "🗓", "apply_file_items": "📎", "undo_file_items": "🗑",
     "mute_notifications": "🔕",
 }
 
@@ -384,8 +386,30 @@ def _ground_tokens(text: str) -> set:
 _OWNER_FACT_FIELDS = {"add_diary_entry": "text", "handoff_to_iris": "observation"}
 
 
+def _ungrounded_event(fn_name: str, fn_args: Dict[str, Any], ctx: "GenerationContext") -> str:
+    """Событие в расписание — только из его слов или из данных, прочитанных в
+    этом ответе. 01.10.2026 на «продли октябрьский план» Iris поставила каждую
+    пятницу «Семинар» и «Групповая работа» на весь день — из старого описания
+    скрина в истории, а не из его слов и не из расписания, которое прочла."""
+    if fn_name != "add_schedule_event":
+        return ""
+    owner_said = [] if _is_system_prompt(ctx.user_text) else [ctx.user_text]
+    owner_said += [h.get("user", "") for h in (ctx.history or [])[-2:]
+                   if not _is_system_prompt(h.get("user", ""))]
+    read = [str(result) for _name, _args, result in ctx.actions]
+    title = _ground_tokens(str(fn_args.get("title", "")))
+    if title and title & set().union(*map(_ground_tokens, (owner_said + read) or [""])):
+        return ""
+    logger.warning("Событие отклонено: не опирается ни на слова владельца, ни на прочитанное (%r)",
+                   str(fn_args.get("title", ""))[:80])
+    return ("Не добавлено: событие в расписание идёт только из его слов или из данных, "
+            "прочитанных в этом ответе. Продление расписания — extend_schedule.")
+
+
 def _ungrounded_write(fn_name: str, fn_args: Dict[str, Any], ctx: "GenerationContext") -> str:
     """Отказ, если запись в дневник не опирается на слова владельца. '' — можно."""
+    if fn_name == "add_schedule_event":
+        return _ungrounded_event(fn_name, fn_args, ctx)
     field_name = _OWNER_FACT_FIELDS.get(fn_name)
     if not field_name:
         return ""

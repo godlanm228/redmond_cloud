@@ -47,6 +47,10 @@ GROUPS: Dict[str, Tuple[str, Dict[str, str]]] = {
         {"add": "add_deadline", "list": "list_deadlines", "done": "mark_deadline_done",
          "delete": "delete_deadline", "postpone": "postpone_deadline"},
     ),
+    "files": (
+        "What was found in files he sent: record it or take it back.",
+        {"apply": "apply_file_items", "undo": "undo_file_items"},
+    ),
     "food": (
         "Meals, nutrition lookup and the pantry.",
         {"log_meal": "log_meal", "lookup": "lookup_food", "pantry": "get_pantry",
@@ -57,6 +61,7 @@ GROUPS: Dict[str, Tuple[str, Dict[str, str]]] = {
         {"view": "get_week_schedule", "save_shift": "save_work_shift",
          "shift_status": "set_work_shift_status", "resolve_conflict": "resolve_shift_conflict",
          "add_event": "add_schedule_event", "remove_event": "remove_schedule_event",
+         "extend": "extend_schedule", "stop_extension": "stop_schedule_extension",
          "plan": "get_week_plan", "plan_save": "save_week_plan"},
     ),
 }
@@ -80,6 +85,10 @@ SUMMARIES: Dict[str, str] = {
     "get_week_schedule": "shifts, classes, training, appointments for the next days",
     "add_schedule_event": "add a class/training/appointment (one-off or weekly); not a shift",
     "remove_schedule_event": "remove an event by #id from view (weekly: stops from date)",
+    "extend_schedule": "repeat the last full week of classes until a date / with no end, minus breaks",
+    "stop_schedule_extension": "repeated classes end on a given day",
+    "apply_file_items": "record a sent file's events/deadlines that were not recorded yet",
+    "undo_file_items": "take back what was recorded from a sent file",
     "save_work_shift": "save a work shift he reported (date, start, end)",
     "set_work_shift_status": "mark a shift cancelled/uncertain/confirmed",
     "resolve_shift_conflict": "apply his answer to a photo-vs-text shift conflict",

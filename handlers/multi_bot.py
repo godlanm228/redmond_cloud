@@ -528,11 +528,16 @@ async def _process_album_later(group_id: str, chat_id: int,
 async def _process_photos(photos: list, chat_id: int,
                           context: ContextTypes.DEFAULT_TYPE) -> None:
     """Одно фото или альбом: один разбор зрением на всех, один ответ на вид."""
+    raws = [bytes(await (await p.get_file()).download_as_bytearray()) for p in photos]
+    await _process_photo_bytes(raws, chat_id, context)
+
+
+async def _process_photo_bytes(raws: list, chat_id: int,
+                               context: ContextTypes.DEFAULT_TYPE) -> None:
     coordinator = context.application.bot_data["coordinator"]
     dispatcher = context.application.bot_data["dispatcher"]
 
     import base64
-    raws = [bytes(await (await p.get_file()).download_as_bytearray()) for p in photos]
     logger.info("Photo from owner: %d шт. (%s KB) — vision analyze", len(raws),
                 ", ".join(str(len(r) // 1024) for r in raws))
     from logic.vision import analyze_images
@@ -713,10 +718,12 @@ async def _handle_food_photo(result: dict, archive_id, chat_id: int,
 
 
 async def redmond_document_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Файл от Влада. До 01.10.2026 обработчика файлов не было вовсе: календарь
-    (.ics) ушёл в пустоту — ни ответа, ни строки в логе, а на «че это за файл?»
-    бот спросил «какой файл?». Что это за файл, решает содержимое, не имя
-    (logic/documents); ничего не исполняется и не распаковывается."""
+    """Файл от Влада: прочитать, понять, сделать ясное, спросить неясное
+    (logic/file_reader). Инструкция — подпись и его последние сообщения:
+    01.10.2026 он написал «файл этот чек» и только потом прислал файл.
+
+    До 01.10.2026 обработчика файлов не было вовсе: календарь (.ics) ушёл в
+    пустоту — ни ответа, ни строки в логе."""
     if not await _gate(update, context):
         return
     if not _is_from_owner(update) or not update.message or not update.message.document:
@@ -731,34 +738,68 @@ async def redmond_document_handler(update: Update, context: ContextTypes.DEFAULT
     logger.info("IN [owner] файл «%s» (%s, %d KB)", name, doc.mime_type,
                 (doc.file_size or 0) // 1024)
 
-    from logic import calendar_import, documents
+    from logic import documents, file_reader
     if doc.file_size and doc.file_size > documents.MAX_BYTES:
-        verdict = documents.FileVerdict(
-            "unknown", False, f"файл больше {documents.MAX_BYTES // (1024 * 1024)} МБ — не открываю")
+        outcome = file_reader.FileOutcome(
+            reply=f"«{name}»: файл больше {documents.MAX_BYTES // (1024 * 1024)} МБ — не открываю.")
     else:
         raw = bytes(await (await doc.get_file()).download_as_bytearray())
-        verdict = await asyncio.to_thread(documents.inspect, raw, name)
-    logger.info("Файл «%s»: %s%s", name, verdict.kind,
-                "" if verdict.ok else f" — {verdict.reason}")
+        words = _owner_words_around(dispatcher, chat_id, update.message.caption or "")
+        async with coordinator.typing("Redmond", chat_id):
+            outcome = await asyncio.to_thread(file_reader.process, raw, name, words, chat_id)
+    if outcome.image:
+        await _process_photo_bytes([outcome.image], chat_id, context)
+        return
+    logger.info("Файл «%s»: ответ %d симв., вопрос: %s", name, len(outcome.reply),
+                outcome.question or "—")
 
-    if not verdict.ok:
-        reply = f"«{name}»: {verdict.reason}."
-    else:
-        try:
-            async with coordinator.typing("Redmond", chat_id):
-                reply = await asyncio.to_thread(calendar_import.import_calendar_text,
-                                                verdict.text)
-        except Exception as e:  # noqa: BLE001 — владелец должен узнать, что не записано
-            logger.exception("Календарь «%s» не импортирован", name)
-            reply = (f"«{name}» — календарь, но разобрать его не смог "
-                     f"({type(e).__name__}). Ничего не записал.")
-    await coordinator.respond_as("Redmond", chat_id, reply, "🦞", "plain")
+    await coordinator.respond_as("Redmond", chat_id, outcome.reply, "🦞", "plain")
+    rg = dispatcher.response_generator
+    caption = (update.message.caption or "").strip()
     try:
-        dispatcher.response_generator.note_to_history(
-            chat_id, f"(прислал файл «{name}»)", reply, agent="Redmond")
+        rg.note_to_history(chat_id, f"(прислал файл «{name}»)"
+                           + (f" с подписью: {caption}" if caption else ""),
+                           outcome.reply, agent="Redmond")
     except Exception:
         logger.warning("note_to_history failed", exc_info=True)
-    await _route_caption(update, context, chat_id)
+    if outcome.question:
+        # Спрашивает тот, кто потом выполнит ответ: «да» уйдёт ему по sticky.
+        asker = agent_by_name(outcome.question_agent) or REDMOND
+        await coordinator.respond_as(asker.name, chat_id, outcome.question, asker.emoji,
+                                     "plain")
+        try:
+            rg.note_to_history(chat_id, f"(вопрос по файлу «{name}»)", outcome.question,
+                               agent=asker.name)
+        except Exception:
+            logger.warning("note_to_history failed", exc_info=True)
+        st: RouterState = get_state(context.application.bot_data["router_states"], chat_id)
+        st.add("assistant", outcome.question, asker.name)
+        st.last_agent_name = asker.name
+
+
+# Сколько назад его сообщения ещё считаются словами к файлу.
+FILE_CONTEXT_MIN = 15
+
+
+def _owner_words_around(dispatcher, chat_id: int, caption: str) -> list:
+    """Подпись к файлу + его сообщения за последние минуты — инструкция к файлу."""
+    from datetime import datetime, timedelta
+    words = []
+    try:
+        cutoff = datetime.now() - timedelta(minutes=FILE_CONTEXT_MIN)
+        for turn in dispatcher.response_generator.chat_history(chat_id)[-4:]:
+            user = str(turn.get("user") or "").strip()
+            try:
+                ts = datetime.fromisoformat(str(turn.get("timestamp") or ""))
+            except ValueError:
+                continue
+            if user and not user.startswith("(") and ts.replace(tzinfo=None) >= cutoff:
+                words.append(user)
+    except Exception:
+        logger.warning("История для файла не поднята", exc_info=True)
+    if caption.strip():
+        words.append(caption.strip())
+    return words
 
 
 async def _route_caption(update: Update, context: ContextTypes.DEFAULT_TYPE,

@@ -41,15 +41,18 @@ def _dir() -> Path:
     return ARCHIVE_DIR
 
 
-def _path_for(sha: str, ts) -> Path:
+def _path_for(sha: str, ts, ext: str = ".jpg") -> Path:
     sub = _dir() / ts.strftime("%Y") / ts.strftime("%m")
     sub.mkdir(parents=True, exist_ok=True)
-    return sub / f"{sha[:16]}.jpg"
+    return sub / f"{sha[:16]}{ext}"
 
 
 def save(image_bytes: bytes, result: Dict[str, Any], chat_id: int = 0,
-         model: str = "", applied: str = "") -> Optional[int]:
-    """Сохранить фото и разбор. Возвращает id записи (или существующей).
+         model: str = "", applied: str = "", ext: str = ".jpg",
+         refresh: bool = False) -> Optional[int]:
+    """Сохранить фото (или файл — ext) и разбор. Возвращает id записи (или
+    существующей). refresh — тот же файл прислали снова: разбор обновляется
+    (файлы перечитываются заново, их запись описывает последнее прочтение).
 
     Никогда не бросает: архив — вспомогательная вещь, из-за него разбор фото
     падать не должен.
@@ -60,11 +63,13 @@ def save(image_bytes: bytes, result: Dict[str, Any], chat_id: int = 0,
         sha = hashlib.sha256(image_bytes).hexdigest()
         existing = db.query_one("SELECT id FROM vision_results WHERE sha256=?", (sha,))
         if existing:
-            # То же самое фото прислали повторно — файл на диске уже есть.
+            # То же самое прислали повторно — файл на диске уже есть.
+            if refresh:
+                update(int(existing["id"]), result, applied)
             return int(existing["id"])
 
         ts = now_local()
-        path = _path_for(sha, ts)
+        path = _path_for(sha, ts, ext)
         path.write_bytes(image_bytes)
 
         tags = _tags_from(result)
@@ -98,6 +103,7 @@ def _tags_from(result: Dict[str, Any]) -> List[str]:
     if result.get("dish"):
         tags.append(str(result["dish"]))
     tags += [str(i) for i in (result.get("items") or [])][:5]
+    tags += [str(t) for t in (result.get("tags") or [])][:5]
     seen, out = set(), []
     for t in tags:
         low = t.strip().lower()
@@ -105,6 +111,22 @@ def _tags_from(result: Dict[str, Any]) -> List[str]:
             seen.add(low)
             out.append(t.strip())
     return out
+
+
+def update(record_id: Optional[int], result: Dict[str, Any], applied: str = "") -> None:
+    """Перезаписать разбор (файл перечитан, по нему что-то записали/отменили)."""
+    if not record_id:
+        return
+    tags = _tags_from(result)
+    description = str(result.get("description") or "")
+    label = (db.query_one("SELECT label FROM vision_results WHERE id=?", (record_id,))
+             or {"label": ""})["label"]
+    db.execute(
+        "UPDATE vision_results SET kind=?, description=?, tags=?, raw=?, applied=?,"
+        " search_text=? WHERE id=?",
+        (str(result.get("type") or ""), description, json.dumps(tags, ensure_ascii=False),
+         json.dumps(result, ensure_ascii=False), applied,
+         _search_text(description, tags, label), record_id))
 
 
 def set_applied(record_id: Optional[int], applied: str) -> None:
@@ -176,7 +198,7 @@ def _row(r) -> Dict[str, Any]:
 
 
 def dir_size() -> int:
-    return sum(p.stat().st_size for p in _dir().rglob("*.jpg") if p.is_file())
+    return sum(p.stat().st_size for p in _dir().rglob("*") if p.is_file())
 
 
 def enforce_limits() -> int:

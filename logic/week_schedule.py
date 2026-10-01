@@ -137,15 +137,21 @@ KIND_LABELS = {"lecture": "учёба", "home_study": "дом. учёба", "spo
 
 def _rows_for(d: date, kind: Optional[str] = None) -> List[Dict[str, Any]]:
     """Строки расписания, ДЕЙСТВУЮЩИЕ на дату d: еженедельные в своём сроке
-    действия и разовые на эту дату. Вне срока — не существуют."""
+    действия и разовые на эту дату. Вне срока — не существуют.
+
+    День отдыха на весь день (каникулы, праздник: разовая строка kind=rest без
+    часов) снимает в этот день еженедельные пары — серия «каждый понедельник»
+    не идёт через Рождество."""
     day = _iso(d)
     sql = ("SELECT * FROM timetable WHERE ((date IS NULL AND weekday=? AND valid_from<=?"
            " AND (valid_to IS NULL OR valid_to>=?)) OR date=?)")
-    params: List[Any] = [d.weekday(), day, day, day]
+    rows = [dict(r) for r in db.query(sql + " ORDER BY start, id",
+                                      (d.weekday(), day, day, day))]
+    if any(r["date"] and r["kind"] == "rest" and not r["start"] for r in rows):
+        rows = [r for r in rows if r["date"] or r["kind"] not in STUDY_KINDS]
     if kind:
-        sql += " AND kind=?"
-        params.append(kind)
-    return [dict(r) for r in db.query(sql + " ORDER BY start, id", tuple(params))]
+        rows = [r for r in rows if r["kind"] == kind]
+    return rows
 
 
 def study_slots(d: date) -> List[Tuple[str, str, str]]:
@@ -213,6 +219,113 @@ def remove_event(row_id: int, on: date) -> str:
         return "серия удалена целиком"
     db.execute("UPDATE timetable SET valid_to=? WHERE id=?", (last, int(row_id)))
     return f"серия закончена {last}"
+
+
+EXTEND_PREFIX = "extend|"
+
+
+def _reference_week(rows: List[Dict[str, Any]]) -> Optional[date]:
+    """Понедельник недели-образца: из последних трёх недель с разовыми
+    событиями — самая полная (неполная последняя неделя не станет шаблоном)."""
+    by_week: Dict[date, int] = {}
+    for r in rows:
+        d = datetime.strptime(r["date"], "%Y-%m-%d").date()
+        monday = d - timedelta(days=d.weekday())
+        by_week[monday] = by_week.get(monday, 0) + 1
+    if not by_week:
+        return None
+    recent = sorted(by_week)[-3:]
+    return max(recent, key=lambda m: (by_week[m], m))
+
+
+@dataclass
+class ExtendResult:
+    reference: Optional[date] = None
+    first: Optional[date] = None
+    until: Optional[date] = None
+    series: List[Dict[str, Any]] = field(default_factory=list)
+    breaks: List[Tuple[date, date]] = field(default_factory=list)
+    error: str = ""
+
+
+def extend_weekly(until: Optional[date], breaks: List[Tuple[date, date]] = (),
+                  reference: Optional[date] = None, source: str = "text") -> ExtendResult:
+    """Продлить расписание: неделя-образец повторяется каждую неделю после
+    последней недели с разовыми событиями — до `until` включительно или без
+    конца (until=None: пока он не скажет «стоп», см. stop_extension). Каникулы
+    — дни отдыха, они снимают пары (см. _rows_for). Повторный вызов заменяет
+    прошлое продление того же календаря, а не добавляет второе.
+
+    Образец — разовые события (из календаря/скринов), не еженедельные строки:
+    теннис и так каждую неделю."""
+    result = ExtendResult(until=until, breaks=list(breaks))
+    dated = [dict(r) for r in db.query(
+        "SELECT * FROM timetable WHERE date IS NOT NULL AND kind<>'rest'"
+        " AND origin NOT LIKE ? ORDER BY date, start", (EXTEND_PREFIX + "%",))]
+    if reference:
+        monday = reference - timedelta(days=reference.weekday())
+    else:
+        monday = _reference_week(dated)
+    if monday is None:
+        result.error = "в расписании нет разовых событий — продлевать нечего"
+        return result
+    week = [r for r in dated
+            if monday <= datetime.strptime(r["date"], "%Y-%m-%d").date() <= monday + timedelta(days=6)]
+    if not week:
+        result.error = f"на неделе с {monday:%d.%m} событий нет — не из чего делать образец"
+        return result
+    last_dated = max(datetime.strptime(r["date"], "%Y-%m-%d").date() for r in dated)
+    first_monday = last_dated - timedelta(days=last_dated.weekday()) + timedelta(days=7)
+    if until is not None and until < first_monday:
+        result.error = (f"расписание и так есть до {last_dated:%d.%m}, а продлить просили "
+                        f"до {until:%d.%m}")
+        return result
+    origin = EXTEND_PREFIX + (week[0].get("origin") or "manual")
+    created = now_local().isoformat(timespec="minutes")
+    result.reference, result.first = monday, first_monday
+    with db.transaction() as conn:
+        conn.execute("DELETE FROM timetable WHERE origin=?", (origin,))
+        for r in week:
+            d = datetime.strptime(r["date"], "%Y-%m-%d").date()
+            first = first_monday + timedelta(days=d.weekday())
+            if until is not None and first > until:
+                continue
+            conn.execute(
+                "INSERT INTO timetable(weekday, start, end, title, kind, valid_from, valid_to,"
+                " source, created, location, origin) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+                (d.weekday(), r["start"], r["end"], r["title"], r["kind"], _iso(first),
+                 _iso(until) if until else None, source, created, r.get("location") or "",
+                 origin))
+            result.series.append({**r, "first": first})
+        for a, b in breaks:
+            day = a
+            while day <= b and (day - a).days <= 62:
+                conn.execute(
+                    "INSERT INTO timetable(weekday, start, end, title, kind, valid_from,"
+                    " source, created, date, origin) VALUES(?,?,?,?,?,?,?,?,?,?)",
+                    (day.weekday(), "", "", "Каникулы", "rest", _iso(day), source, created,
+                     _iso(day), origin))
+                day += timedelta(days=1)
+    return result
+
+
+def stop_extension(last_day: date) -> int:
+    """«Стоп, дальше без пар»: продлённые серии заканчиваются last_day включительно.
+    Возвращает, сколько серий закончено."""
+    cur = db.execute(
+        "UPDATE timetable SET valid_to=? WHERE origin LIKE ? AND date IS NULL"
+        " AND (valid_to IS NULL OR valid_to>?)",
+        (_iso(last_day), EXTEND_PREFIX + "%", _iso(last_day)))
+    db.execute("DELETE FROM timetable WHERE origin LIKE ? AND date>?",
+               (EXTEND_PREFIX + "%", _iso(last_day)))
+    return cur.rowcount or 0
+
+
+def remove_origin(origin: str) -> int:
+    """Убрать всё, что записано из одного источника, вместе с его продлением."""
+    cur = db.execute("DELETE FROM timetable WHERE origin=? OR origin=?",
+                     (origin, EXTEND_PREFIX + origin))
+    return cur.rowcount or 0
 
 
 @dataclass

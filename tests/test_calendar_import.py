@@ -108,8 +108,11 @@ def test_scripts_are_refused_even_though_they_are_text():
 
 
 def test_unreadable_formats_get_an_honest_answer_not_silence():
-    pdf = documents.inspect(b"%PDF-1.7\n...", "vertrag.pdf")
-    assert not pdf.ok and "PDF" in pdf.reason
+    assert documents.inspect(b"%PDF-1.7\n...", "vertrag.pdf").ok, "PDF читается (file_reader)"
+    old_doc = documents.inspect(b"\xd0\xcf\x11\xe0" + b"\x00" * 100, "brief.doc")
+    assert not old_doc.ok and ".docx" in old_doc.reason
+    rar = documents.inspect(b"Rar!\x1a\x07" + b"\x00" * 100, "files.rar")
+    assert not rar.ok and "архив" in rar.reason
     big = documents.inspect(b"x" * (documents.MAX_BYTES + 1), "huge.ics")
     assert not big.ok and "МБ" in big.reason
 

@@ -123,6 +123,8 @@ IRIS = AgentConfig(
         "mute_notifications", "get_week_schedule", "save_work_shift", "set_work_shift_status",
         "resolve_shift_conflict",  # ответ на «бери с фото» / «оставь как есть»
         "add_schedule_event", "remove_schedule_event",  # пары, спорт, встречи (не смены)
+        "extend_schedule", "stop_schedule_extension",  # «продли до конца семестра», «стоп»
+        "apply_file_items", "undo_file_items",  # что нашлось в присланном файле
         "find_photo",  # «кинь тот график, что я скидывал»
         "get_week_plan", "save_week_plan",
         "delegate_research",  # внешние факты для советов — через Newser, не гадать

@@ -21,7 +21,7 @@ from __future__ import annotations
 import json
 import logging
 import re
-from datetime import datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -639,6 +639,88 @@ TOOL_SCHEMAS = [
     {
         "type": "function",
         "function": {
+            "name": "extend_schedule",
+            "description": (
+                "Extend his class schedule: the last full week of classes from his "
+                "calendar repeats every week until `until` (inclusive), or with no end "
+                "(until=null) until he says stop. ONE call — never re-add classes one by "
+                "one. Breaks (holidays, project week) go to `breaks`: no classes those days. "
+                "Calling again replaces the previous extension."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "until": {"type": ["string", "null"],
+                              "description": "YYYY-MM-DD last day; null = no end"},
+                    "breaks": {
+                        "type": ["array", "null"],
+                        "description": "Days without classes",
+                        "items": {"type": "object", "properties": {
+                            "from": {"type": "string", "description": "YYYY-MM-DD"},
+                            "to": {"type": "string", "description": "YYYY-MM-DD"}},
+                            "required": ["from", "to"]},
+                    },
+                    "reference_date": {"type": ["string", "null"],
+                                       "description": "A day of the week to use as the "
+                                                      "pattern; null = the last full week"},
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "stop_schedule_extension",
+            "description": (
+                "Stop the extended (repeated) class schedule: classes repeat up to "
+                "`last_day` inclusive and not after. For «хватит», «с декабря без пар», "
+                "«семестр кончился 12.02»."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {"last_day": {"type": "string", "description": "YYYY-MM-DD"}},
+                "required": ["last_day"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "apply_file_items",
+            "description": (
+                "Record what was found in a file he sent but not recorded yet (its "
+                "reading in the chat says «Нашёл, но пока не записывал»): its schedule "
+                "events and/or deadlines. Use when he agrees («да», «запиши», «добавь "
+                "экзамены»). file_id = the #N from «файл #N»; null = his last file."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "file_id": {"type": ["integer", "null"]},
+                    "what": {"type": "string", "enum": ["schedule", "deadlines", "all"]},
+                },
+                "required": ["what"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "undo_file_items",
+            "description": (
+                "Take back everything recorded from a file he sent (its events, their "
+                "extension, its deadlines). For «убери то, что из файла», «отмени». "
+                "file_id = the #N from «файл #N»; null = his last file."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {"file_id": {"type": ["integer", "null"]}},
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "remove_schedule_event",
             "description": (
                 "Remove a class/training/event from his schedule by the #id that "
@@ -661,7 +743,7 @@ TOOL_SCHEMAS = [
         "function": {
             "name": "find_photo",
             "description": (
-                "Find a photo the owner sent earlier, by meaning or by the label he gave "
+                "Find a photo or a file the owner sent earlier, by meaning or by the label he gave "
                 "it. Use for «кинь тот график, что я скидывал», «что было на том скрине», "
                 "«найди фото еды за прошлую неделю». Returns what was recognised and "
                 "what was recorded from it — say it in words; the file itself is not "
@@ -1198,6 +1280,14 @@ def _dispatch_tool(name: str, args: Dict[str, Any], rg=None) -> str:
         return _tool_save_work_shift(args)
     if name == "add_schedule_event":
         return _tool_add_schedule_event(args)
+    if name == "extend_schedule":
+        return _tool_extend_schedule(args)
+    if name == "stop_schedule_extension":
+        return _tool_stop_schedule_extension(args)
+    if name == "apply_file_items":
+        return _tool_apply_file_items(args)
+    if name == "undo_file_items":
+        return _tool_undo_file_items(args)
     if name == "remove_schedule_event":
         return _tool_remove_schedule_event(args)
     if name == "set_work_shift_status":
@@ -1496,6 +1586,100 @@ def _tool_add_schedule_event(args: Dict[str, Any]) -> str:
     when = (f"каждый {_WEEKDAY_ACC[first.weekday()]} с {first:%d.%m}"
             + (f" по {until:%d.%m}" if until else "")) if weekly else f"{first:%d.%m}"
     return f"Добавила в расписание: {describe_event(row)} — {when}."
+
+
+def _parse_day(raw: Any) -> Optional[date]:
+    try:
+        return datetime.strptime(str(raw or "").strip(), "%Y-%m-%d").date()
+    except ValueError:
+        return None
+
+
+def _tool_extend_schedule(args: Dict[str, Any]) -> str:
+    from logic.week_schedule import _DAY_NAMES, extend_weekly
+
+    until = None
+    if args.get("until"):
+        until = _parse_day(args["until"])
+        if until is None:
+            return f"Дата «{args['until']}» не в формате YYYY-MM-DD — не продлила."
+    breaks = []
+    for b in args.get("breaks") or []:
+        a, z = _parse_day((b or {}).get("from")), _parse_day((b or {}).get("to"))
+        if a is None or z is None or z < a:
+            return f"Каникулы {b} — нужны from/to в формате YYYY-MM-DD — не продлила."
+        breaks.append((a, z))
+    ref = _parse_day(args.get("reference_date")) if args.get("reference_date") else None
+    res = extend_weekly(until, breaks, reference=ref)
+    if res.error:
+        return f"Не продлила: {res.error}."
+    span = (f"с {res.first:%d.%m.%Y} по {until:%d.%m.%Y}" if until
+            else f"с {res.first:%d.%m.%Y} без конца — пока он не скажет «стоп»")
+    lines = [f"Продлила расписание: неделя {res.reference:%d.%m}–"
+             f"{res.reference + timedelta(days=6):%d.%m} повторяется каждую неделю {span}."]
+    for s in sorted(res.series, key=lambda r: (r["weekday"], r["start"])):
+        when = f"{s['start']}–{s['end']}" if s["start"] else "весь день"
+        lines.append(f"• {_DAY_NAMES[s['weekday']]} {when} {s['title']}")
+    if breaks:
+        lines.append("Без пар: " + ", ".join(f"{a:%d.%m}–{z:%d.%m}" for a, z in breaks) + ".")
+    elif until is None or (until - res.first).days > 40:
+        lines.append("Каникулы не указаны — пары стоят и на праздниках; если есть перерыв, "
+                     "спроси его даты.")
+    return "\n".join(lines)
+
+
+def _tool_stop_schedule_extension(args: Dict[str, Any]) -> str:
+    from logic.week_schedule import stop_extension
+
+    last = _parse_day(args.get("last_day"))
+    if last is None:
+        return "Нужна дата YYYY-MM-DD — ничего не изменила."
+    n = stop_extension(last)
+    if not n:
+        return "Продлённого расписания нет — останавливать нечего."
+    return f"Продлённые пары идут до {last:%d.%m.%Y} включительно, дальше их нет (серий: {n})."
+
+
+def _file_record(file_id: Any) -> Tuple[Optional[int], Optional[Dict[str, Any]]]:
+    from utils import db
+    if file_id not in (None, ""):
+        row = db.query_one("SELECT id, raw FROM vision_results WHERE id=? AND kind LIKE 'file:%'",
+                           (int(file_id),))
+    else:
+        row = db.query_one("SELECT id, raw FROM vision_results WHERE kind LIKE 'file:%'"
+                           " ORDER BY id DESC LIMIT 1")
+    if row is None:
+        return None, None
+    return int(row["id"]), json.loads(row["raw"] or "{}")
+
+
+def _tool_apply_file_items(args: Dict[str, Any]) -> str:
+    from logic import file_reader
+    from utils import vision_archive
+
+    rec_id, raw = _file_record(args.get("file_id"))
+    if raw is None:
+        return "Такого файла в архиве нет — записывать нечего."
+    what = str(args.get("what") or "all")
+    lines = file_reader.apply_items(raw, what)
+    if not lines:
+        return f"В файле #{rec_id} «{raw.get('name')}» нет того, что можно записать ({what})."
+    vision_archive.update(rec_id, raw, "; ".join(lines)[:500])
+    return f"Записала из файла #{rec_id} «{raw.get('name')}»:\n" + "\n".join(lines)
+
+
+def _tool_undo_file_items(args: Dict[str, Any]) -> str:
+    from logic import file_reader
+    from utils import vision_archive
+
+    rec_id, raw = _file_record(args.get("file_id"))
+    if raw is None:
+        return "Такого файла в архиве нет — отменять нечего."
+    lines = file_reader.undo_items(raw)
+    if not lines:
+        return f"Из файла #{rec_id} «{raw.get('name')}» ничего не записано — убирать нечего."
+    vision_archive.update(rec_id, raw, "отменено: " + "; ".join(lines))
+    return f"Убрала то, что было из файла #{rec_id} «{raw.get('name')}»: " + "; ".join(lines) + "."
 
 
 _WEEKDAY_ACC = ["понедельник", "вторник", "среду", "четверг", "пятницу", "субботу",

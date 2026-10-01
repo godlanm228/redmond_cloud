@@ -64,7 +64,8 @@ def bot(monkeypatch):
     monkeypatch.setattr(multi_bot, "ALBUM_WAIT_SEC", 0.05)
     coordinator = FakeCoordinator()
     notes = []
-    rg = SimpleNamespace(note_to_history=lambda chat, user, note, agent="": notes.append(note))
+    rg = SimpleNamespace(note_to_history=lambda chat, user, note, agent="": notes.append(note),
+                         chat_history=lambda chat_id: [])
     context = SimpleNamespace(application=SimpleNamespace(bot_data={
         "coordinator": coordinator,
         "dispatcher": SimpleNamespace(response_generator=rg, config=SimpleNamespace()),
@@ -81,17 +82,23 @@ def _update(**message):
                            effective_chat=SimpleNamespace(id=CHAT), message=msg)
 
 
-def test_a_calendar_file_is_read_answered_and_stored(bot):
+def test_a_calendar_file_is_read_answered_and_stored(bot, monkeypatch):
+    from logic import file_reader
+    monkeypatch.setattr(file_reader, "_ask_gemini", lambda prompt, content: (
+        '{"what": "расписание пар CampusNet на октябрь", "summary": "Пары пн, вт, пт.",'
+        ' "key_facts": [], "schedule_items": [], "deadlines": [], "do_now": ["schedule"],'
+        ' "question": "В файле только октябрь — продлить до конца семестра?"}', "fake"))
     raw = campusnet_ics(TIMETABLE)
     doc = FakeMedia(raw, file_name="832849531700533.ics", mime_type="text/calendar",
                     file_size=len(raw))
     asyncio.run(multi_bot.redmond_document_handler(_update(document=doc), bot.context))
 
-    assert len(bot.coordinator.sent) == 1
-    agent, text = bot.coordinator.sent[0]
-    assert agent == "Redmond" and "CampusNet" in text
+    (agent, text), (asker, question) = bot.coordinator.sent
+    assert agent == "Redmond" and "расписание пар CampusNet" in text and "Записал" in text
+    assert asker == "Iris" and "продлить" in question, "вопрос задаёт тот, кто выполнит ответ"
+    assert bot.context.application.bot_data["router_states"][CHAT].last_agent_name == "Iris"
     assert ws.study_slots(date(2026, 10, 5)), "пары должны лечь в расписание"
-    assert bot.notes and "CampusNet" in bot.notes[0], "квитанция — в историю, для «что это за пункты»"
+    assert bot.notes and "CampusNet" in bot.notes[0], "чтение — в историю, для «что это за пункты»"
 
 
 def test_an_executable_named_like_a_calendar_is_refused_out_loud(bot):

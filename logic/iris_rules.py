@@ -104,6 +104,22 @@ MODULES = [
         "- Calendar files and schedule screenshots are imported by code — never re-add them.",
         "- Remove/stop → get_week_schedule (#id) → remove_schedule_event.",
     ]),
+    ("extend", {"extend_schedule", "stop_schedule_extension"}, [
+        "EXTENDING CLASSES («продли/повтори расписание до …»):",
+        "- ONE extend_schedule call, never classes one by one. until = the end he named:",
+        "  a date → it; «до конца ноября» → 30.11; «до декабря» → 30.11; «пока не скажу» → null.",
+        "- An end you do not KNOW (конец семестра, экзамены, «до каникул», any event): take",
+        "  its date from the conversation; if it is not there — ask him, don't guess.",
+        "- Breaks (каникулы, Projektwoche, праздники) he or the conversation named → breaks.",
+        "  Extending over Christmas with no breaks known → ask once whether there is a pause.",
+        "- After extending, say the exact range and the breaks in one line.",
+        "- «стоп / хватит / дальше без пар с X» → stop_schedule_extension(last_day).",
+    ]),
+    ("files", {"apply_file_items", "undo_file_items"}, [
+        "FILES HE SENT: the reading is in the chat («📎 … файл #N»). He agrees to record what",
+        "it found («да», «запиши», «добавь экзамены») → apply_file_items; «убери/отмени то,",
+        "что из файла» → undo_file_items. Code checks the items; never retype them by hand.",
+    ]),
     ("deadlines", {"add_deadline", "list_deadlines", "mark_deadline_done", "delete_deadline",
                    "postpone_deadline", "add_goal", "list_goals", "mark_goal_done"}, [
         "DEADLINES & PLANNING:",

@@ -46,8 +46,9 @@ _MAGIC = [
     (b"\xd0\xcf\x11\xe0", "office"),  # old binary Office (.doc/.xls)
 ]
 
-# Kinds with a reader behind them. The rest get an honest «not yet».
-READABLE = {"calendar"}
+# Kinds with a reader behind them (logic/file_reader). The rest get an honest
+# refusal: executables and archives are never opened.
+READABLE = {"calendar", "text", "pdf", "office", "image"}
 
 
 @dataclass
@@ -111,6 +112,10 @@ def inspect(raw: bytes, filename: str = "") -> FileVerdict:
         if raw.startswith(magic):
             if kind == "zip":
                 kind = "office" if ext in _OFFICE_EXT else "archive"
+            elif kind == "office":
+                kind = "legacy_office"  # .doc/.xls 97-2003: binary, no reader
+            if kind in READABLE:
+                return FileVerdict(kind, True, "")
             return _not_readable(kind, ext)
 
     text = decode_text(raw)
@@ -121,17 +126,14 @@ def inspect(raw: bytes, filename: str = "") -> FileVerdict:
     if ext in (".ics", ".ical", ".ifb"):
         return FileVerdict("unknown", False,
                            "файл назван календарём, но внутри не календарь — не открываю")
-    return _not_readable("text", ext)
+    return FileVerdict("text", True, "", text)
 
 
 def _not_readable(kind: str, ext: str) -> FileVerdict:
     reasons = {
         "executable": "это исполняемый файл — такие не открываю",
         "archive": "это архив — архивы не распаковываю",
-        "image": "картинку пришли как фото, не файлом — тогда разберу",
-        "pdf": "PDF пока не читаю — умею только календари (.ics)",
-        "office": "документы Office пока не читаю — умею только календари (.ics)",
-        "text": "текстовые файлы пока не разбираю — умею только календари (.ics)",
+        "legacy_office": "это старый формат Office (.doc/.xls) — сохрани как .docx/.xlsx или PDF",
     }
     label = f" ({ext})" if ext else ""
     return FileVerdict(kind, False, reasons.get(kind, "такой формат не читаю") + label)
