@@ -65,6 +65,13 @@ def stale_report(today: Optional[date] = None) -> List[str]:
         left = (datetime.strptime(last_class["d"], "%Y-%m-%d").date() - today).days
         if 0 <= left <= SCHEDULE_ENDS_SOON_DAYS:
             out.append(f"пары в расписании кончаются {last_class['d']} — дальше не продлено")
+    from logic import pings
+    for kind in ("meal", "training", "study", "followup", "radar", "crunch", "shift_confirm",
+                 "absence"):
+        n, answered = coach_storage.ping_reply_rate(kind, pings.ADAPT_DAYS)
+        if n >= pings.ADAPT_MIN_PINGS and answered / n < pings.ADAPT_MIN_RATE:
+            out.append(f"пинг «{kind}» выключен: ответил на {answered} из {n} за "
+                       f"{pings.ADAPT_DAYS} дн.")
     profile = _profile()
     updated = (profile.get("current") or {}).get("_last_updated")
     if updated:

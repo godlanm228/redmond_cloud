@@ -69,7 +69,12 @@ except Exception:  # pragma: no cover
 
 
 def provider_of(model: str) -> str:
-    return "gemini" if (model or "").startswith("gemini") else "groq"
+    model = model or ""
+    if model.startswith("gemini"):
+        return "gemini"
+    if model.startswith("mistral/"):
+        return "mistral"
+    return "groq"
 
 
 @dataclass

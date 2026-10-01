@@ -3,7 +3,7 @@ import sys
 import tempfile
 import types
 import unittest
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -83,7 +83,11 @@ class DayTickerTests(unittest.TestCase):
         self.tmp.cleanup()
 
     def _mark_owner_seen_and_fed(self):
+        # Писал два часа назад: пинг не перебивает разговор (QUIET_AFTER_MESSAGE_MIN).
+        now = self.fixed_now
+        coach_storage.now_local = lambda: now - timedelta(hours=2)
         coach_storage.mark_owner_seen()
+        coach_storage.now_local = lambda: self.fixed_now
         coach_storage.add_diary_entry("Поел утром", tags=["питание"])
 
     def test_training_ping_when_free_day_and_fed(self):

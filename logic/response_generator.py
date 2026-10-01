@@ -1503,8 +1503,10 @@ class ResponseGenerator:
 
         gemini_key = getattr(self.config, "gemini_api_key", "") or gemini.api_key_from_env()
         groq_key = getattr(self.config, "groq_api_key", "")
-        chain = [m for m in llm_gate.pool("compose")
-                 if (gemini_key if llm_gate.provider_of(m) == "gemini" else groq_key and groq_ok)]
+        from utils import groq as groq_client
+        has_key = {"gemini": bool(gemini_key), "groq": bool(groq_key and groq_ok),
+                   "mistral": bool(groq_client.mistral_key())}
+        chain = [m for m in llm_gate.pool("compose") if has_key.get(llm_gate.provider_of(m))]
         tokens = llm_gate.estimate_tokens(prompt)
         tried: List[str] = []
         while True:

@@ -595,6 +595,9 @@ def mark_owner_seen() -> None:
         state["last_seen"] = now_hm
     state["last_msg"] = now_hm
     save_day_state(state)
+    # Через дни, не только сегодня: «его не было N дней» и «ответил ли на пинг».
+    db.kv_set("last_owner_at", now_local().isoformat(timespec="minutes"))
+    _resolve_ping_answers(answered=True)
 
 
 def owner_seen_today() -> bool:
@@ -605,11 +608,64 @@ def mark_ping(ping_id: str) -> None:
     state = get_day_state()
     state["pings"][ping_id] = now_local().strftime("%H:%M")
     save_day_state(state)
+    log = db.kv_get(PING_LOG_KEY, []) or []
+    log.append({"type": ping_id.split(":")[0], "at": now_local().isoformat(timespec="minutes"),
+                "answered": None})
+    cutoff = (now_local() - timedelta(days=PING_LOG_DAYS)).isoformat()
+    db.kv_set(PING_LOG_KEY, [p for p in log if p["at"] >= cutoff])
+
+
+# Журнал пингов: тип, когда, ответил ли он в течение часа. По нему тикер
+# отключает пинги, на которые он не отвечает (10.06–01.10.2026: «как ты, какие
+# планы» — 75 пингов, ответ на четверть, 46 дней бот писал в пустоту).
+PING_LOG_KEY = "ping_log"
+PING_LOG_DAYS = 45
+PING_ANSWER_MIN = 60
+
+
+def _resolve_ping_answers(answered: bool) -> None:
+    """Его сообщение отвечает на пинги последнего часа; более старые без ответа —
+    не отвечены."""
+    log = db.kv_get(PING_LOG_KEY, []) or []
+    if not log:
+        return
+    now = now_local()
+    changed = False
+    for p in log:
+        if p.get("answered") is not None:
+            continue
+        try:
+            age = (now - datetime.fromisoformat(p["at"])).total_seconds() / 60
+        except (KeyError, ValueError):
+            continue
+        if age <= PING_ANSWER_MIN and answered:
+            p["answered"], changed = True, True
+        elif age > PING_ANSWER_MIN:
+            p["answered"], changed = False, True
+    if changed:
+        db.kv_set(PING_LOG_KEY, log)
+
+
+def ping_reply_rate(ping_type: str, days: int = 30) -> tuple:
+    """(сколько пингов этого типа за `days` дней, на сколько он ответил за час)."""
+    _resolve_ping_answers(answered=False)
+    cutoff = (now_local() - timedelta(days=days)).isoformat()
+    rows = [p for p in db.kv_get(PING_LOG_KEY, []) or []
+            if p.get("type") == ping_type and p.get("at", "") >= cutoff]
+    return len(rows), sum(1 for p in rows if p.get("answered"))
+
+
+def last_owner_at() -> Optional[datetime]:
+    raw = db.kv_get("last_owner_at", "")
+    try:
+        return datetime.fromisoformat(raw) if raw else None
+    except ValueError:
+        return None
 
 
 # ============================================================================
 # Mute — «стоп» от Влада. Два уровня (с 03.08.2026):
-#   scope='pings' (дефолт) — молчит только дневной тикер (checkin/еда/спорт/
+#   scope='pings' (дефолт) — молчит только дневной тикер (выходить/еда/спорт/
 #     учёба); утренний дайджест, напоминания о дедлайнах и вечерний итог
 #     ОСТАЮТСЯ — это информация, а не «дёрганье».
 #   scope='all' — полная тишина всего проактивного (только по явной просьбе).

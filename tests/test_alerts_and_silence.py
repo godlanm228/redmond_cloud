@@ -121,9 +121,11 @@ def _situation(now):
     shift = ShiftSituation(record=None, active_record=None, start_at=None, end_at=None,
                            status="planned", source="", confidence="", updated_at=None,
                            confirmed_at=None)
+    # Писал два часа назад: пинг не перебивает разговор (QUIET_AFTER_MESSAGE_MIN).
     return DaySituation(now=now, day_state={}, pings={"checkin": "12:00"}, owner_seen=True,
                         muted=False, tags=set(), entries_today=1, wake_time=None,
-                        shift=shift, in_study_block=False, last_msg=now.strftime("%H:%M"))
+                        shift=shift, in_study_block=False,
+                        last_msg=(now - timedelta(hours=2)).strftime("%H:%M"))
 
 
 def _decision_at(monkeypatch, hour, minute=0):

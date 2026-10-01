@@ -501,7 +501,7 @@ TOOL_SCHEMAS = [
             "name": "mute_notifications",
             "description": (
                 "Silence proactive bot messages. Default scope='pings' mutes ONLY "
-                "day-ticker check-ins (meal/training/study/checkin) — morning digest, "
+                "day-ticker pings (leave reminders, meal, training, follow-ups) — morning digest, "
                 "deadline reminders and evening summary KEEP arriving. scope='all' = "
                 "total silence, use ONLY when owner explicitly wants everything off "
                 "(«вообще ничего не присылай», «полная тишина», «фул мут»). Replies to "
