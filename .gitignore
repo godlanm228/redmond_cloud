@@ -33,6 +33,8 @@ config/config.local.json
 
 # Runtime data
 data/*.sqlite
+data/*.sqlite-wal
+data/*.sqlite-shm
 data/*.faiss
 data/sensitive/
 data/sensitive_restored/
