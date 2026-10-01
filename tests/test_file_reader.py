@@ -297,3 +297,37 @@ def test_breaks_come_as_text_and_several_are_fine(october):
     assert ws.study_slots(date(2027, 2, 1)) == [] and ws.study_slots(date(2027, 2, 8))
     bad = tools.execute_tool("extend_schedule", {"until": "2027-02-12", "breaks": "после сессии"})
     assert "не разобрал" in bad
+
+
+# ---------------------------------------------------------------------------
+# The answer to an agent's question finds the tools to act on it
+# ---------------------------------------------------------------------------
+
+def test_a_question_carries_its_tools_into_the_answer():
+    """01.10.2026: «до 12 февраля, на рождество с 23.12 по 05.01 пар нет» в ответ на
+    «до какого числа продлить?» — у Iris не было инструментов расписания."""
+    from logic import response_generator as rgm
+    from logic import tool_select, toolbox
+    from logic.understanding import Understanding
+    g = object.__new__(rgm.ResponseGenerator)
+    all_tools = toolbox.model_tools(None)
+    tool_select.remember_question(7, "Iris", ["schedule", "get_current_time"])
+    ctx = SimpleNamespace(understanding=Understanding(addressee="Iris"), needs=None,
+                          user_text="до 12 февраля, на рождество с 23.12 по 05.01 пар нет",
+                          query_vec=None, chat_id=7)
+    offered, _ = g._select_tools(ctx, "Iris", all_tools)
+    assert "schedule" in {s["function"]["name"] for s in offered}
+
+    offered, _ = g._select_tools(ctx, "Iris", all_tools)
+    assert "schedule" not in {s["function"]["name"] for s in offered}, "один раз, не навсегда"
+
+    tool_select.remember_question(7, "Iris", ["schedule"])
+    offered, _ = g._select_tools(ctx, "Redmond", all_tools)
+    assert "schedule" not in {s["function"]["name"] for s in offered}, "чужой вопрос — не наш"
+
+
+def test_what_counts_as_a_question():
+    from logic.response_generator import _asks
+    assert _asks("До какого числа продлить?")
+    assert _asks("Продлить до 12.02?\n\n🗓 Расписание продлено: …")
+    assert not _asks("Готово, продлила до 12.02.")

@@ -446,6 +446,12 @@ def _owner_words_to_iris(result: str, ctx: "GenerationContext") -> str:
     return DELEGATION_MARKER + json.dumps(payload, ensure_ascii=False)
 
 
+def _asks(response: str) -> bool:
+    """Ответ заканчивается вопросом владельцу (квитанция под ним не в счёт)."""
+    text = re.split(r"\n\s*(?:📝|🗓|🗑|⏰|🎯|✅|👤|🍽|🧺|🔕|📎)", str(response or ""))[0]
+    return text.rstrip(" \n*_)»\"").endswith("?")
+
+
 def _is_system_prompt(text: str) -> bool:
     """Промпт, написанный кодом, а не владельцем: «(scheduled…)», «(фото еды)»."""
     return (text or "").lstrip().startswith("(")
@@ -614,6 +620,7 @@ class GenerationContext:
     # фото → schedule/food). Те же имена, что needs у прочтения. None — код
     # ничего не сказал.
     needs: Optional[List[str]] = None
+    chat_id: int = 0
     # Какие модели дали ходы этого ответа (по шагу на вызов): без этого в логе
     # не видно, кто ответил, если отвечала основная модель пула.
     models: List[str] = field(default_factory=list)
@@ -738,6 +745,7 @@ class ResponseGenerator:
             # Без истории зовут только плановые задачи (скедулер).
             priority=llm_gate.OWNER if include_history else llm_gate.BACKGROUND,
             needs=list(needs) if needs is not None else None,
+            chat_id=chat_id,
         )
         if understanding is not None and include_history:
             # Срочность — из прочтения с цитатой, а не из списка слов: «в больнице
@@ -802,6 +810,10 @@ class ResponseGenerator:
             # имя здесь не передавалось: в базе у всех реплик agent='', и после
             # рестарта роутер считал, что последним говорил Redmond.
             who = ctx.agent.name if ctx.agent else "Redmond"
+            if not ctx.failed and _asks(response) and ctx.offered_tools:
+                from logic import tool_select, toolbox
+                tool_select.remember_question(
+                    chat_id, who, {toolbox.GROUPED.get(n, (n,))[0] for n in ctx.offered_tools})
             if not ctx.failed:
                 self._save_interaction(user_text, response, chat_id, agent=who)
             elif not _is_system_prompt(user_text):
@@ -1536,6 +1548,21 @@ class ResponseGenerator:
 
     def _select_tools(self, ctx: GenerationContext, agent_name: str,
                       tools: List[dict]) -> Tuple[List[dict], List[dict]]:
+        """Отбор + инструменты, унаследованные от вопроса агента (tool_select.carried)."""
+        offered, deferred = self._select_tools_base(ctx, agent_name, tools)
+        if deferred and not _is_system_prompt(getattr(ctx, "user_text", "")):
+            from logic import tool_select
+            carry = tool_select.carried(getattr(ctx, "chat_id", 0), agent_name)
+            moved = [s for s in deferred if s["function"]["name"] in carry]
+            if moved:
+                offered = offered + moved
+                deferred = [s for s in deferred if s not in moved]
+                logger.info("Отбор [%s]: от вопроса унаследованы %s", agent_name,
+                            ", ".join(s["function"]["name"] for s in moved))
+        return offered, deferred
+
+    def _select_tools_base(self, ctx: GenerationContext, agent_name: str,
+                           tools: List[dict]) -> Tuple[List[dict], List[dict]]:
         from logic import tool_select
         needs = getattr(ctx, "needs", None)
         if needs is not None:

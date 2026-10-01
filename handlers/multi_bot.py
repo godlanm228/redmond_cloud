@@ -775,6 +775,9 @@ async def redmond_document_handler(update: Update, context: ContextTypes.DEFAULT
         st: RouterState = get_state(context.application.bot_data["router_states"], chat_id)
         st.add("assistant", outcome.question, asker.name)
         st.last_agent_name = asker.name
+        # Ответ на вопрос о файле должен застать инструменты, которыми его исполнить.
+        from logic import tool_select
+        tool_select.remember_question(chat_id, asker.name, ["schedule", "files", "deadlines"])
 
 
 # Сколько назад его сообщения ещё считаются словами к файлу.

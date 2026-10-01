@@ -133,6 +133,54 @@ def select(agent_name: str, user_text: str, tools: Sequence[dict],
     return offered, deferred, how
 
 
+# ---------------------------------------------------------------------------
+# A question carries its tools into the answer
+# ---------------------------------------------------------------------------
+#
+# 01.10.2026: Iris asked «до какого числа продлить?», he answered «до 12
+# февраля, на рождество с 23.12 по 05.01 пар нет» — and the reading of that
+# answer named no needs, so her next turn had no schedule tools: she could
+# only say «записала» while nothing was extended. An agent that ends its turn
+# with a question gets the same tools for the answer.
+
+CARRY_MINUTES = 30
+
+
+def _carry_key(chat_id: int) -> str:
+    return f"carry_tools:{chat_id}"
+
+
+def remember_question(chat_id: int, agent_name: str, tool_names: Iterable[str]) -> None:
+    """The agent asked the owner something; keep its tools for the answer."""
+    from utils import db
+    from utils.time import now_local
+    names = sorted(set(tool_names) - {LOAD_TOOLS})
+    if not chat_id or not names:
+        return
+    db.kv_set(_carry_key(chat_id), {"agent": agent_name, "tools": names,
+                                    "at": now_local().isoformat(timespec="seconds")})
+
+
+def carried(chat_id: int, agent_name: str) -> Set[str]:
+    """Tools carried from the agent's question, once. Empty if none or stale."""
+    from datetime import datetime, timedelta
+    from utils import db
+    from utils.time import now_local
+    if not chat_id:
+        return set()
+    data = db.kv_get(_carry_key(chat_id), None)
+    if not data or data.get("agent") != agent_name:
+        return set()
+    db.kv_set(_carry_key(chat_id), {})
+    try:
+        at = datetime.fromisoformat(data["at"])
+    except (KeyError, ValueError):
+        return set()
+    if now_local() - at > timedelta(minutes=CARRY_MINUTES):
+        return set()
+    return set(data.get("tools") or [])
+
+
 def apply_load(requested: Iterable[str], deferred: List[dict],
                offered: List[dict]) -> Tuple[List[str], List[str]]:
     """Move requested tools from deferred to offered. Returns (loaded, unknown)."""
