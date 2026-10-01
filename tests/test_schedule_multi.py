@@ -157,7 +157,7 @@ def test_removing_an_event_needs_its_id_from_a_view(oct5):
     row = ws.add_event("Tennis", "sport", "20:00", "21:30", weekly_from=DAY)
     session = tools.ToolSession()
     blind = tools.execute_tool("remove_schedule_event", {"event_id": row}, None, session=session)
-    assert "Убрала" not in blind
+    assert "Убрано" not in blind
     tools.execute_tool("get_week_schedule", {"days": 8}, None, session=session)
     out = tools.execute_tool("remove_schedule_event", {"event_id": row, "date": "2026-10-19"},
                              None, session=session)
@@ -168,10 +168,10 @@ def test_removing_an_event_needs_its_id_from_a_view(oct5):
 def test_an_event_without_a_kind_or_with_half_a_time_is_refused(oct5):
     out = tools.execute_tool("add_schedule_event",
                              {"title": "X", "kind": "party", "date": D})
-    assert "Не добавила" in out
+    assert "Не добавлено" in out
     out = tools.execute_tool("add_schedule_event",
                              {"title": "X", "kind": "other", "date": D, "start": "10:00"})
-    assert "Не добавила" in out
+    assert "Не добавлено" in out
 
 
 # ---------------------------------------------------------------------------

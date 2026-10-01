@@ -80,11 +80,11 @@ def test_unclear_file_records_nothing_and_waits_for_his_word(monkeypatch):
     assert "не записывал" in out.reply and out.question
 
     applied = tools.execute_tool("apply_file_items", {"what": "schedule"})
-    assert "Записала из файла" in applied
+    assert "Записано из файла" in applied
     assert ws.study_slots(date(2026, 10, 5))
 
     undone = tools.execute_tool("undo_file_items", {})
-    assert "Убрала" in undone
+    assert "Убрано" in undone
     assert ws.study_slots(date(2026, 10, 5)) == []
 
 
@@ -212,8 +212,8 @@ def test_extend_to_a_date_with_a_christmas_break(october):
 
 
 def test_extend_with_no_end_until_he_says_stop(october):
-    out = tools.execute_tool("extend_schedule", {"until": None})
-    assert "без конца" in out and "Каникулы не указаны" in out
+    out = tools.execute_tool("extend_schedule", {"until": None, "breaks": []})
+    assert "без конца" in out and "Без перерывов" in out
     assert ws.study_slots(date(2027, 6, 7))
     stop = tools.execute_tool("stop_schedule_extension", {"last_day": "2026-12-18"})
     assert "до 18.12.2026" in stop
@@ -221,20 +221,29 @@ def test_extend_with_no_end_until_he_says_stop(october):
 
 
 def test_extending_again_replaces_not_doubles(october):
-    tools.execute_tool("extend_schedule", {"until": "2027-02-12"})
+    tools.execute_tool("extend_schedule", {"until": "2027-02-12", "breaks": []})
     once = len(ws.study_slots(date(2026, 11, 2)))
     tools.execute_tool("extend_schedule", {"until": "2026-12-18"})
     assert once and len(ws.study_slots(date(2026, 11, 2))) == once
     assert ws.study_slots(date(2027, 1, 11)) == []
 
 
+def test_over_christmas_the_break_must_be_decided_not_assumed(october):
+    """01.10.2026: «продли до конца семестра» поставил пары на всё Рождество."""
+    out = tools.execute_tool("extend_schedule", {"until": "2027-02-12"})
+    assert "Не продлено" in out and "Рождество" in out
+    assert ws.study_slots(date(2026, 11, 2)) == [], "ничего не записано, пока не решено"
+    assert "Расписание продлено" in tools.execute_tool(
+        "extend_schedule", {"until": "2026-12-18"}), "до Рождества — спрашивать незачем"
+
+
 def test_an_end_before_the_file_ends_is_refused_honestly(october):
     out = tools.execute_tool("extend_schedule", {"until": "2026-10-20"})
-    assert "Не продлила" in out
+    assert "Не продлено" in out
 
 
 def test_undoing_the_file_takes_its_extension_too(october):
-    tools.execute_tool("extend_schedule", {"until": "2027-02-12"})
+    tools.execute_tool("extend_schedule", {"until": "2027-02-12", "breaks": []})
     tools.execute_tool("undo_file_items", {})
     assert ws.study_slots(date(2026, 11, 2)) == [] and ws.study_slots(date(2026, 10, 5)) == []
     assert _titles(date(2026, 10, 5)) == ["Настольный теннис"]

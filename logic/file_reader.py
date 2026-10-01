@@ -246,7 +246,23 @@ _CAL_RULE_PARSED = ("The calendar events are already parsed by code — return "
                     "\"schedule_items\": [] and decide only do_now for \"schedule\".")
 
 
+def _parse(answer: str) -> Optional[Dict[str, Any]]:
+    """JSON object from a model answer, fenced or not. None if there is none."""
+    text = re.sub(r"^```(?:json)?\s*|\s*```\s*$", "", (answer or "").strip())
+    m = re.search(r"\{.*\}", text, re.DOTALL)
+    if not m:
+        return None
+    try:
+        data = json.loads(m.group(0))
+    except json.JSONDecodeError:
+        return None
+    return data if isinstance(data, dict) else None
+
+
 def _ask_gemini(prompt: str, content: FileContent) -> Tuple[str, str]:
+    """First Gemini of the vision pool (it takes PDFs and images) whose answer
+    parses. 01.10.2026 gemini-2.5-flash answered with a fenced, broken JSON and
+    the reading gave up although other models were open."""
     from utils import llm_gate
     from utils.gemini import extract_text, generate
     parts: List[Dict[str, Any]] = [{"text": prompt}]
@@ -254,10 +270,13 @@ def _ask_gemini(prompt: str, content: FileContent) -> Tuple[str, str]:
         parts.append({"inline_data": {"mime_type": content.inline_mime,
                                       "data": content.inline_b64}})
     for model in llm_gate.open_models(llm_gate.pool("vision")):
-        out = extract_text(generate(parts, model=model, temperature=0.1, max_tokens=3000,
+        out = extract_text(generate(parts, model=model, temperature=0.1, max_tokens=4000,
                                     timeout=120.0))
-        if out:
+        if out and _parse(out) is not None:
             return out, model
+        if out:
+            logger.warning("Файл «%s»: ответ %s не JSON — пробую следующую модель",
+                           content.name, model)
     return "", ""
 
 
@@ -278,16 +297,10 @@ def understand(content: FileContent, owner_words: Sequence[str]) -> Optional[Dic
         from utils import llm
         answer, model = llm.text("chat_groq", prompt(content.text[:GROQ_TEXT_CHARS]),
                                  max_tokens=1800, temperature=0.1)
-    if not answer:
-        logger.warning("Файл «%s»: ни одна модель не прочитала", content.name)
-        return None
-    m = re.search(r"\{.*\}", answer, re.DOTALL)
-    try:
-        data = json.loads(m.group(0)) if m else None
-    except json.JSONDecodeError:
-        data = None
-    if not isinstance(data, dict):
-        logger.warning("Файл «%s»: ответ %s не JSON: %s", content.name, model, answer[:200])
+    data = _parse(answer)
+    if data is None:
+        logger.warning("Файл «%s»: ни одна модель не прочитала%s", content.name,
+                       f" (последний ответ {model}: {answer[:200]})" if answer else "")
         return None
     logger.info("Файл «%s» прочитан моделью %s", content.name, model)
     return _validated(data, content)

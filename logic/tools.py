@@ -654,7 +654,8 @@ TOOL_SCHEMAS = [
                               "description": "YYYY-MM-DD last day; null = no end"},
                     "breaks": {
                         "type": ["array", "null"],
-                        "description": "Days without classes",
+                        "description": "Days without classes. Over Christmas this must be "
+                                       "decided: his dates, or [] if he said there is no break",
                         "items": {"type": "object", "properties": {
                             "from": {"type": "string", "description": "YYYY-MM-DD"},
                             "to": {"type": "string", "description": "YYYY-MM-DD"}},
@@ -1563,13 +1564,13 @@ def _tool_add_schedule_event(args: Dict[str, Any]) -> str:
     try:
         first = datetime.strptime(str(args.get("date") or "").strip(), "%Y-%m-%d").date()
     except ValueError:
-        return "Нужна дата YYYY-MM-DD — событие не добавила."
+        return "Нужна дата YYYY-MM-DD — событие не добавлено."
     until = None
     if args.get("until"):
         try:
             until = datetime.strptime(str(args["until"]).strip(), "%Y-%m-%d").date()
         except ValueError:
-            return f"Дата конца серии «{args['until']}» не в формате YYYY-MM-DD — не добавила."
+            return f"Дата конца серии «{args['until']}» не в формате YYYY-MM-DD — не добавлено."
     start = _norm_hm(args.get("start")) or ""
     end = _norm_hm(args.get("end")) or ""
     weekly = bool(args.get("weekly"))
@@ -1580,12 +1581,12 @@ def _tool_add_schedule_event(args: Dict[str, Any]) -> str:
             until=until if weekly else None, source="text",
         )
     except ValueError as e:
-        return f"Не добавила: {e}."
+        return f"Не добавлено: {e}."
     from logic.week_schedule import timetable_rows
     row = next((r for r in timetable_rows() if r["id"] == row_id), {})
     when = (f"каждый {_WEEKDAY_ACC[first.weekday()]} с {first:%d.%m}"
             + (f" по {until:%d.%m}" if until else "")) if weekly else f"{first:%d.%m}"
-    return f"Добавила в расписание: {describe_event(row)} — {when}."
+    return f"Добавлено в расписание: {describe_event(row)} — {when}."
 
 
 def _parse_day(raw: Any) -> Optional[date]:
@@ -1602,30 +1603,49 @@ def _tool_extend_schedule(args: Dict[str, Any]) -> str:
     if args.get("until"):
         until = _parse_day(args["until"])
         if until is None:
-            return f"Дата «{args['until']}» не в формате YYYY-MM-DD — не продлила."
+            return f"Дата «{args['until']}» не в формате YYYY-MM-DD — не продлено."
     breaks = []
+    breaks_said = "breaks" in args  # [] = «перерыва нет»; не передано = не спрошено
     for b in args.get("breaks") or []:
         a, z = _parse_day((b or {}).get("from")), _parse_day((b or {}).get("to"))
         if a is None or z is None or z < a:
-            return f"Каникулы {b} — нужны from/to в формате YYYY-MM-DD — не продлила."
+            return f"Каникулы {b} — нужны from/to в формате YYYY-MM-DD — не продлено."
         breaks.append((a, z))
     ref = _parse_day(args.get("reference_date")) if args.get("reference_date") else None
+    if not breaks_said and _crosses_christmas(until):
+        # Правило владельца: не указано и не очевидно — спросить. Пары через
+        # Рождество молча — ровно то, что 01.10.2026 пришлось сносить руками.
+        return ("Не продлено: период захватывает Рождество, а про перерыв ничего не "
+                "сказано. Спроси его, есть ли каникулы (с какого по какое), и вызови "
+                "снова с breaks — или с breaks=[] если перерыва нет.")
     res = extend_weekly(until, breaks, reference=ref)
     if res.error:
-        return f"Не продлила: {res.error}."
+        return f"Не продлено: {res.error}."
     span = (f"с {res.first:%d.%m.%Y} по {until:%d.%m.%Y}" if until
             else f"с {res.first:%d.%m.%Y} без конца — пока он не скажет «стоп»")
-    lines = [f"Продлила расписание: неделя {res.reference:%d.%m}–"
+    lines = [f"Расписание продлено: неделя {res.reference:%d.%m}–"
              f"{res.reference + timedelta(days=6):%d.%m} повторяется каждую неделю {span}."]
     for s in sorted(res.series, key=lambda r: (r["weekday"], r["start"])):
         when = f"{s['start']}–{s['end']}" if s["start"] else "весь день"
         lines.append(f"• {_DAY_NAMES[s['weekday']]} {when} {s['title']}")
     if breaks:
         lines.append("Без пар: " + ", ".join(f"{a:%d.%m}–{z:%d.%m}" for a, z in breaks) + ".")
+    elif breaks_said:
+        lines.append("Без перерывов — так он сказал.")
     elif until is None or (until - res.first).days > 40:
         lines.append("Каникулы не указаны — пары стоят и на праздниках; если есть перерыв, "
                      "спроси его даты.")
     return "\n".join(lines)
+
+
+def _crosses_christmas(until: Optional[date]) -> bool:
+    from utils.time import now_local
+    today = now_local().date()
+    for year in (today.year, today.year + 1):
+        xmas = date(year, 12, 24)
+        if xmas >= today and (until is None or until >= xmas):
+            return True
+    return False
 
 
 def _tool_stop_schedule_extension(args: Dict[str, Any]) -> str:
@@ -1633,7 +1653,7 @@ def _tool_stop_schedule_extension(args: Dict[str, Any]) -> str:
 
     last = _parse_day(args.get("last_day"))
     if last is None:
-        return "Нужна дата YYYY-MM-DD — ничего не изменила."
+        return "Нужна дата YYYY-MM-DD — ничего не изменено."
     n = stop_extension(last)
     if not n:
         return "Продлённого расписания нет — останавливать нечего."
@@ -1665,7 +1685,7 @@ def _tool_apply_file_items(args: Dict[str, Any]) -> str:
     if not lines:
         return f"В файле #{rec_id} «{raw.get('name')}» нет того, что можно записать ({what})."
     vision_archive.update(rec_id, raw, "; ".join(lines)[:500])
-    return f"Записала из файла #{rec_id} «{raw.get('name')}»:\n" + "\n".join(lines)
+    return f"Записано из файла #{rec_id} «{raw.get('name')}»:\n" + "\n".join(lines)
 
 
 def _tool_undo_file_items(args: Dict[str, Any]) -> str:
@@ -1679,7 +1699,7 @@ def _tool_undo_file_items(args: Dict[str, Any]) -> str:
     if not lines:
         return f"Из файла #{rec_id} «{raw.get('name')}» ничего не записано — убирать нечего."
     vision_archive.update(rec_id, raw, "отменено: " + "; ".join(lines))
-    return f"Убрала то, что было из файла #{rec_id} «{raw.get('name')}»: " + "; ".join(lines) + "."
+    return f"Убрано то, что было из файла #{rec_id} «{raw.get('name')}»: " + "; ".join(lines) + "."
 
 
 _WEEKDAY_ACC = ["понедельник", "вторник", "среду", "четверг", "пятницу", "субботу",
@@ -1693,17 +1713,17 @@ def _tool_remove_schedule_event(args: Dict[str, Any]) -> str:
     try:
         row_id = int(args.get("event_id"))
     except (TypeError, ValueError):
-        return "Нужен #id события из расписания — ничего не убрала."
+        return "Нужен #id события из расписания — ничего не убрано."
     raw = str(args.get("date") or "").strip()
     try:
         on = datetime.strptime(raw, "%Y-%m-%d").date() if raw else now_local().date()
     except ValueError:
-        return f"Дата «{raw}» не в формате YYYY-MM-DD — ничего не убрала."
+        return f"Дата «{raw}» не в формате YYYY-MM-DD — ничего не убрано."
     row = next((r for r in timetable_rows() if r["id"] == row_id), None)
     if row is None:
-        return f"События #{row_id} в расписании нет — ничего не убрала."
+        return f"События #{row_id} в расписании нет — ничего не убрано."
     done = remove_event(row_id, on)
-    return f"Убрала из расписания: {describe_event(row)} — {done}."
+    return f"Убрано из расписания: {describe_event(row)} — {done}."
 
 
 def _tool_set_work_shift_status(args: Dict[str, Any]) -> str:
