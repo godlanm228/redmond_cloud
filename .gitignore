@@ -45,6 +45,8 @@ data/coach/
 data/daily_log.md
 # Scenario runs: real conversations and the bot's replies to them (evals/).
 data/evals/
+# Photos and files the owner sent (utils/vision_archive) — personal, never in git.
+data/vision/
 
 # OS
 .DS_Store

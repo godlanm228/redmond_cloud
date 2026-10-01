@@ -55,13 +55,15 @@ class FakeMedia:
 
 
 @pytest.fixture
-def bot(monkeypatch):
+def bot(monkeypatch, tmp_path):
     monkeypatch.setenv("ALLOWED_USER_IDS", str(OWNER))
     monkeypatch.setenv("MAIN_CHAT_ID", str(CHAT))
     fixed = datetime(2026, 10, 1, 16, 0, tzinfo=OWNER_TZ)
     monkeypatch.setattr(ci, "now_local", lambda: fixed)
     monkeypatch.setattr(ws, "now_local", lambda: fixed)
     monkeypatch.setattr(multi_bot, "ALBUM_WAIT_SEC", 0.05)
+    import utils.vision_archive
+    monkeypatch.setattr(utils.vision_archive, "ARCHIVE_DIR", tmp_path / "vision")
     coordinator = FakeCoordinator()
     notes = []
     rg = SimpleNamespace(note_to_history=lambda chat, user, note, agent="": notes.append(note),
