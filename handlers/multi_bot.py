@@ -259,6 +259,10 @@ async def _understand(text: str, context: ContextTypes.DEFAULT_TYPE, chat_id: in
     детектор острой ситуации), ответ от этого шага не зависит."""
     if not text or text.lstrip().startswith("("):
         return None
+    from logic.agent_router import content_free
+    if content_free(text):
+        logger.info("Понимание пропущено: «%s» — без содержания", text[:30])
+        return None
     from logic import understanding
     state = get_state(context.application.bot_data["router_states"], chat_id)
     history = [{"who": "Влад" if m.get("role") == "user" else (m.get("agent") or "бот"),
@@ -870,7 +874,9 @@ async def _route_and_respond(
         clean_text = explicit.strip_trigger(text) or "(привет)"
         understood = await _understand(clean_text, context, chat_id, reply_to_agent)
         if agent.name == "Redmond":
+            from logic.agent_router import content_free
             needs_research = (understood.research if understood is not None
+                              else False if content_free(clean_text)
                               else llm_research_flag(clean_text, state, groq_key))
     else:
         clean_text = text

@@ -134,11 +134,15 @@ def _slot_decision(situation, now) -> Optional[Tuple[str, str]]:
         ws = parse_hm(wake, now)
         if ws is not None and (ws + timedelta(minutes=15) <= now
                                <= ws + timedelta(minutes=GREETING_WINDOW_MIN)):
+            from logic.memory_review import take_morning_question
+            question = take_morning_question(now.date())
+            ask = (f" Вместо вопроса про план задай вопрос из ночного разбора: «{question}» "
+                   f"(своими словами, коротко)." if question
+                   else " И один лёгкий вопрос про план.")
             return ("greeting", (
                 f"Влад проснулся недавно (в {wake}) и на связи. Поздоровайся тепло и "
                 f"коротко, по-человечески, дай сводку дня из STATE (смена/лекции/горящие "
-                f"дедлайны если есть) и один лёгкий вопрос про план. Без списка на "
-                f"полэкрана, без давления."
+                f"дедлайны если есть).{ask} Без списка на полэкрана, без давления."
             ))
 
     # --- 0c. Смена есть, но запись старая/неуверенная: один аккуратный чек.

@@ -326,6 +326,21 @@ async def model_watch(
     await _send_alert(coordinator, chat_id, "model_watch", "Redmond", "🦞", text)
 
 
+async def nightly_review(
+    dispatcher: Dispatcher,
+    coordinator: Coordinator,
+    chat_id: int,
+    router_states: Optional[dict] = None,
+) -> None:
+    """Ночной разбор памяти (logic/memory_review): молча, ничего не отправляет —
+    готовит итог вчерашнего дня, отчёт об устаревшем и вопрос на утро."""
+    from logic import memory_review
+    try:
+        await asyncio.to_thread(memory_review.nightly_review)
+    except Exception:
+        logger.exception("Ночной разбор упал")
+
+
 # ---------- сборка ----------
 
 def setup_scheduler(
@@ -363,6 +378,10 @@ def setup_scheduler(
     # (плюс на каждом старте, см. model_healthcheck.run_and_log).
     sched.add_job(model_watch, CronTrigger(day_of_week="mon", hour=9, minute=15, timezone=tz),
                   args=args, id="model_watch", coalesce=True, misfire_grace_time=3600)
+    # Пока он спит (смены до полуночи, подъём к полудню) и лимиты моделей свежие:
+    # Gemini сбрасывается в 09:00 Berlin, Groq — по минутам.
+    sched.add_job(nightly_review, CronTrigger(hour=5, minute=0, timezone=tz), args=args,
+                  id="nightly_review", coalesce=True, misfire_grace_time=7200)
 
     # Диагностика: явно логируем выполнение/пропуск/ошибку джоб. Раньше misfire
     # был невидим (apscheduler-логгер подавлен), причину сбоя нельзя было понять.

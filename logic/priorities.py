@@ -134,6 +134,10 @@ def build_day_context() -> str:
     covered = coverage()
     if covered:
         lines.append(f"  {covered}")
+    from logic.memory_review import last_week_line, yesterday_line
+    for line in (yesterday_line(now.date()), last_week_line(now.date())):
+        if line:
+            lines.append(f"  {line}")
 
     tomorrow = get_shifts(now.date() + timedelta(days=1))
     if tomorrow:
