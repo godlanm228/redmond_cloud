@@ -309,6 +309,37 @@ def extend_weekly(until: Optional[date], breaks: List[Tuple[date, date]] = (),
     return result
 
 
+def coverage() -> str:
+    """До какой даты в расписании есть пары — одной строкой, из данных.
+
+    01.10.2026: данные удалили, а реплика Iris «продлила до 12.02» осталась в
+    истории, и на «продли» она ответила «уже продлено». Что лежит в расписании
+    сейчас, агент берёт отсюда, а не из старых реплик."""
+    last = db.query_one(
+        "SELECT MAX(date) d FROM timetable WHERE date IS NOT NULL AND kind IN ('lecture','home_study')"
+        " AND origin NOT LIKE ?", (EXTEND_PREFIX + "%",))
+    ext = db.query(
+        "SELECT valid_to FROM timetable WHERE origin LIKE ? AND date IS NULL",
+        (EXTEND_PREFIX + "%",))
+    breaks = [r["date"] for r in db.query(
+        "SELECT date FROM timetable WHERE origin LIKE ? AND kind='rest' ORDER BY date",
+        (EXTEND_PREFIX + "%",))]
+    if not (last and last["d"]) and not ext:
+        return ""
+    fmt = lambda s: datetime.strptime(s, "%Y-%m-%d").strftime("%d.%m.%Y")  # noqa: E731
+    parts = [f"пары по датам из календаря — по {fmt(last['d'])}" if last and last["d"]
+             else "пар по датам нет"]
+    if ext:
+        ends = [r["valid_to"] for r in ext]
+        parts.append("продлено без конца" if None in ends
+                     else f"продлено еженедельно до {fmt(max(ends))}")
+        if breaks:
+            parts.append(f"без пар {fmt(breaks[0])}–{fmt(breaks[-1])}")
+    else:
+        parts.append("не продлено")
+    return "Расписание пар (из данных): " + "; ".join(parts) + "."
+
+
 def stop_extension(last_day: date) -> int:
     """«Стоп, дальше без пар»: продлённые серии заканчиваются last_day включительно.
     Возвращает, сколько серий закончено."""

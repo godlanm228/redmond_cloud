@@ -121,6 +121,11 @@ def build_day_context() -> str:
         lines.append("  Недавнее (последняя запись по теме — не говори «нет записей» вслепую):")
         lines += recent_lines
 
+    from logic.week_schedule import coverage
+    covered = coverage()
+    if covered:
+        lines.append(f"  {covered}")
+
     tomorrow = get_shifts(now.date() + timedelta(days=1))
     if tomorrow:
         lines.append("  Завтра: " + "; ".join(

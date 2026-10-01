@@ -264,3 +264,18 @@ def test_events_from_his_words_or_from_what_was_read_pass():
     ctx = _ctx("перенеси это на четверг",
                actions=[("get_week_schedule", {}, "пн 05.10: 12:20–14:00 Diskrete Mathematik #12")])
     assert _ungrounded_write("add_schedule_event", {"title": "Diskrete Mathematik"}, ctx) == ""
+
+
+# ---------------------------------------------------------------------------
+# What is in the schedule comes from data, not from old replies
+# ---------------------------------------------------------------------------
+
+def test_the_day_state_says_how_far_the_schedule_goes(october):
+    from logic.priorities import build_day_context
+    assert "по 30.10.2026" in build_day_context() and "не продлено" in build_day_context()
+    tools.execute_tool("extend_schedule", {
+        "until": "2027-02-12", "breaks": [{"from": "2026-12-23", "to": "2027-01-05"}]})
+    state = build_day_context()
+    assert "продлено еженедельно до 12.02.2027" in state and "без пар 23.12.2026–05.01.2027" in state
+    tools.execute_tool("undo_file_items", {})
+    assert "продлено" not in build_day_context().replace("не продлено", "")
