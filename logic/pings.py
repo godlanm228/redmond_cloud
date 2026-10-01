@@ -250,6 +250,12 @@ def _candidates(situation, now):
         if not commute or not start or start <= now:
             continue
         leave = start - timedelta(minutes=commute)
+        # Он ещё на предыдущем занятии (пары подряд в одном кампусе) — выходить
+        # никуда не надо. Симуляция 05.10: «выходить в 13:05 на 14:05» посреди пары.
+        busy = any((_at(today, o["end"], now) or start) > leave - timedelta(minutes=30)
+                   for o in events if o is not e and o["start"] < e["start"])
+        if busy:
+            break
         if leave - timedelta(minutes=LEAVE_WINDOW[0]) <= now <= leave - timedelta(minutes=LEAVE_WINDOW[1]):
             where = f" ({e['place']})" if e["place"] else ""
             yield (f"leave:{e['start']}", (

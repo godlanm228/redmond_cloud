@@ -125,3 +125,11 @@ def test_one_message_after_two_silent_days(clock):
 def test_three_a_day_at_most(clock):
     full = {"greeting": "12:00", "meal": "14:00", "followup": "16:00"}
     assert decide(clock, at(18), pings_today=full) is None
+
+
+def test_no_leave_reminder_between_classes_on_the_same_campus(clock):
+    """Симуляция 05.10: в 12:30, посреди пары, «выходить в 13:05 на 14:05»."""
+    ws.add_event("Diskrete Mathematik", "lecture", "12:20", "14:00", on=MON.date())
+    ws.add_event("Praktikum", "lecture", "14:05", "15:45", on=MON.date())
+    assert decide(clock, at(12, 30), seen=False) is None
+    assert decide(clock, at(10, 50), seen=False)[0] == "leave:12:20"
