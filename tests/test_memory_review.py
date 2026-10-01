@@ -64,7 +64,7 @@ def test_without_a_model_the_question_comes_from_the_stale_report():
     db.execute("UPDATE pantry SET added='2026-06-18'")
     review = mr.nightly_review(ask=lambda p: None)
     assert review["source"] == "nightly_review:code_only"
-    assert "запас еды" in review["question"]
+    assert "запас еды" in review["question"] and ".." not in review["question"]
 
 
 def test_the_morning_question_is_asked_once_and_only_that_day():

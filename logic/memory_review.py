@@ -187,7 +187,7 @@ def nightly_review(now: Optional[datetime] = None, ask=None) -> Dict[str, Any]:
     }
     if not review["question"] and stale:
         # Модели нет или промолчала — вопрос по первому устаревшему, словами кода.
-        review["question"] = f"Ночной разбор: {stale[0]}. Это ещё актуально?"
+        review["question"] = f"Ночной разбор: {stale[0].rstrip('.')}. Это ещё актуально?"
     db.kv_set(REVIEW_KEY, review)
 
     summary = str((data or {}).get("day_summary") or "").strip()
